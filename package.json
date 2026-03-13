@@ -1,0 +1,22 @@
+{
+  "name": "ccl-land-scraper",
+  "version": "2.0.0",
+  "description": "Classic Country Land LLC - Automated land acquisition pipeline",
+  "main": "index.js",
+  "scripts": {
+    "scrape": "node index.js",
+    "review": "node review-leads.js",
+    "price-check": "node index.js --price-check-only",
+    "test": "node --test test/"
+  },
+  "dependencies": {
+    "airtable": "^0.12.2",
+    "cheerio": "^1.0.0",
+    "dotenv": "^16.4.5",
+    "node-fetch": "^2.7.0",
+    "puppeteer": "^22.6.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

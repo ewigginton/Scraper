@@ -1,0 +1,38 @@
+{
+  "filtering": {
+    "minAcres": 40,
+    "newLeadThreshold": 0.20,
+    "watchThreshold": 0.30,
+    "defaultLookbackDays": 30
+  },
+  "scraper": {
+    "maxConcurrentSites": 2,
+    "requestDelayMs": 2000,
+    "requestTimeoutMs": 30000,
+    "maxRetries": 3,
+    "retryDelayMs": 5000
+  },
+  "priceCheck": {
+    "delayBetweenChecksMs": 3000,
+    "priceToleranceDollars": 5,
+    "expirationDays": 90
+  },
+  "dedup": {
+    "acreageRoundTo": 5,
+    "priceRoundTo": 5000
+  },
+  "review": {
+    "autoRejectThresholdPercent": 30,
+    "preferredAcresMin": 150,
+    "preferredAcresMax": 400,
+    "smallAcresMax": 100,
+    "domNegotiationDays": 180
+  },
+  "sites": {
+    "landwatch": { "enabled": true },
+    "landcom": { "enabled": true },
+    "landfarm": { "enabled": true },
+    "landsofamerica": { "enabled": true },
+    "livingthedream": { "enabled": true }
+  }
+}
