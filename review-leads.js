@@ -2,6 +2,8 @@
 
 require('dotenv').config();
 
+const airtable = require('./lib/airtable');
+const { initFilter } = require('./lib/filter');
 const { runReview } = require('./lib/review');
 const { runPriceCheck } = require('./lib/price-checker');
 const { sendReviewEmail } = require('./lib/notify');
@@ -25,6 +27,10 @@ async function main() {
   let reviewReport = null;
 
   try {
+    // Step 0: Load county targets from Airtable (needed for CPA lookups in review + price check)
+    const countyTargets = await airtable.loadCountyTargets();
+    initFilter(countyTargets.countyMap);
+
     // Step 1: Review and analyze new leads
     reviewReport = await runReview();
 

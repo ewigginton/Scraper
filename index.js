@@ -2,6 +2,8 @@
 
 require('dotenv').config();
 
+const airtable = require('./lib/airtable');
+const { initFilter } = require('./lib/filter');
 const { runScraper } = require('./lib/scraper');
 const { runPriceCheck } = require('./lib/price-checker');
 const { sendScraperEmail } = require('./lib/notify');
@@ -28,7 +30,12 @@ async function main() {
   try {
     // Step 1: Scrape new listings (unless price-check-only mode)
     if (!priceCheckOnly) {
+      // runScraper() loads county targets and inits the filter itself
       scraperReport = await runScraper();
+    } else {
+      // Price-check-only mode: still need county targets for CPA lookups
+      const countyTargets = await airtable.loadCountyTargets();
+      initFilter(countyTargets.countyMap);
     }
 
     // Step 2: Check for price drops on watched listings
