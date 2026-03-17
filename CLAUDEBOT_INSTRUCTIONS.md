@@ -231,12 +231,29 @@ node -e "
 
 At $4,000/ac with a $1,500/ac target, that listing should be **rejected** (167% over target).
 
+## Change Already Made: Large Tract Search Pass
+
+All 5 parsers now do **two search passes** per county:
+
+1. **Pass 1** (existing): `minAcres=40`, sorted by newest — catches recent listings of any size
+2. **Pass 2** (new): `minAcres=150`, sorted by newest — catches larger tracts that get pushed off the first few pages by the flood of smaller listings
+
+This is controlled by `filtering.largeTractMinAcres` in `config/settings.json` (default: 150). The dedup logic already handles overlap between the two passes — if the same listing appears in both, the second copy is caught as a duplicate.
+
+Page counts for Pass 2:
+- LandWatch: 3 pages
+- Land.com: 3 pages
+- LandAndFarm: 2 pages
+- LandsOfAmerica: 2 pages
+- LivingTheDreamLand: 2 pages
+
+This roughly doubles the scrape time but ensures 150-500+ acre tracts aren't missed.
+
 ## What NOT to Change
 
 - The filter logic itself (thresholds, stages, validation) stays the same
 - The dedup logic stays the same
-- The parsers stay the same (except removing old filter imports)
-- The `config/settings.json` stays the same
+- The `config/settings.json` stays the same (except `largeTractMinAcres` which is already added)
 - The Airtable field names for the Leads table stay the same
 
 ## Why This Matters

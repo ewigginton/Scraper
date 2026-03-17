@@ -1,6 +1,7 @@
 {
   "filtering": {
     "minAcres": 40,
+    "largeTractMinAcres": 150,
     "newLeadThreshold": 0.20,
     "watchThreshold": 0.30,
     "defaultLookbackDays": 30
