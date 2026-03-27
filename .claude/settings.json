@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd /home/user/Scraper && PUPPETEER_SKIP_DOWNLOAD=true npm install --silent 2>&1 | tail -1"
+          }
+        ]
+      }
+    ]
+  }
+}
