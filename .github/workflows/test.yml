@@ -61,6 +61,9 @@ jobs:
             require('dotenv').config();
             const airtable = require('./lib/airtable');
             airtable.loadCountyTargets().then(result => {
+              if (result.warning) {
+                console.log('WARNING: ' + result.warning);
+              }
               if (result.counties.length === 0) {
                 console.error('FAIL: Zero counties returned');
                 process.exit(1);
@@ -75,6 +78,7 @@ jobs:
               );
             }).catch(err => {
               console.error('FAIL:', err.message);
+              console.error(err.stack);
               process.exit(1);
             });
           "
@@ -89,17 +93,16 @@ jobs:
               console.log('URLs: ' + result.urlSet.size);
               console.log('Fingerprints: ' + result.fingerprintSet.size);
               console.log('Records: ' + result.records.length);
-              if (result.urlSet.size === 0 && result.records.length === 0) {
-                console.log('WARNING: Dedup index is empty — this may be a new/empty base');
-              }
             }).catch(err => {
               console.error('FAIL:', err.message);
+              console.error(err.stack);
               process.exit(1);
             });
           "
 
       - name: Dry-run scraper (first site only, 1 page)
         if: steps.creds.outputs.skip == 'false'
+        continue-on-error: true
         timeout-minutes: 3
         run: |
           node -e "
@@ -136,8 +139,12 @@ jobs:
                 }
               }
               console.log('Results: ' + passed + ' passed, ' + rejected + ' rejected out of ' + listings.length);
+              if (listings.length === 0) {
+                console.log('::warning::Zero listings parsed — site may be blocking GitHub Actions IPs');
+              }
             })().catch(err => {
-              console.error('FAIL:', err.message);
+              console.error('Scrape smoke test failed: ' + err.message);
+              console.error('This is expected if the site blocks datacenter IPs.');
               process.exit(1);
             });
           "
