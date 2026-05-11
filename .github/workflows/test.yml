@@ -1,0 +1,143 @@
+name: Tests
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    branches: ['**']
+
+permissions:
+  contents: read
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install dependencies
+        run: PUPPETEER_SKIP_DOWNLOAD=true npm ci
+
+      - name: Run unit tests
+        run: npm test
+
+  integration-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      AIRTABLE_LAND_TOKEN: ${{ secrets.AIRTABLE_LAND_TOKEN }}
+      AIRTABLE_BASE_ID: ${{ secrets.AIRTABLE_BASE_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install dependencies
+        run: PUPPETEER_SKIP_DOWNLOAD=true npm ci
+
+      - name: Check Airtable credentials available
+        id: creds
+        run: |
+          if [ -z "$AIRTABLE_LAND_TOKEN" ] || [ -z "$AIRTABLE_BASE_ID" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::warning::Airtable secrets not configured — skipping integration tests"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Load county targets from Airtable
+        if: steps.creds.outputs.skip == 'false'
+        run: |
+          node -e "
+            require('dotenv').config();
+            const airtable = require('./lib/airtable');
+            airtable.loadCountyTargets().then(result => {
+              if (result.counties.length === 0) {
+                console.error('FAIL: Zero counties returned');
+                process.exit(1);
+              }
+              const states = [...new Set(result.counties.map(c => c.state))].sort();
+              console.log('Counties loaded: ' + result.counties.length);
+              console.log('States: ' + states.join(', '));
+              console.log('Source: ' + (result.source || 'unknown'));
+              console.log('Sample:');
+              result.counties.slice(0, 5).forEach(c =>
+                console.log('  ' + c.county + ', ' + c.state + ': \$' + c.maxCPA + '/ac')
+              );
+            }).catch(err => {
+              console.error('FAIL:', err.message);
+              process.exit(1);
+            });
+          "
+
+      - name: Load dedup index from Airtable
+        if: steps.creds.outputs.skip == 'false'
+        run: |
+          node -e "
+            require('dotenv').config();
+            const airtable = require('./lib/airtable');
+            airtable.loadDedupIndex().then(result => {
+              console.log('URLs: ' + result.urlSet.size);
+              console.log('Fingerprints: ' + result.fingerprintSet.size);
+              console.log('Records: ' + result.records.length);
+              if (result.urlSet.size === 0 && result.records.length === 0) {
+                console.log('WARNING: Dedup index is empty — this may be a new/empty base');
+              }
+            }).catch(err => {
+              console.error('FAIL:', err.message);
+              process.exit(1);
+            });
+          "
+
+      - name: Dry-run scraper (first site only, 1 page)
+        if: steps.creds.outputs.skip == 'false'
+        timeout-minutes: 3
+        run: |
+          node -e "
+            require('dotenv').config();
+            const airtable = require('./lib/airtable');
+            const { initFilter, filterListing } = require('./lib/filter');
+            const { generateFingerprint } = require('./lib/fingerprint');
+            const LandWatchParser = require('./lib/parsers/landwatch');
+
+            (async () => {
+              const targets = await airtable.loadCountyTargets();
+              initFilter(targets.countyMap);
+
+              const parser = new LandWatchParser();
+              const counties = targets.counties.slice(0, 1);
+              const urls = parser.buildSearchUrls(counties);
+              const firstUrl = urls[0];
+
+              console.log('Fetching: ' + firstUrl.url);
+              const html = await parser.fetchPage(firstUrl.url);
+              const listings = parser.parseSearchPage(html, firstUrl.county, firstUrl.state);
+              console.log('Parsed ' + listings.length + ' listings from first page');
+
+              let passed = 0, rejected = 0;
+              for (const listing of listings) {
+                listing.source = 'LandWatch';
+                const result = filterListing(listing);
+                if (result.passed) {
+                  passed++;
+                  const fp = generateFingerprint(listing);
+                  console.log('  PASS: ' + listing.name + ' (\$' + Math.round(listing.price) + ', ' + listing.acres + 'ac, fp=' + (fp || 'null').slice(0,8) + ')');
+                } else {
+                  rejected++;
+                }
+              }
+              console.log('Results: ' + passed + ' passed, ' + rejected + ' rejected out of ' + listings.length);
+            })().catch(err => {
+              console.error('FAIL:', err.message);
+              process.exit(1);
+            });
+          "
