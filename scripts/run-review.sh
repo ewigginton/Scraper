@@ -15,10 +15,11 @@ echo "=== Review starting at $(date) ===" >> "$LOG_FILE"
 
 cd "$SCRIPT_DIR"
 
-# Run the review script
+# Run the review script. Keep logging even if Node fails.
+set +e
 /usr/local/bin/node review-leads.js >> "$LOG_FILE" 2>&1
-
 EXIT_CODE=$?
+set -e
 
 echo "=== Review finished at $(date) with exit code $EXIT_CODE ===" >> "$LOG_FILE"
 
