@@ -8,7 +8,7 @@
     "dry-run": "node index.js --dry-run",
     "review": "node review-leads.js",
     "price-check": "node index.js --price-check-only",
-    "test": "node --test test/"
+    "test": "node --test test/*.test.js"
   },
   "dependencies": {
     "airtable": "^0.12.2",
