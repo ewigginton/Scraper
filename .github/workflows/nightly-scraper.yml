@@ -1,9 +1,6 @@
 name: CCL nightly land scraper
 
 on:
-  push:
-    branches:
-      - claude/rebuild-scraper-filtering-xTHPI
   workflow_dispatch:
     inputs:
       dry_run:
@@ -84,7 +81,7 @@ jobs:
 
       - name: Upload scraper report and failed-write queue
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: scraper-run-${{ github.run_id }}
           path: |
