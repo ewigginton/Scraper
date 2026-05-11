@@ -15,10 +15,11 @@ echo "=== Scraper starting at $(date) ===" >> "$LOG_FILE"
 
 cd "$SCRIPT_DIR"
 
-# Run the scraper, capturing all output
+# Run the scraper, capturing all output. Keep logging even if Node fails.
+set +e
 /usr/local/bin/node index.js >> "$LOG_FILE" 2>&1
-
 EXIT_CODE=$?
+set -e
 
 echo "=== Scraper finished at $(date) with exit code $EXIT_CODE ===" >> "$LOG_FILE"
 
