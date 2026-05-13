@@ -19,6 +19,7 @@ const { sendScraperEmail } = require('./lib/notify');
 async function main() {
   const priceCheckOnly = process.argv.includes('--price-check-only');
   const dryRun = process.argv.includes('--dry-run') || process.env.DRY_RUN === 'true';
+  const limitCounties = parseIntegerOption('--limit-counties', process.env.SCRAPER_LIMIT_COUNTIES);
   const startTime = Date.now();
 
   console.log('='.repeat(60));
@@ -34,7 +35,7 @@ async function main() {
     // Step 1: Scrape new listings (unless price-check-only mode)
     if (!priceCheckOnly) {
       // runScraper() loads county targets and inits the filter itself
-      scraperReport = await runScraper({ dryRun });
+      scraperReport = await runScraper({ dryRun, limitCounties });
     } else {
       // Price-check-only mode: still need county targets for CPA lookups
       const countyTargets = await airtable.loadCountyTargets();
@@ -80,6 +81,15 @@ async function main() {
   if (fatalError) {
     process.exitCode = 1;
   }
+}
+
+function parseIntegerOption(flag, envValue) {
+  const arg = process.argv.find(value => value.startsWith(`${flag}=`));
+  const rawValue = arg ? arg.slice(flag.length + 1) : envValue;
+  if (!rawValue) return null;
+
+  const parsed = Number.parseInt(rawValue, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 }
 
 main().catch(err => {

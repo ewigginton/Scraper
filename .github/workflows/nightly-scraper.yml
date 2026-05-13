@@ -1,9 +1,6 @@
 name: CCL nightly land scraper
 
 on:
-  push:
-    branches:
-      - claude/rebuild-scraper-filtering-xTHPI
   workflow_dispatch:
     inputs:
       dry_run:
@@ -40,13 +37,13 @@ jobs:
       EMAIL_TO: ${{ secrets.EMAIL_TO }}
       PUPPETEER_SKIP_DOWNLOAD: "true"
       SCRAPER_REPORT_FILE: reports/scraper-report.txt
-      DRY_RUN: ${{ ((github.event_name == 'workflow_dispatch' && inputs.dry_run == 'true') || github.event_name == 'push') && 'true' || 'false' }}
+      DRY_RUN: ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run == 'true') && 'true' || 'false' }}
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: "22"
           cache: npm
@@ -84,7 +81,7 @@ jobs:
 
       - name: Upload scraper report and failed-write queue
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: scraper-run-${{ github.run_id }}
           path: |

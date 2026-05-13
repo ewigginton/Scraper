@@ -2,5 +2,6 @@ node_modules/
 .env
 services/land-scraper/logs/*.log
 data/failed-writes/*.jsonl
+reports/
 *.log
 .DS_Store
