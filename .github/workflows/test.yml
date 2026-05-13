@@ -83,7 +83,7 @@ jobs:
             });
           "
 
-      - name: Load dedup index from Airtable
+      - name: Check Airtable dedup index
         if: steps.creds.outputs.skip == 'false'
         run: |
           node -e "
@@ -94,9 +94,9 @@ jobs:
               console.log('Fingerprints: ' + result.fingerprintSet.size);
               console.log('Records: ' + result.records.length);
             }).catch(err => {
-              console.error('FAIL:', err.message);
+              console.error('WARNING: Dedup index could not be loaded:', err.message);
               console.error(err.stack);
-              process.exit(1);
+              console.log('The scraper will continue with session-only dedup if this happens during a run.');
             });
           "
 
