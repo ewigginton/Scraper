@@ -63,6 +63,7 @@ async function main() {
       totals: { checked: 0, parsed: 0, passed: 0, duplicates: 0, rejected: 0, written: 0, errors: 1 },
       duplicateDetails: [],
       writeErrors: [{ site: 'system', error: err.message }],
+      sourceIssues: [],
       warnings: dryRun ? ['Dry run enabled: Airtable writes were skipped'] : [],
       dryRun,
       elapsedMinutes: 0,
@@ -73,7 +74,7 @@ async function main() {
   try {
     if (scraperReport || priceCheckReport) {
       await sendScraperEmail(
-        scraperReport || { sites: {}, totals: { written: 0, duplicates: 0, rejected: 0, errors: 0 }, duplicateDetails: [], writeErrors: [], elapsedMinutes: 0 },
+        scraperReport || { sites: {}, totals: { written: 0, duplicates: 0, rejected: 0, errors: 0 }, duplicateDetails: [], writeErrors: [], sourceIssues: [], elapsedMinutes: 0 },
         priceCheckReport
       );
     }

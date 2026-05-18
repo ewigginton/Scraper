@@ -38,3 +38,5 @@ Manual GitHub dry-runs upload the scraper report and any failed Airtable write q
 - Filtering: accepts listings within 20% of CPA target, watches 20-30% over, rejects >30%
 - Deduplication: URL match + property fingerprint (county/state/acres/price hash)
 - Results written to Airtable `Leads` table
+- Launch scripts use a local run lock so scraper/review jobs do not overlap
+- Parser fetch/parse failures are saved locally under `data/source-health/` and summarized in reports
