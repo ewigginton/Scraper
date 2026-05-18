@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const { initFilter, filterListing } = require('../lib/filter');
 const { generateFingerprint } = require('../lib/fingerprint');
 const airtable = require('../lib/airtable');
+const { selectTargetCounties } = require('../lib/scraper');
 
 test('full pipeline: filter -> fingerprint -> dedup flow', () => {
   initFilter(new Map([
@@ -147,4 +148,38 @@ test('report.totals.parsed counts correctly without double-counting', () => {
   report.totals.parsed += site2Listings.length;
 
   assert.equal(report.totals.parsed, 3, 'parsed total should be 3, not 6 (no double count)');
+});
+
+test('selectTargetCounties keeps requested county order and rebuilds county map', () => {
+  const selected = selectTargetCounties({
+    counties: [
+      { county: 'Shannon', state: 'MO', maxCPA: 2000 },
+      { county: 'Wayne', state: 'KY', maxCPA: 2200 },
+      { county: 'Pittsburg', state: 'OK', maxCPA: 2500 },
+    ],
+    countyMap: new Map(),
+    source: 'airtable',
+  }, [
+    { county: 'Wayne', state: 'KY' },
+    { county: 'Pittsburg', state: 'OK' },
+    { county: 'Shannon', state: 'MO' },
+  ]);
+
+  assert.deepEqual(selected.counties.map(target => `${target.county}|${target.state}`), [
+    'Wayne|KY',
+    'Pittsburg|OK',
+    'Shannon|MO',
+  ]);
+  assert.equal(selected.countyMap.get('wayne|KY'), 2200);
+  assert.equal(selected.countyMap.get('pittsburg|OK'), 2500);
+  assert.equal(selected.countyMap.get('shannon|MO'), 2000);
+});
+
+test('selectTargetCounties fails loudly when requested counties are missing', () => {
+  assert.throws(() => selectTargetCounties({
+    counties: [{ county: 'Shannon', state: 'MO', maxCPA: 2000 }],
+    countyMap: new Map(),
+  }, [
+    { county: 'Wayne', state: 'KY' },
+  ]), /Wayne, KY/);
 });

@@ -5,6 +5,11 @@ const assert = require('node:assert/strict');
 const { generateFingerprint } = require('../lib/fingerprint');
 const airtable = require('../lib/airtable');
 
+test('parseCurrencyNumber accepts Airtable CPA Target currency values', () => {
+  assert.equal(airtable.parseCurrencyNumber('$1,850'), 1850);
+  assert.equal(airtable.parseCurrencyNumber(1850), 1850);
+});
+
 test('fingerprint from scraper matches fingerprint from checkDuplicate', () => {
   const listing = {
     name: 'Test Tract',

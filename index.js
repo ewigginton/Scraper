@@ -14,12 +14,15 @@ const { sendScraperEmail } = require('./lib/notify');
  * Two modes:
  *   node index.js              → Full scrape + price check
  *   node index.js --price-check-only → Price check only (for testing/manual runs)
+ *   node index.js --skip-price-check → Scrape only, skip watched-listing price checks
  *   node index.js --dry-run    → Scrape and check without writing Airtable changes
  */
 async function main() {
   const priceCheckOnly = process.argv.includes('--price-check-only');
+  const skipPriceCheck = process.argv.includes('--skip-price-check') || process.env.SKIP_PRICE_CHECK === 'true';
   const dryRun = process.argv.includes('--dry-run') || process.env.DRY_RUN === 'true';
   const limitCounties = parseIntegerOption('--limit-counties', process.env.SCRAPER_LIMIT_COUNTIES);
+  const targetCounties = parseTargetCountiesOption('--target-counties', process.env.SCRAPER_TARGET_COUNTIES);
   const startTime = Date.now();
 
   console.log('='.repeat(60));
@@ -35,7 +38,7 @@ async function main() {
     // Step 1: Scrape new listings (unless price-check-only mode)
     if (!priceCheckOnly) {
       // runScraper() loads county targets and inits the filter itself
-      scraperReport = await runScraper({ dryRun, limitCounties });
+      scraperReport = await runScraper({ dryRun, limitCounties, targetCounties });
     } else {
       // Price-check-only mode: still need county targets for CPA lookups
       const countyTargets = await airtable.loadCountyTargets();
@@ -43,7 +46,11 @@ async function main() {
     }
 
     // Step 2: Check for price drops on watched listings
-    priceCheckReport = await runPriceCheck({ dryRun });
+    if (skipPriceCheck) {
+      console.log('[Main] Skipping price check.');
+    } else {
+      priceCheckReport = await runPriceCheck({ dryRun });
+    }
 
   } catch (err) {
     fatalError = err;
@@ -90,6 +97,24 @@ function parseIntegerOption(flag, envValue) {
 
   const parsed = Number.parseInt(rawValue, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+function parseTargetCountiesOption(flag, envValue) {
+  const arg = process.argv.find(value => value.startsWith(`${flag}=`));
+  const rawValue = arg ? arg.slice(flag.length + 1) : envValue;
+  if (!rawValue) return null;
+
+  return rawValue
+    .split(',')
+    .map(value => value.trim())
+    .filter(Boolean)
+    .map(value => {
+      const [county, state] = value.split('|').map(part => part && part.trim());
+      if (!county || !state) {
+        throw new Error(`Invalid target county "${value}". Use County|ST, e.g. Wayne|KY`);
+      }
+      return { county, state: state.toUpperCase() };
+    });
 }
 
 main().catch(err => {

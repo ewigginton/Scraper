@@ -11,13 +11,15 @@ See `.env.example` for the full list.
 - Install deps: `PUPPETEER_SKIP_DOWNLOAD=true npm install --silent`
 - Full scrape + price check: `node index.js`
 - Dry run (scrape and report without Airtable writes): `node index.js --dry-run`
+- Targeted dry run: `SCRAPER_TARGET_COUNTIES="Wayne|KY,Pittsburg|OK,Shannon|MO" SCRAPER_MAX_PAGE=1 node index.js --dry-run --skip-price-check`
 - Review leads only: `node review-leads.js`
 - Price check only: `node index.js --price-check-only`
+- Scrape without price check: `node index.js --skip-price-check`
 
 ## GitHub Actions
 
 The nightly scraper workflow lives at `.github/workflows/nightly-scraper.yml`.
-It can be run manually from GitHub Actions, and manual runs default to dry-run mode.
+It can be run manually from GitHub Actions, and GitHub scraper runs are always dry-run only.
 
 Required GitHub repository secrets:
 
@@ -25,13 +27,14 @@ Required GitHub repository secrets:
 - `AIRTABLE_BASE_ID`
 - `EMAIL_TO`
 
-The scheduled run uses GitHub's UTC cron at `0 7 * * *`, which is 2:00 AM Central during daylight saving time and 1:00 AM Central during standard time.
-Each run uploads the scraper report and any failed Airtable write queue as a workflow artifact.
+Production scraping should run from Nora's always-on desktop via the `launchd` service files in `services/`.
+GitHub Actions should be used for tests and manual dry-runs only.
+Manual GitHub dry-runs upload the scraper report and any failed Airtable write queue as workflow artifacts.
 
 ## Architecture
 
 - 5 site parsers in `lib/parsers/` (LandWatch, Land.com, LandAndFarm, LandsOfAmerica, LivingTheDream)
-- County targets loaded dynamically from Airtable `county` table
+- County targets loaded dynamically from Airtable `county` table using `CPA Target`
 - Filtering: accepts listings within 20% of CPA target, watches 20-30% over, rejects >30%
 - Deduplication: URL match + property fingerprint (county/state/acres/price hash)
 - Results written to Airtable `Leads` table

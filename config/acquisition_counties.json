@@ -183,6 +183,8 @@
     { "county": "Winston", "state": "MS", "maxCPA": 2500 },
     { "county": "Yalobusha", "state": "MS", "maxCPA": 2500 },
 
+    { "county": "Wayne", "state": "KY", "maxCPA": 1850 },
+
     { "county": "Barry", "state": "MO", "maxCPA": 3000 },
     { "county": "Camden", "state": "MO", "maxCPA": 4500 },
     { "county": "Carter", "state": "MO", "maxCPA": 2000 },
