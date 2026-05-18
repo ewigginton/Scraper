@@ -15,9 +15,15 @@ echo "=== Review starting at $(date) ===" >> "$LOG_FILE"
 
 cd "$SCRIPT_DIR"
 
+NODE_BIN="$(command -v node || true)"
+if [ -z "$NODE_BIN" ]; then
+  echo "ERROR: node was not found in PATH" >> "$LOG_FILE"
+  exit 127
+fi
+
 # Run the review script. Keep logging even if Node fails.
 set +e
-/usr/local/bin/node review-leads.js >> "$LOG_FILE" 2>&1
+"$NODE_BIN" review-leads.js >> "$LOG_FILE" 2>&1
 EXIT_CODE=$?
 set -e
 

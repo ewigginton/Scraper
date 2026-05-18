@@ -15,9 +15,15 @@ echo "=== Scraper starting at $(date) ===" >> "$LOG_FILE"
 
 cd "$SCRIPT_DIR"
 
+NODE_BIN="$(command -v node || true)"
+if [ -z "$NODE_BIN" ]; then
+  echo "ERROR: node was not found in PATH" >> "$LOG_FILE"
+  exit 127
+fi
+
 # Run the scraper, capturing all output. Keep logging even if Node fails.
 set +e
-/usr/local/bin/node index.js >> "$LOG_FILE" 2>&1
+"$NODE_BIN" index.js >> "$LOG_FILE" 2>&1
 EXIT_CODE=$?
 set -e
 
