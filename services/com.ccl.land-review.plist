@@ -7,7 +7,7 @@
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
-        <string>/Users/nora/clawd/scripts/run-review.sh</string>
+        <string>/Users/nora/ccl-land-scraper/scripts/run-review.sh</string>
     </array>
     <key>StartCalendarInterval</key>
     <dict>
@@ -17,11 +17,11 @@
         <integer>0</integer>
     </dict>
     <key>StandardOutPath</key>
-    <string>/Users/nora/clawd/services/land-scraper/logs/launchd-review.log</string>
+    <string>/Users/nora/ccl-land-scraper/services/land-scraper/logs/launchd-review.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/nora/clawd/services/land-scraper/logs/launchd-review-error.log</string>
+    <string>/Users/nora/ccl-land-scraper/services/land-scraper/logs/launchd-review-error.log</string>
     <key>WorkingDirectory</key>
-    <string>/Users/nora/clawd</string>
+    <string>/Users/nora/ccl-land-scraper</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>

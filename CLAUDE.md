@@ -27,7 +27,7 @@ Required GitHub repository secrets:
 - `AIRTABLE_BASE_ID`
 - `EMAIL_TO`
 
-Production scraping should run from Nora's always-on desktop via the `launchd` service files in `services/`.
+Production scraping should run from Nora's always-on desktop in `/Users/nora/ccl-land-scraper` via the `launchd` service files in `services/`.
 GitHub Actions should be used for tests and manual dry-runs only.
 Manual GitHub dry-runs upload the scraper report and any failed Airtable write queue as workflow artifacts.
 
