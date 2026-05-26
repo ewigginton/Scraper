@@ -10,6 +10,22 @@ test('parseCurrencyNumber accepts Airtable CPA Target currency values', () => {
   assert.equal(airtable.parseCurrencyNumber(1850), 1850);
 });
 
+test('firstRecordValue reads current Airtable county field names before fallbacks', () => {
+  const record = {
+    get(field) {
+      return {
+        County: 'Wayne',
+        Name: 'Old Name',
+        'State (full)': 'Kentucky',
+        State: ['recLinkedState'],
+      }[field];
+    },
+  };
+
+  assert.equal(airtable.firstRecordValue(record, airtable.COUNTY_NAME_FIELDS), 'Wayne');
+  assert.equal(airtable.firstRecordValue(record, airtable.COUNTY_STATE_FIELDS), 'Kentucky');
+});
+
 test('fingerprint from scraper matches fingerprint from checkDuplicate', () => {
   const listing = {
     name: 'Test Tract',
