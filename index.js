@@ -72,10 +72,20 @@ async function main() {
         fatalError = err;
         console.error(`[Main] Price check failed: ${err.message}`);
         console.error(err.stack);
-        if (scraperReport) {
-          scraperReport.priceCheckError = err.message;
-          scraperReport.totals.errors++;
-        }
+        // In --price-check-only mode there is no scraper report, but the
+        // failure email must still go out — build the minimal shell for it
+        scraperReport = scraperReport || {
+          sites: {},
+          totals: { checked: 0, parsed: 0, passed: 0, duplicates: 0, rejected: 0, written: 0, wouldWrite: 0, errors: 0 },
+          duplicateDetails: [],
+          writeErrors: [],
+          sourceIssues: [],
+          warnings: [],
+          dryRun,
+          elapsedMinutes: 0,
+        };
+        scraperReport.priceCheckError = err.message;
+        scraperReport.totals.errors++;
       }
     }
 
@@ -119,7 +129,7 @@ async function main() {
   if (fatalError || !emailSent) {
     process.exitCode = 1;
   }
-  await pingHealthcheck(!fatalError);
+  await pingHealthcheck(!fatalError && emailSent);
 }
 
 function parseIntegerOption(flag, envValue) {

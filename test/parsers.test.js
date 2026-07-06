@@ -174,6 +174,50 @@ test('zero listings on page 1 without a no-results marker records markup drift',
   }
 });
 
+test('cards found but all filtered out is NOT markup drift (LivingTheDream state-wide search)', async () => {
+  const os = require('os');
+  const path = require('path');
+  const fs = require('fs');
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ccl-test-'));
+  const originalDataDir = process.env.SCRAPER_DATA_DIR;
+  const originalDelay = process.env.SCRAPER_REQUEST_DELAY_MS;
+  const originalMaxPage = process.env.SCRAPER_MAX_PAGE;
+  process.env.SCRAPER_DATA_DIR = tmpDir;
+  process.env.SCRAPER_REQUEST_DELAY_MS = '1';
+  process.env.SCRAPER_MAX_PAGE = '1';
+
+  const parser = new LivingTheDreamParser();
+  // A healthy page whose listings are all in NON-target counties — cards
+  // match the selectors but every one is filtered out
+  parser.fetchPage = async () => `
+    <html><body>
+      <div class="property-listing">
+        <h2 class="property-title">80 Acres</h2>
+        <div class="property-price">$200,000</div>
+        <div class="property-acres">80 acres</div>
+        <div class="property-location">Some Other County, MO</div>
+        <a href="/properties/123">View</a>
+      </div>
+    </body></html>`;
+
+  try {
+    const listings = await parser.scrapeAll([{ county: 'Taney', state: 'MO', maxCPA: 4000 }]);
+    assert.deepEqual(listings, [], 'non-target-county listing should be filtered');
+    assert.ok(
+      !parser.sourceIssues.some(i => i.type === 'markup_drift'),
+      'filtered-out cards must not be reported as markup drift'
+    );
+  } finally {
+    if (originalDataDir === undefined) delete process.env.SCRAPER_DATA_DIR;
+    else process.env.SCRAPER_DATA_DIR = originalDataDir;
+    if (originalDelay === undefined) delete process.env.SCRAPER_REQUEST_DELAY_MS;
+    else process.env.SCRAPER_REQUEST_DELAY_MS = originalDelay;
+    if (originalMaxPage === undefined) delete process.env.SCRAPER_MAX_PAGE;
+    else process.env.SCRAPER_MAX_PAGE = originalMaxPage;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
 test('a genuine "no results" page does not raise a drift issue', async () => {
   const os = require('os');
   const path = require('path');

@@ -32,7 +32,13 @@ if ! mkdir "$LOCK_DIR" 2>/dev/null; then
     ''|*[!0-9]*) LOCK_STARTED=0 ;;
   esac
   if [ "$LOCK_STARTED" -eq 0 ]; then
-    LOCK_STARTED="$(stat -f %m "$LOCK_DIR" 2>/dev/null || stat -c %Y "$LOCK_DIR" 2>/dev/null || echo 0)"
+    # BSD stat first (macOS production), GNU stat fallback; GNU's -f mode can
+    # emit filesystem text before failing, so keep only the last line and
+    # re-sanitize to digits
+    LOCK_STARTED="$( { stat -f %m "$LOCK_DIR" 2>/dev/null || stat -c %Y "$LOCK_DIR" 2>/dev/null || echo 0; } | tail -n 1 )"
+    case "$LOCK_STARTED" in
+      ''|*[!0-9]*) LOCK_STARTED=0 ;;
+    esac
   fi
   NOW="$(date +%s)"
   LOCK_AGE=$((NOW - LOCK_STARTED))
@@ -40,7 +46,17 @@ if ! mkdir "$LOCK_DIR" 2>/dev/null; then
   HOLDER_ALIVE=false
   case "$LOCK_PID" in
     ''|*[!0-9]*) : ;;
-    *) if kill -0 "$LOCK_PID" 2>/dev/null; then HOLDER_ALIVE=true; fi ;;
+    *)
+      if kill -0 "$LOCK_PID" 2>/dev/null; then
+        # Guard against PID reuse after a reboot: only trust a live PID if
+        # its command name still matches what the lock holder recorded
+        LOCK_COMM_RECORDED="$(cat "$LOCK_DIR/comm" 2>/dev/null || echo "")"
+        LOCK_COMM_NOW="$(ps -o comm= -p "$LOCK_PID" 2>/dev/null || echo "")"
+        if [ -z "$LOCK_COMM_RECORDED" ] || [ "$LOCK_COMM_RECORDED" = "$LOCK_COMM_NOW" ]; then
+          HOLDER_ALIVE=true
+        fi
+      fi
+      ;;
   esac
 
   if [ "$HOLDER_ALIVE" = true ]; then
@@ -57,7 +73,12 @@ if ! mkdir "$LOCK_DIR" 2>/dev/null; then
   fi
 
   echo "WARNING: removing stale run lock (holder pid '${LOCK_PID:-none}' not running, age ${LOCK_AGE}s)" >> "$LOG_FILE"
-  rm -rf "$LOCK_DIR"
+  # Steal atomically via rename so two simultaneous stealers cannot both win
+  if ! mv "$LOCK_DIR" "$LOCK_DIR.stale.$$" 2>/dev/null; then
+    echo "ERROR: lost the race re-taking the run lock; exiting without starting" >> "$LOG_FILE"
+    exit 75
+  fi
+  rm -rf "$LOCK_DIR.stale.$$"
   if ! mkdir "$LOCK_DIR" 2>/dev/null; then
     echo "ERROR: lost the race re-taking the run lock; exiting without starting" >> "$LOG_FILE"
     exit 75
@@ -66,6 +87,7 @@ fi
 trap 'rm -rf "$LOCK_DIR"' EXIT
 date +%s > "$LOCK_DIR/started_epoch"
 echo "$$" > "$LOCK_DIR/pid"
+ps -o comm= -p $$ > "$LOCK_DIR/comm" 2>/dev/null || true
 echo "scraper" > "$LOCK_DIR/job"
 
 NODE_BIN="$(command -v node || true)"

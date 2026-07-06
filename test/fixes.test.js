@@ -8,8 +8,9 @@ const fs = require('fs');
 
 const { initFilter, filterListing, getCPATarget } = require('../lib/filter');
 const { generateFingerprint, locationKey, roundTo } = require('../lib/fingerprint');
-const { extractPrice, parsePriceText } = require('../lib/price-checker');
+const { extractPrice, parsePriceText, mergeNoteEntry } = require('../lib/price-checker');
 const { matchesKeyword, analyzeLead } = require('../lib/review');
+const { parseFloodResponse, parseCoordinateString, isHighRiskZone } = require('../lib/flood');
 const airtable = require('../lib/airtable');
 const localStore = require('../lib/local-store');
 
@@ -103,9 +104,9 @@ test('locationKey buckets acreage and normalizes county', () => {
   );
 });
 
-test('checkDuplicate catches same property at a different price bucket via location match', () => {
-  // Same tract: $300,000 on one site (already in Airtable), $289,000 on another.
-  // Fingerprints differ ($5k buckets), but location + 10% price tolerance matches.
+test('checkDuplicate flags (but does not drop) same-location similar-price listings', () => {
+  // Might be the same tract at $300,000 on one site and $289,000 on another —
+  // or two sibling tracts. It is written with a warning, never silently skipped.
   const existing = { county: 'Taney', state: 'MO', acres: 100, price: 300000 };
   const incoming = {
     county: 'Taney County',
@@ -121,11 +122,11 @@ test('checkDuplicate catches same property at a different price bucket via locat
   const dedupIndex = { urlSet: new Set(), fingerprintSet: new Set(), locationMap };
 
   const result = airtable.checkDuplicate(incoming, dedupIndex);
-  assert.equal(result.isDuplicate, true);
-  assert.equal(result.matchType, 'location-price');
+  assert.equal(result.isDuplicate, false, 'suspected cross-site matches must still be written');
+  assert.match(result.suspectedCrossSite, /Possible cross-site duplicate/);
 });
 
-test('checkDuplicate does NOT merge different tracts of similar size at different prices', () => {
+test('checkDuplicate does not even flag similar-size tracts at clearly different prices', () => {
   const existing = { county: 'Taney', state: 'MO', acres: 100, price: 300000 };
   const different = {
     county: 'Taney',
@@ -140,6 +141,7 @@ test('checkDuplicate does NOT merge different tracts of similar size at differen
 
   const result = airtable.checkDuplicate(different, dedupIndex);
   assert.equal(result.isDuplicate, false);
+  assert.equal(result.suspectedCrossSite, undefined);
 });
 
 // ---------- retry classification ----------
@@ -194,6 +196,84 @@ test('missing $/A scores as unknown, not as an excellent price', () => {
   const analysis = analyzeLead(record);
   assert.equal(analysis.priceClass, 'unknown');
   assert.equal(analysis.overPercent, null);
+});
+
+// ---------- property-note merging (price-cut messages in Airtable) ----------
+
+test('mergeNoteEntry inserts above the AUTO ANALYSIS marker so review does not wipe it', () => {
+  const existing = 'Emma: called agent 6/1\n\n--- AUTO ANALYSIS ---\nScore: ★★★☆☆';
+  const merged = mergeNoteEntry(existing, '[2026-07-06] ⬆️ PRICE DROP: $500,000 → $450,000');
+  const [above] = merged.split('--- AUTO ANALYSIS ---');
+  assert.match(above, /PRICE DROP/);
+  assert.match(above, /called agent/);
+  assert.match(merged, /Score: ★★★☆☆/);
+});
+
+test('mergeNoteEntry appends cleanly when no marker exists', () => {
+  const merged = mergeNoteEntry('', '[2026-07-06] Price drop: $100,000 → $95,000');
+  assert.equal(merged, '[2026-07-06] Price drop: $100,000 → $95,000');
+});
+
+// ---------- FEMA flood ----------
+
+test('isHighRiskZone classifies A/V zones as high risk, X/NONE as not', () => {
+  for (const zone of ['A', 'AE', 'AH', 'AO', 'A99', 'V', 'VE']) {
+    assert.equal(isHighRiskZone(zone), true, `${zone} should be high risk`);
+  }
+  for (const zone of ['X', 'D', 'NONE', '', null]) {
+    assert.equal(isHighRiskZone(zone), false, `${zone} should not be high risk`);
+  }
+});
+
+test('parseFloodResponse handles hit, miss, and malformed responses', () => {
+  const hit = parseFloodResponse({ features: [{ attributes: { FLD_ZONE: 'AE', ZONE_SUBTY: 'FLOODWAY' } }] });
+  assert.equal(hit.zone, 'AE');
+  assert.equal(hit.isHighRisk, true);
+
+  const preferHighRisk = parseFloodResponse({
+    features: [
+      { attributes: { FLD_ZONE: 'X' } },
+      { attributes: { FLD_ZONE: 'AE' } },
+    ],
+  });
+  assert.equal(preferHighRisk.zone, 'AE');
+
+  const miss = parseFloodResponse({ features: [] });
+  assert.equal(miss.zone, 'NONE');
+  assert.equal(miss.isHighRisk, false);
+  assert.equal(miss.mapped, false);
+
+  assert.equal(parseFloodResponse(null), null);
+  assert.equal(parseFloodResponse({ error: { message: 'boom' } }), null);
+});
+
+test('parseCoordinateString parses the Airtable Coordinate format and rejects junk', () => {
+  assert.deepEqual(parseCoordinateString('36.84, -84.85'), { lat: 36.84, lng: -84.85 });
+  assert.equal(parseCoordinateString(''), null);
+  assert.equal(parseCoordinateString('not coords'), null);
+  assert.equal(parseCoordinateString('51.5, -0.1'), null); // outside continental US
+});
+
+test('a high-risk flood zone becomes a yellow flag in lead analysis', () => {
+  initFilter(new Map([['taney|MO', 4000]]));
+  const record = {
+    fields: {
+      Name: 'River Tract',
+      'Property Notes': 'Nice bottomland.',
+      Acres: 200,
+      '$/A': 3500,
+      County: 'Taney',
+      State: 'MO',
+    },
+  };
+  const flood = { zone: 'AE', isHighRisk: true, mapped: true };
+  const analysis = analyzeLead(record, { flood });
+  assert.ok(analysis.yellowFlags.some(f => f.includes('fema flood zone ae')), `flags: ${analysis.yellowFlags}`);
+  assert.equal(analysis.flood.zone, 'AE');
+
+  // and a minimal-hazard zone does not add a flag
+  const safeAnalysis = analyzeLead(record, { flood: { zone: 'NONE', isHighRisk: false, mapped: false } });
+  assert.ok(!safeAnalysis.yellowFlags.some(f => f.includes('fema')));
 });
 
 // ---------- failed-write replay queue ----------
