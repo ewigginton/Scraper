@@ -19,7 +19,7 @@ test('notify.js does not interpolate variables into shell strings', () => {
   assert.ok(!src.includes('| mail'), 'should not pipe through shell to mail');
 });
 
-test('sendMail does not crash when mail binary is missing', () => {
+test('sendMail does not crash when mail binary is missing', async () => {
   // sendMail is not exported, but we can test the module loads and
   // sendScraperEmail/sendReviewEmail handle missing EMAIL_TO gracefully
   const { sendScraperEmail } = require('../lib/notify');
@@ -30,9 +30,62 @@ test('sendMail does not crash when mail binary is missing', () => {
     writeErrors: [],
     elapsedMinutes: 0,
   };
-  // With no EMAIL_TO set, it should return without error
+  // With no EMAIL_TO set, it should return without error and report the skip
   const original = process.env.EMAIL_TO;
   delete process.env.EMAIL_TO;
-  assert.doesNotReject(() => sendScraperEmail(report, null));
-  if (original) process.env.EMAIL_TO = original;
+  try {
+    const result = await sendScraperEmail(report, null);
+    assert.equal(result.skipped, true);
+  } finally {
+    if (original) process.env.EMAIL_TO = original;
+  }
+});
+
+test('scraper subject flags errors even when some leads were written', () => {
+  const { buildScraperSubject } = require('../lib/notify');
+  const report = {
+    dryRun: false,
+    writeErrors: [{ site: 'LandWatch', error: 'boom' }],
+    totals: { written: 5, duplicates: 0, rejected: 0, errors: 2 },
+  };
+  const subject = buildScraperSubject(report);
+  assert.match(subject, /⚠️/);
+  assert.match(subject, /errors/i);
+});
+
+test('dry-run subject reports would-write count instead of "No new leads"', () => {
+  const { buildScraperSubject } = require('../lib/notify');
+  const report = {
+    dryRun: true,
+    writeErrors: [],
+    totals: { written: 0, wouldWrite: 12, duplicates: 3, rejected: 0, errors: 0 },
+  };
+  const subject = buildScraperSubject(report);
+  assert.match(subject, /dry run/i);
+  assert.match(subject, /12 would write/);
+});
+
+test('price-check crash is surfaced in the scraper body', () => {
+  const { buildScraperBody } = require('../lib/notify');
+  const report = {
+    dryRun: false,
+    sites: {},
+    totals: { written: 0, wouldWrite: 0, duplicates: 0, rejected: 0, errors: 1 },
+    duplicateDetails: [],
+    writeErrors: [],
+    sourceIssues: [],
+    warnings: [],
+    elapsedMinutes: 1,
+    priceCheckError: 'Airtable exploded',
+  };
+  const body = buildScraperBody(report, null, 'Monday');
+  assert.match(body, /PRICE DROP CHECK: FAILED/);
+  assert.match(body, /Airtable exploded/);
+});
+
+test('review subject and body surface errors', () => {
+  const { buildReviewSubject, buildReviewBody } = require('../lib/notify');
+  const report = { reviewed: 3, errors: 2, standouts: [], flagged: [], autoRejected: [] };
+  assert.match(buildReviewSubject(report), /2 errors/);
+  assert.match(buildReviewBody(report, 'Monday'), /Errors: 2/);
 });

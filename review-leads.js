@@ -25,6 +25,7 @@ async function main() {
   console.log('='.repeat(60));
 
   let reviewReport = null;
+  let fatalError = null;
 
   try {
     // Step 0: Load county targets from Airtable (needed for CPA lookups in review + price check)
@@ -39,6 +40,7 @@ async function main() {
       await runPriceCheck();
     }
   } catch (err) {
+    fatalError = err;
     console.error(`[ReviewMain] Fatal error: ${err.message}`);
     console.error(err.stack);
 
@@ -53,17 +55,24 @@ async function main() {
   }
 
   // Step 3: Send email (always)
+  let emailSent = true;
   try {
     if (reviewReport) {
-      await sendReviewEmail(reviewReport);
+      const result = await sendReviewEmail(reviewReport);
+      emailSent = result.sent || result.skipped;
     }
   } catch (err) {
+    emailSent = false;
     console.error(`[ReviewMain] Email failed: ${err.message}`);
   }
 
   const elapsed = ((Date.now() - startTime) / 1000 / 60).toFixed(1);
   console.log(`\n[ReviewMain] Total runtime: ${elapsed} minutes`);
   console.log('[ReviewMain] Done.');
+
+  if (fatalError || !emailSent) {
+    process.exitCode = 1;
+  }
 }
 
 main().catch(err => {
