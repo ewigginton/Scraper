@@ -8,6 +8,7 @@
     "dry-run": "node index.js --dry-run",
     "review": "node review-leads.js",
     "price-check": "node index.js --price-check-only",
+    "test-email": "node scripts/test-email.js",
     "test": "node --test test/*.test.js"
   },
   "dependencies": {

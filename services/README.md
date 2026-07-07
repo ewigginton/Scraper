@@ -5,6 +5,18 @@ in this directory. launchd's `StartCalendarInterval` does **not** wake a
 sleeping Mac and skips the run entirely if the machine is off at the
 scheduled time, so a few one-time setup steps make the schedule reliable.
 
+**Easiest path: run the guided setup script instead of doing the steps below
+by hand.** From the scraper folder on the production Mac:
+
+```bash
+bash scripts/setup-production.sh
+```
+
+It walks through every step in this file interactively (wake schedule, SMTP,
+healthchecks.io, a test email, and loading the services) and is safe to
+re-run any time. The sections below explain what it does and how to do each
+step manually.
+
 ## 1. Wake the Mac for the runs (one time, requires admin)
 
 ```bash
