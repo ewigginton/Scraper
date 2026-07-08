@@ -54,7 +54,8 @@ in `lib/airtable.js` — never hardcode field names elsewhere:
 
 ## Architecture
 
-- Site parsers in `lib/parsers/` (LandWatch, Land.com, LandAndFarm, LivingTheDream; LandsOfAmerica exists but is disabled — it redirects to Land.com)
+- Site parsers in `lib/parsers/` (LandWatch, Land.com, LandAndFarm, LivingTheDream, WhitetailProperties, MossyOakProperties; LandsOfAmerica exists but is disabled — it redirects to Land.com)
+- Whitetail/MossyOak use the class-name-agnostic `extractByDetailLinks` engine in `base-parser.js` (detail-link anchors + price/acreage text extraction); when adding a source, prefer that engine plus real-HTML fixtures captured from the production Mac
 - County targets loaded dynamically from Airtable `County` table using `CPA Target`
 - Filtering: accepts listings within 20% of CPA target, watches 20-30% over, rejects >30%
 - Deduplication: URL match + property fingerprint (county/state/acres/price hash) + location/price-tolerance match; the dedup index includes `Not Interested` records so rejected leads are not re-created
