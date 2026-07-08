@@ -6,7 +6,7 @@ const airtable = require('./lib/airtable');
 const { initFilter } = require('./lib/filter');
 const { runScraper } = require('./lib/scraper');
 const { runPriceCheck } = require('./lib/price-checker');
-const { sendScraperEmail } = require('./lib/notify');
+const { sendScraperEmail, pingHealthcheck } = require('./lib/notify');
 
 /**
  * Main entry point — runs on Classic's iMac at 2:00 AM via launchd.
@@ -20,7 +20,10 @@ const { sendScraperEmail } = require('./lib/notify');
 async function main() {
   const priceCheckOnly = process.argv.includes('--price-check-only');
   const skipPriceCheck = process.argv.includes('--skip-price-check') || process.env.SKIP_PRICE_CHECK === 'true';
-  const dryRun = process.argv.includes('--dry-run') || process.env.DRY_RUN === 'true';
+  // CI runs are always dry-run, enforced here in code — the workflow files
+  // also set it, but a workflow edit must not be able to write to production
+  const inGithubActions = process.env.GITHUB_ACTIONS === 'true';
+  const dryRun = process.argv.includes('--dry-run') || process.env.DRY_RUN === 'true' || inGithubActions;
   const limitCounties = parseIntegerOption('--limit-counties', process.env.SCRAPER_LIMIT_COUNTIES);
   const targetCounties = parseTargetCountiesOption('--target-counties', process.env.SCRAPER_TARGET_COUNTIES);
   const startTime = Date.now();
@@ -28,7 +31,19 @@ async function main() {
   console.log('='.repeat(60));
   console.log(`CCL Land Scraper v2.0 — ${new Date().toISOString()}`);
   console.log(`Mode: ${priceCheckOnly ? 'Price check only' : 'Full scrape + price check'}${dryRun ? ' (dry run)' : ''}`);
+  if (inGithubActions) {
+    console.log('[Main] GitHub Actions detected — dry run enforced');
+  }
   console.log('='.repeat(60));
+
+  // A live run without Airtable credentials would scrape for hours using the
+  // local county fallback and queue every write. Fail fast and loud instead.
+  if (!dryRun && (!process.env.AIRTABLE_LAND_TOKEN || !process.env.AIRTABLE_BASE_ID)) {
+    console.error('[Main] FATAL: AIRTABLE_LAND_TOKEN / AIRTABLE_BASE_ID missing — refusing to run a live scrape. Use --dry-run to run without credentials.');
+    await pingHealthcheck(false);
+    process.exitCode = 1;
+    return;
+  }
 
   let scraperReport = null;
   let priceCheckReport = null;
@@ -45,11 +60,33 @@ async function main() {
       initFilter(countyTargets.countyMap);
     }
 
-    // Step 2: Check for price drops on watched listings
+    // Step 2: Check for price drops on watched listings.
+    // Isolated so a price-check crash after a successful scrape is reported
+    // in the email instead of silently dropping the section.
     if (skipPriceCheck) {
       console.log('[Main] Skipping price check.');
     } else {
-      priceCheckReport = await runPriceCheck({ dryRun });
+      try {
+        priceCheckReport = await runPriceCheck({ dryRun });
+      } catch (err) {
+        fatalError = err;
+        console.error(`[Main] Price check failed: ${err.message}`);
+        console.error(err.stack);
+        // In --price-check-only mode there is no scraper report, but the
+        // failure email must still go out — build the minimal shell for it
+        scraperReport = scraperReport || {
+          sites: {},
+          totals: { checked: 0, parsed: 0, passed: 0, duplicates: 0, rejected: 0, written: 0, wouldWrite: 0, errors: 0 },
+          duplicateDetails: [],
+          writeErrors: [],
+          sourceIssues: [],
+          warnings: [],
+          dryRun,
+          elapsedMinutes: 0,
+        };
+        scraperReport.priceCheckError = err.message;
+        scraperReport.totals.errors++;
+      }
     }
 
   } catch (err) {
@@ -71,14 +108,17 @@ async function main() {
   }
 
   // Step 3: Send email (always, even on failure)
+  let emailSent = true;
   try {
     if (scraperReport || priceCheckReport) {
-      await sendScraperEmail(
+      const result = await sendScraperEmail(
         scraperReport || { sites: {}, totals: { written: 0, duplicates: 0, rejected: 0, errors: 0 }, duplicateDetails: [], writeErrors: [], sourceIssues: [], elapsedMinutes: 0 },
         priceCheckReport
       );
+      emailSent = result.sent || result.skipped;
     }
   } catch (err) {
+    emailSent = false;
     console.error(`[Main] Email failed: ${err.message}`);
   }
 
@@ -86,9 +126,10 @@ async function main() {
   console.log(`\n[Main] Total runtime: ${elapsed} minutes`);
   console.log('[Main] Done.');
 
-  if (fatalError) {
+  if (fatalError || !emailSent) {
     process.exitCode = 1;
   }
+  await pingHealthcheck(!fatalError && emailSent);
 }
 
 function parseIntegerOption(flag, envValue) {

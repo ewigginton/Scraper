@@ -7,7 +7,7 @@
     "defaultLookbackDays": 30
   },
   "scraper": {
-    "maxConcurrentSites": 2,
+    "maxConcurrentSites": 1,
     "requestDelayMs": 2000,
     "requestTimeoutMs": 30000,
     "maxRetries": 3,
@@ -23,7 +23,6 @@
     "priceRoundTo": 5000
   },
   "review": {
-    "autoRejectThresholdPercent": 30,
     "preferredAcresMin": 150,
     "preferredAcresMax": 400,
     "smallAcresMax": 100,
@@ -33,7 +32,7 @@
     "landwatch": { "enabled": true },
     "landcom": { "enabled": true },
     "landfarm": { "enabled": true },
-    "landsofamerica": { "enabled": true },
+    "landsofamerica": { "enabled": false },
     "livingthedream": { "enabled": true }
   }
 }
