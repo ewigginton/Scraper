@@ -169,7 +169,7 @@ test('"no road noise" does not trip a road-access dealbreaker', () => {
   const record = {
     fields: {
       Name: 'Quiet Tract',
-      'Property Notes': 'Peaceful setting with no road noise. Paved road frontage.',
+      'Scraper Notes': 'Peaceful setting with no road noise. Paved road frontage.',
       Acres: 200,
       '$/A': 3000,
       County: 'Taney',
@@ -186,7 +186,7 @@ test('missing $/A scores as unknown, not as an excellent price', () => {
   const record = {
     fields: {
       Name: 'No CPA',
-      'Property Notes': '',
+      'Scraper Notes': '',
       Acres: 200,
       '$/A': 0,
       County: 'Taney',
@@ -259,7 +259,7 @@ test('a high-risk flood zone becomes a yellow flag in lead analysis', () => {
   const record = {
     fields: {
       Name: 'River Tract',
-      'Property Notes': 'Nice bottomland.',
+      'Scraper Notes': 'Nice bottomland.',
       Acres: 200,
       '$/A': 3500,
       County: 'Taney',

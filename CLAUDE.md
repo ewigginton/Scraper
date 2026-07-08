@@ -36,10 +36,26 @@ Production scraping should run from Nora's always-on desktop in `/Users/nora/ccl
 GitHub Actions should be used for tests and dry-runs only.
 GitHub dry-runs upload the scraper report and any failed Airtable write queue as workflow artifacts.
 
+## Airtable schema (IMPORTANT)
+
+The leads table in the "Land" base is named **`Land`** (NOT `Leads`) and the
+county table is **`County`**. Field quirks, all encoded in `FIELDS`/`STAGES`
+in `lib/airtable.js` — never hardcode field names elsewhere:
+
+- `Listing `, `Coordinate `, and `Price Check Log ` have trailing spaces
+- `Name`, `$/A`, `Days On The Market`, `State` are formula/lookup fields —
+  readable but never writable (`$/A` reads as text like "$2900")
+- `County` is a linked-record field; text county name comes from the
+  `County (from County)` lookup; links are written by County record ID
+- Stage options include `Manual Check Price Drop` (not "Manual Check");
+  the scraper only auto-changes stages in `SCRAPER_MANAGED_STAGES`
+- Run `npm run check-airtable` to verify token/base/tables/fields with
+  plain-English diagnostics
+
 ## Architecture
 
 - Site parsers in `lib/parsers/` (LandWatch, Land.com, LandAndFarm, LivingTheDream; LandsOfAmerica exists but is disabled — it redirects to Land.com)
-- County targets loaded dynamically from Airtable `county` table using `CPA Target`
+- County targets loaded dynamically from Airtable `County` table using `CPA Target`
 - Filtering: accepts listings within 20% of CPA target, watches 20-30% over, rejects >30%
 - Deduplication: URL match + property fingerprint (county/state/acres/price hash) + location/price-tolerance match; the dedup index includes `Not Interested` records so rejected leads are not re-created
 - Results written to Airtable `Leads` table

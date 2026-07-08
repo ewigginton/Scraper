@@ -9,6 +9,7 @@
     "review": "node review-leads.js",
     "price-check": "node index.js --price-check-only",
     "test-email": "node scripts/test-email.js",
+    "check-airtable": "node scripts/check-airtable.js",
     "test": "node --test test/*.test.js"
   },
   "dependencies": {
