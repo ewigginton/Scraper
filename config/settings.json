@@ -33,6 +33,8 @@
     "landcom": { "enabled": true },
     "landfarm": { "enabled": true },
     "landsofamerica": { "enabled": false },
-    "livingthedream": { "enabled": true }
+    "livingthedream": { "enabled": true },
+    "whitetail": { "enabled": true },
+    "mossyoak": { "enabled": true }
   }
 }
