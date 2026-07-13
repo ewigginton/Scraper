@@ -126,10 +126,14 @@ async function main() {
   console.log(`\n[Main] Total runtime: ${elapsed} minutes`);
   console.log('[Main] Done.');
 
-  if (fatalError || !emailSent) {
+  // Email delivery failure only fails a LIVE run — dry runs (including the
+  // nightly GitHub Actions monitor, which has no mail binary and no SMTP
+  // secrets) deliver their report via the report file / workflow summary,
+  // and failing them produced a false "Run failed" alert every night.
+  if (fatalError || (!emailSent && !dryRun)) {
     process.exitCode = 1;
   }
-  await pingHealthcheck(!fatalError && emailSent);
+  await pingHealthcheck(!fatalError && (emailSent || dryRun));
 }
 
 function parseIntegerOption(flag, envValue) {
