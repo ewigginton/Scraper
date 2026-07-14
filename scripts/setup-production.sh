@@ -161,8 +161,8 @@ if [ "$IS_MAC" = true ]; then
   # Leftover jobs from earlier scraper versions cause duplicate daily emails
   # (e.g. an 8 AM 'CCL Daily Land Report' digest). Point them out if present.
   say "Checking for other scheduled jobs that send duplicate emails"
-  OTHER_AGENTS="$(ls "$HOME/Library/LaunchAgents" 2>/dev/null | grep -iv '^com\.ccl\.land-scraper\.plist$' | grep -iE 'ccl|land|scraper' || true)"
-  CRON_JOBS="$(crontab -l 2>/dev/null | grep -ivE '^\s*#' | grep -iE 'ccl|land|scraper|report' || true)"
+  OTHER_AGENTS="$(ls "$HOME/Library/LaunchAgents" 2>/dev/null | grep -iv '^com\.ccl\.land-scraper\.plist$' | grep -iE 'ccl|land|scraper|intake' || true)"
+  CRON_JOBS="$(crontab -l 2>/dev/null | grep -ivE '^\s*#' | grep -iE 'ccl|land|scraper|report|intake' || true)"
   if [ -n "$OTHER_AGENTS" ]; then
     note "Found other launchd agents that look scraper-related — remove them if unwanted:"
     printf '%s\n' "$OTHER_AGENTS" | sed 's/^/    /'

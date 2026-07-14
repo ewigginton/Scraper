@@ -10,6 +10,7 @@
     "price-check": "node index.js --price-check-only",
     "test-email": "node scripts/test-email.js",
     "test-browser": "node scripts/test-browser-fallback.js",
+    "intake": "node scripts/process-intake.js",
     "check-airtable": "node scripts/check-airtable.js",
     "test": "SCRAPER_BROWSER_FALLBACK=false node --test test/*.test.js"
   },

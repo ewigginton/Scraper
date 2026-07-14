@@ -60,13 +60,19 @@ in `lib/airtable.js` — never hardcode field names elsewhere:
   real Chrome via `lib/browser-fetch.js` (playwright-core, optionalDependency;
   disable with `SCRAPER_BROWSER_FALLBACK=false` — the CI workflow does);
   validate with `npm run test-browser -- --live` on the production Mac
-- Stage policy (IMPORTANT): every lead entering Emma's queue arrives with
-  Stage `New Lead` — scrape passes AND price-drop promotions — and the
-  scraper/review never move a record out of `New Lead`; her triage filter
-  depends on this (see `test/stage-policy.test.js`)
+- Stage policy (IMPORTANT, set by Emma): fresh scrape/intake records arrive
+  with Stage `New Lead` and the scraper/review never move a record out of
+  `New Lead` — only Emma does. Price-drop promotions arrive as `Price Drop`
+  (not truly new leads). See `test/stage-policy.test.js`
 - `scripts/run-scraper.sh` self-updates the checkout from GitHub `main`
   before each nightly run; failures surface as warnings in the report email
 - Whitetail/MossyOak use the class-name-agnostic `extractByDetailLinks` engine in `base-parser.js` (detail-link anchors + price/acreage text extraction); when adding a source, prefer that engine plus real-HTML fixtures captured from the production Mac
+- Listing Intake (`lib/intake.js`, Airtable table `Listing Intake`): team
+  members submit listing URLs via an Airtable form; the nightly run imports
+  them into `Land` as `New Lead` records (browser fallback applies). First
+  failure → Status `Retry` (re-attempted the next night); second failure →
+  `Failed` (a human sets Status back to `New` to force another try). Results
+  and failures appear in the consolidated email. Manual run: `npm run intake`
 - County targets loaded dynamically from Airtable `County` table using `CPA Target`
 - Filtering: accepts listings within 20% of CPA target, watches 20-30% over, rejects >30%
 - Deduplication: URL match + property fingerprint (county/state/acres/price hash) + location/price-tolerance match; the dedup index includes `Not Interested` records so rejected leads are not re-created

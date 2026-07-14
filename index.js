@@ -7,6 +7,7 @@ const { initFilter } = require('./lib/filter');
 const { runScraper } = require('./lib/scraper');
 const { runPriceCheck } = require('./lib/price-checker');
 const { runReview } = require('./lib/review');
+const { processIntakeQueue } = require('./lib/intake');
 const { closeBrowser } = require('./lib/browser-fetch');
 const { sendScraperEmail, pingHealthcheck } = require('./lib/notify');
 
@@ -54,6 +55,7 @@ async function main() {
   let scraperReport = null;
   let priceCheckReport = null;
   let reviewReport = null;
+  let intakeReport = null;
   let fatalError = null;
 
   try {
@@ -96,7 +98,32 @@ async function main() {
       }
     }
 
-    // Step 3: Review new leads and price drops (previously a separate 6 AM
+    // Step 3: Import team-submitted listing URLs from the Listing Intake
+    // table (failures set Status 'Retry' and are re-attempted on the NEXT
+    // nightly run — a day later; a second failure is final). Runs before
+    // the review so intake leads get analyzed the same night. Isolated so
+    // an intake crash is reported in the email instead of losing the run.
+    if (!priceCheckOnly) {
+      if (dryRun) {
+        console.log('[Main] Dry run — skipping listing intake (it writes to Airtable).');
+        if (scraperReport) {
+          scraperReport.warnings.push('Dry run: listing intake processing skipped (it writes to Airtable)');
+        }
+      } else {
+        try {
+          intakeReport = await processIntakeQueue({ dryRun });
+        } catch (err) {
+          console.error(`[Main] Listing intake failed: ${err.message}`);
+          console.error(err.stack);
+          if (scraperReport) {
+            scraperReport.intakeError = err.message;
+            scraperReport.totals.errors++;
+          }
+        }
+      }
+    }
+
+    // Step 4: Review new leads and price drops (previously a separate 6 AM
     // job with its own email — now part of the single nightly report).
     // Isolated like the price check so a review crash is reported in the
     // email instead of losing the whole run.
@@ -141,14 +168,15 @@ async function main() {
     };
   }
 
-  // Step 4: Send the single consolidated email (always, even on failure)
+  // Step 5: Send the single consolidated email (always, even on failure)
   let emailSent = true;
   try {
-    if (scraperReport || priceCheckReport || reviewReport) {
+    if (scraperReport || priceCheckReport || reviewReport || intakeReport) {
       const result = await sendScraperEmail(
         scraperReport || { sites: {}, totals: { written: 0, duplicates: 0, rejected: 0, errors: 0 }, duplicateDetails: [], writeErrors: [], sourceIssues: [], elapsedMinutes: 0 },
         priceCheckReport,
-        reviewReport
+        reviewReport,
+        intakeReport
       );
       emailSent = result.sent || result.skipped;
     }

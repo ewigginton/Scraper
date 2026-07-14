@@ -104,6 +104,12 @@ daily emails, older jobs are still installed on the Mac. Remove them:
   rm ~/Library/LaunchAgents/com.ccl.land-review.plist
   ```
 
+- **The old Listing Intake poller**: intake submissions are now imported by
+  the 2 AM nightly run (with the browser fallback, next-day retries, and
+  results in the consolidated email — or on demand with `npm run intake`).
+  If a separate intake script/job still runs on this Mac, remove it the same
+  way as below so the two don't fight over the queue.
+
 - **The legacy 8:00 AM digest** (`CCL Daily Land Report - ...`) comes from a
   script that predates this repo's email reports and only exists on the
   production Mac. Find and remove whatever schedules it:

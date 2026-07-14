@@ -1,12 +1,12 @@
 'use strict';
 
 /**
- * Stage policy: every lead entering Emma's queue arrives as 'New Lead' and
- * stays there until SHE changes it. Her triage filter is built on that
- * stage, so:
- *   - price-drop promotions must set Stage to 'New Lead' (not 'Price Drop')
- *   - the review must never change a lead's Stage (dealbreakers are flagged
- *     in notes/email only)
+ * Stage policy (set by Emma):
+ *   - fresh scrape/intake records arrive as 'New Lead' and only SHE moves
+ *     them — the review must never change a lead's Stage (dealbreakers are
+ *     flagged in notes/email only)
+ *   - price-drop promotions arrive as 'Price Drop' (they aren't truly new
+ *     leads; she already saw them when first scraped)
  */
 
 const test = require('node:test');
@@ -37,7 +37,7 @@ function stubAirtable(t, { stageRecords, record }) {
   return updates;
 }
 
-test('a promotable price drop moves the record to New Lead, not Price Drop', { timeout: 60000 }, async (t) => {
+test('a promotable price drop moves the record to Price Drop stage', { timeout: 60000 }, async (t) => {
   // Local listing page: current price $300,000 (down from stored $500,000).
   // 100 acres → $3,000/ac vs the $2,900/ac target = 3.4% over → promotable.
   const server = http.createServer((req, res) => {
@@ -69,7 +69,7 @@ test('a promotable price drop moves the record to New Lead, not Price Drop', { t
   assert.equal(report.promoted, 1);
   const stageUpdates = updates.filter(u => u.fields.Stage);
   assert.equal(stageUpdates.length, 1);
-  assert.equal(stageUpdates[0].fields.Stage, STAGES.newLead);
+  assert.equal(stageUpdates[0].fields.Stage, STAGES.priceDrop);
 });
 
 test('the review never changes a lead Stage, even on dealbreakers', async (t) => {
