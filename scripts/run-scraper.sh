@@ -96,6 +96,40 @@ if [ -z "$NODE_BIN" ]; then
   exit 127
 fi
 
+# --- Self-update -----------------------------------------------------------
+# Production kept drifting behind GitHub (new parsers never ran because
+# nobody pulled). Fast-forward to origin/main before every run. A failed
+# update NEVER blocks the night's run — the run proceeds on current code and
+# the email carries the warning via SCRAPER_UPDATE_WARNING.
+UPDATE_WARNING=""
+if git -C "$SCRIPT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  CURRENT_BRANCH="$(git -C "$SCRIPT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
+  if [ "$CURRENT_BRANCH" = "main" ]; then
+    BEFORE_REV="$(git -C "$SCRIPT_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"
+    if git -C "$SCRIPT_DIR" fetch origin main >> "$LOG_FILE" 2>&1; then
+      if git -C "$SCRIPT_DIR" merge --ff-only origin/main >> "$LOG_FILE" 2>&1; then
+        AFTER_REV="$(git -C "$SCRIPT_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"
+        if [ "$BEFORE_REV" != "$AFTER_REV" ]; then
+          echo "Self-update: $BEFORE_REV -> $AFTER_REV" >> "$LOG_FILE"
+          if ! npm install --silent --no-audit --no-fund >> "$LOG_FILE" 2>&1; then
+            UPDATE_WARNING="Code was updated but 'npm install' failed — run it manually in $SCRIPT_DIR"
+          fi
+        fi
+      else
+        UPDATE_WARNING="Self-update failed: $SCRIPT_DIR has local edits or diverged from GitHub — production is running OLD code. Run 'git status' there and reconcile."
+      fi
+    else
+      UPDATE_WARNING="Self-update failed: could not reach GitHub — running possibly outdated code"
+    fi
+  else
+    UPDATE_WARNING="Self-update skipped: checkout is on branch '$CURRENT_BRANCH', not main — production may be running OLD code"
+  fi
+fi
+[ -n "$UPDATE_WARNING" ] && echo "WARNING: $UPDATE_WARNING" >> "$LOG_FILE"
+export SCRAPER_UPDATE_WARNING="$UPDATE_WARNING"
+export SCRAPER_GIT_COMMIT="$(git -C "$SCRIPT_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+# ---------------------------------------------------------------------------
+
 # Run the scraper, capturing all output. Keep logging even if Node fails.
 set +e
 "$NODE_BIN" index.js >> "$LOG_FILE" 2>&1

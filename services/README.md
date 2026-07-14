@@ -6,6 +6,21 @@ email**. launchd's `StartCalendarInterval` does **not** wake a sleeping Mac
 and skips the run entirely if the machine is off at the scheduled time, so a
 few one-time setup steps make the schedule reliable.
 
+Two things happen automatically every night:
+
+- **Self-update**: `scripts/run-scraper.sh` fast-forwards the checkout to
+  GitHub `main` (and runs `npm install` when needed) before scraping, so new
+  parsers and fixes deploy themselves. If the update can't apply (local
+  edits, no network, wrong branch), the run proceeds on the current code and
+  the nightly email carries a warning. The email footer shows the running
+  code version (`Code version: <commit>`).
+- **Browser fallback for blocked sites**: LandWatch, Land.com, and
+  LandAndFarm (all CoStar) answer HTTP 403 to plain HTTP clients. When a
+  page is refused or served a challenge page, the scraper retries it through
+  the Mac's installed **Google Chrome** (via `playwright-core`, installed by
+  `npm install`). Keep Chrome installed on the production Mac; if Chrome
+  lives somewhere unusual, set `SCRAPER_BROWSER_PATH` in `.env`.
+
 **Easiest path: run the guided setup script instead of doing the steps below
 by hand.** From the scraper folder on the production Mac:
 

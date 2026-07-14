@@ -7,6 +7,7 @@ const { initFilter } = require('./lib/filter');
 const { runScraper } = require('./lib/scraper');
 const { runPriceCheck } = require('./lib/price-checker');
 const { runReview } = require('./lib/review');
+const { closeBrowser } = require('./lib/browser-fetch');
 const { sendScraperEmail, pingHealthcheck } = require('./lib/notify');
 
 /**
@@ -155,6 +156,10 @@ async function main() {
     emailSent = false;
     console.error(`[Main] Email failed: ${err.message}`);
   }
+
+  // Safety net: a crash mid-scrape can leave the fallback browser running,
+  // which would keep the process alive forever
+  await closeBrowser();
 
   const elapsed = ((Date.now() - startTime) / 1000 / 60).toFixed(1);
   console.log(`\n[Main] Total runtime: ${elapsed} minutes`);

@@ -136,6 +136,25 @@ test('review crash is surfaced in the consolidated body and subject', () => {
   assert.match(buildScraperSubject(scraperReport, null), /⚠️/);
 });
 
+test('awaiting-decision leads appear with their age', () => {
+  const { buildReviewBody } = require('../lib/notify');
+  const report = {
+    reviewed: 1,
+    errors: 0,
+    standouts: [],
+    flagged: [],
+    autoRejected: [],
+    awaiting: [
+      { name: 'Perry Tract', county: 'Perry', state: 'TN', acres: 969, price: 975000, stage: 'New Lead', ageDays: 7 },
+    ],
+  };
+  const body = buildReviewBody(report, 'Monday');
+  assert.match(body, /WAITING ON YOU IN AIRTABLE \(1\)/);
+  assert.match(body, /Perry Tract/);
+  assert.match(body, /waiting 7 days/);
+  assert.match(body, /\(New Lead\)/);
+});
+
 test('standouts appear in the consolidated subject', () => {
   const { buildScraperSubject } = require('../lib/notify');
   const scraperReport = {

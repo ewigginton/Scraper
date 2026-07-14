@@ -31,6 +31,9 @@ jobs:
       EMAIL_TO: ${{ secrets.EMAIL_TO }}
       SCRAPER_REPORT_FILE: reports/scraper-report.txt
       DRY_RUN: "true"
+      # CI runs from a datacenter IP that the CoStar sites block regardless —
+      # launching a browser per blocked page would just slow the monitor down
+      SCRAPER_BROWSER_FALLBACK: "false"
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
