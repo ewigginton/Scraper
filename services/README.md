@@ -21,6 +21,17 @@ Two things happen automatically every night:
   `npm install`). Keep Chrome installed on the production Mac; if Chrome
   lives somewhere unusual, set `SCRAPER_BROWSER_PATH` in `.env`.
 
+  Validate it from the production Mac (the bot walls score the network's IP,
+  so only a probe from that machine tells the truth):
+
+  ```bash
+  npm run test-browser -- --live
+  ```
+
+  It first self-tests that a browser launches and renders JavaScript, then
+  probes the real LandWatch/Land.com/LandAndFarm search pages, comparing
+  what a plain fetch gets vs what the browser gets.
+
 **Easiest path: run the guided setup script instead of doing the steps below
 by hand.** From the scraper folder on the production Mac:
 

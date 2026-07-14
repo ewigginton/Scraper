@@ -125,6 +125,14 @@ if [ "$(ask 'Send a test email now? (y/n)' 'y')" = "y" ]; then
   fi
 fi
 
+# ---------------------------------------------------------------- step 4b
+say "Step 4b — verify the anti-block browser fallback"
+note "LandWatch/Land.com/LandAndFarm block plain scrapers; the scraper routes"
+note "blocked pages through this Mac's Google Chrome. Testing that now."
+if [ "$(ask 'Test the browser fallback against the real sites? (y/n)' 'y')" = "y" ]; then
+  node scripts/test-browser-fallback.js --live || note "Fallback test FAILED — install Google Chrome and re-run, or set SCRAPER_BROWSER_PATH in .env"
+fi
+
 # ---------------------------------------------------------------- step 5
 say "Step 5 of 5 — install the nightly launchd service"
 if [ "$IS_MAC" = true ]; then

@@ -9,8 +9,9 @@
     "review": "node review-leads.js",
     "price-check": "node index.js --price-check-only",
     "test-email": "node scripts/test-email.js",
+    "test-browser": "node scripts/test-browser-fallback.js",
     "check-airtable": "node scripts/check-airtable.js",
-    "test": "node --test test/*.test.js"
+    "test": "SCRAPER_BROWSER_FALLBACK=false node --test test/*.test.js"
   },
   "dependencies": {
     "airtable": "^0.12.2",
