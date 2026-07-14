@@ -126,25 +126,51 @@ if [ "$(ask 'Send a test email now? (y/n)' 'y')" = "y" ]; then
 fi
 
 # ---------------------------------------------------------------- step 5
-say "Step 5 of 5 — install the nightly launchd services"
+say "Step 5 of 5 — install the nightly launchd service"
 if [ "$IS_MAC" = true ]; then
-  if [ "$(ask 'Install/reload the 2 AM scraper + 6 AM review services? (y/n)' 'y')" = "y" ]; then
+  if [ "$(ask 'Install/reload the 2 AM nightly service? (y/n)' 'y')" = "y" ]; then
     mkdir -p "$HOME/Library/LaunchAgents"
-    for plist in com.ccl.land-scraper.plist com.ccl.land-review.plist; do
-      # The committed plists point at /Users/nora/ccl-land-scraper; rewrite to
-      # wherever this repo actually lives before installing
-      sed "s|/Users/nora/ccl-land-scraper|$REPO_DIR|g" "$REPO_DIR/services/$plist" \
-        > "$HOME/Library/LaunchAgents/$plist"
-      launchctl unload "$HOME/Library/LaunchAgents/$plist" 2>/dev/null || true
-      launchctl load "$HOME/Library/LaunchAgents/$plist"
-      note "Loaded $plist"
-    done
+    plist=com.ccl.land-scraper.plist
+    # The committed plist points at /Users/nora/ccl-land-scraper; rewrite to
+    # wherever this repo actually lives before installing
+    sed "s|/Users/nora/ccl-land-scraper|$REPO_DIR|g" "$REPO_DIR/services/$plist" \
+      > "$HOME/Library/LaunchAgents/$plist"
+    launchctl unload "$HOME/Library/LaunchAgents/$plist" 2>/dev/null || true
+    launchctl load "$HOME/Library/LaunchAgents/$plist"
+    note "Loaded $plist"
+
+    # The review is now part of the 2 AM run and its email — remove the old
+    # separate 6 AM review service so it stops sending a second email
+    OLD_REVIEW="$HOME/Library/LaunchAgents/com.ccl.land-review.plist"
+    if [ -f "$OLD_REVIEW" ]; then
+      launchctl unload "$OLD_REVIEW" 2>/dev/null || true
+      rm -f "$OLD_REVIEW"
+      note "Removed the old separate 6 AM review service (now runs inside the 2 AM job)"
+    fi
     note "Verify with: launchctl list | grep com.ccl"
+  fi
+
+  # Leftover jobs from earlier scraper versions cause duplicate daily emails
+  # (e.g. an 8 AM 'CCL Daily Land Report' digest). Point them out if present.
+  say "Checking for other scheduled jobs that send duplicate emails"
+  OTHER_AGENTS="$(ls "$HOME/Library/LaunchAgents" 2>/dev/null | grep -iv '^com\.ccl\.land-scraper\.plist$' | grep -iE 'ccl|land|scraper' || true)"
+  CRON_JOBS="$(crontab -l 2>/dev/null | grep -ivE '^\s*#' | grep -iE 'ccl|land|scraper|report' || true)"
+  if [ -n "$OTHER_AGENTS" ]; then
+    note "Found other launchd agents that look scraper-related — remove them if unwanted:"
+    printf '%s\n' "$OTHER_AGENTS" | sed 's/^/    /'
+    note "Remove with: launchctl unload ~/Library/LaunchAgents/<name> && rm ~/Library/LaunchAgents/<name>"
+  fi
+  if [ -n "$CRON_JOBS" ]; then
+    note "Found cron entries that look scraper-related — remove them with 'crontab -e' if unwanted:"
+    printf '%s\n' "$CRON_JOBS" | sed 's/^/    /'
+  fi
+  if [ -z "$OTHER_AGENTS" ] && [ -z "$CRON_JOBS" ]; then
+    note "None found — the 2 AM job should be the only thing emailing."
   fi
 else
   note "Not a Mac — skipping launchd install."
 fi
 
 say "Setup complete"
-note "Nightly scrape: 2:00 AM   Lead review: 6:00 AM"
+note "Nightly run (scrape + price check + review, one email): 2:00 AM"
 note "Re-run this script any time to change settings: bash scripts/setup-production.sh"

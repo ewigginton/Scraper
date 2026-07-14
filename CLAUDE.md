@@ -11,12 +11,13 @@ See `.env.example` for the full list.
 ## Running
 
 - Install deps: `npm install --silent`
-- Full scrape + price check: `node index.js`
-- Dry run (scrape and report without Airtable writes): `node index.js --dry-run`
+- Full nightly run (scrape + price check + review, ONE consolidated email): `node index.js`
+- Dry run (scrape and report without Airtable writes; review is skipped): `node index.js --dry-run`
 - Targeted dry run: `SCRAPER_TARGET_COUNTIES="Wayne|KY,Pittsburg|OK,Shannon|MO" SCRAPER_MAX_PAGE=1 node index.js --dry-run --skip-price-check`
-- Review leads only: `node review-leads.js`
+- Review leads only (manual; sends its own review email): `node review-leads.js`
 - Price check only: `node index.js --price-check-only`
 - Scrape without price check: `node index.js --skip-price-check`
+- Scrape without review: `node index.js --skip-review`
 
 ## GitHub Actions
 
@@ -61,5 +62,7 @@ in `lib/airtable.js` — never hardcode field names elsewhere:
 - Deduplication: URL match + property fingerprint (county/state/acres/price hash) + location/price-tolerance match; the dedup index includes `Not Interested` records so rejected leads are not re-created
 - Results written to Airtable `Leads` table
 - Failed Airtable writes are queued in `data/failed-writes/` and replayed automatically at the start of the next scrape (processed files move to `data/failed-writes/done/`)
+- The 2 AM nightly job runs scrape → price check → lead review and sends a
+  single consolidated email (no separate scheduled review job/email)
 - Launch scripts use a local run lock so scraper/review jobs do not overlap
 - Parser fetch/parse failures, bot-block detections, and markup-drift suspicions are saved locally under `data/source-health/` (HTML evidence in `source-health/snapshots/`) and summarized in reports

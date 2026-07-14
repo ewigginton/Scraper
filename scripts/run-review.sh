@@ -1,7 +1,7 @@
 #!/bin/bash
-# CCL Lead Review — launchd wrapper
-# Schedule: 6:00 AM daily on Nora's Mac
-# Service: com.ccl.land-review
+# CCL Lead Review — manual wrapper (with run-lock protection).
+# The nightly review runs inside the 2:00 AM scraper job (index.js) and is
+# part of the consolidated email; there is no scheduled review service.
 
 set -euo pipefail
 
