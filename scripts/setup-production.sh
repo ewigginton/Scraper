@@ -159,21 +159,40 @@ if [ "$IS_MAC" = true ]; then
   fi
 
   # Leftover jobs from earlier scraper versions cause duplicate daily emails
-  # (e.g. an 8 AM 'CCL Daily Land Report' digest). Point them out if present.
-  say "Checking for other scheduled jobs that send duplicate emails"
+  # and fight the nightly run over the intake queue (the 8 AM 'CCL Daily
+  # Land Report' digest, the old Listing Intake poller). Find them and offer
+  # to remove each one on the spot.
+  say "Checking for leftover jobs (old digest email, old intake poller)"
   OTHER_AGENTS="$(ls "$HOME/Library/LaunchAgents" 2>/dev/null | grep -iv '^com\.ccl\.land-scraper\.plist$' | grep -iE 'ccl|land|scraper|intake' || true)"
-  CRON_JOBS="$(crontab -l 2>/dev/null | grep -ivE '^\s*#' | grep -iE 'ccl|land|scraper|report|intake' || true)"
   if [ -n "$OTHER_AGENTS" ]; then
-    note "Found other launchd agents that look scraper-related — remove them if unwanted:"
-    printf '%s\n' "$OTHER_AGENTS" | sed 's/^/    /'
-    note "Remove with: launchctl unload ~/Library/LaunchAgents/<name> && rm ~/Library/LaunchAgents/<name>"
+    for AGENT in $OTHER_AGENTS; do
+      note "Found launchd agent: $AGENT"
+      if [ "$(ask "  Unload and delete $AGENT? (y/n)" 'y')" = "y" ]; then
+        launchctl unload "$HOME/Library/LaunchAgents/$AGENT" 2>/dev/null || true
+        rm -f "$HOME/Library/LaunchAgents/$AGENT"
+        note "  Removed $AGENT"
+      else
+        note "  Kept $AGENT (it may keep sending its own emails / processing intake)"
+      fi
+    done
   fi
+  CRON_JOBS="$(crontab -l 2>/dev/null | grep -ivE '^[[:space:]]*#' | grep -iE 'ccl|land|scraper|report|intake' || true)"
   if [ -n "$CRON_JOBS" ]; then
-    note "Found cron entries that look scraper-related — remove them with 'crontab -e' if unwanted:"
+    note "Found cron entries that look scraper-related:"
     printf '%s\n' "$CRON_JOBS" | sed 's/^/    /'
+    if [ "$(ask 'Remove these cron entries now? (y/n)' 'y')" = "y" ]; then
+      # Keep every crontab line EXCEPT the matched ones (comments stay)
+      REMAINING="$(crontab -l 2>/dev/null | grep -vxF "$CRON_JOBS" || true)"
+      if [ -n "$REMAINING" ]; then
+        printf '%s\n' "$REMAINING" | crontab -
+      else
+        crontab -r 2>/dev/null || true
+      fi
+      note "Removed. Verify what's left with: crontab -l"
+    fi
   fi
   if [ -z "$OTHER_AGENTS" ] && [ -z "$CRON_JOBS" ]; then
-    note "None found — the 2 AM job should be the only thing emailing."
+    note "None found — the 2 AM job is the only scheduled scraper job on this Mac."
   fi
 else
   note "Not a Mac — skipping launchd install."

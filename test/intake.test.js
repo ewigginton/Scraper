@@ -147,6 +147,29 @@ test('intake: duplicate URLs are marked Duplicate, not re-created', { timeout: 6
   assert.equal(calls.intakeUpdates[0].fields.Status, 'Duplicate');
 });
 
+test('intake: rows failed by the legacy poller are reclaimed and retried', { timeout: 60000 }, async (t) => {
+  const server = http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/html' });
+    res.end(LISTING_HTML);
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => server.close());
+  const url = `http://127.0.0.1:${server.address().port}/pittsburg-county-oklahoma-listing`;
+
+  // The legacy poller's signature: Status 'Needs Review', Result 'HTTP 403 fetching ...'
+  const calls = stubAirtable(t, {
+    queue: [{
+      id: 'recIntake0000004X',
+      fields: { URL: url, 'Submitted By': 'Isaac M', Status: 'Needs Review', Result: `HTTP 403 fetching ${url}` },
+    }],
+  });
+
+  const report = await processIntakeQueue({ dryRun: false });
+  assert.equal(report.reclaimed, 1, 'legacy failure must be counted as reclaimed');
+  assert.equal(report.created, 1, 'reclaimed row must be processed like any queued row');
+  assert.equal(calls.intakeUpdates[0].fields.Status, 'Added');
+});
+
 test('intake failures render in the consolidated email', () => {
   const { buildScraperBody } = require('../lib/notify');
   const scraperReport = {
