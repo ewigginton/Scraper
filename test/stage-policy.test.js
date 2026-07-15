@@ -101,3 +101,55 @@ test('the review never changes a lead Stage, even on dealbreakers', async (t) =>
   assert.ok(noteUpdate, 'analysis must be written to Scraper Notes');
   assert.match(noteUpdate.fields[FIELDS.notes], /landlocked/i);
 });
+
+/**
+ * The two tests above stub airtable.updateRecord wholesale, so the
+ * SCRAPER_MANAGED_STAGES guard INSIDE the real updateRecord (airtable.js)
+ * is never actually exercised. These drive the real updateRecord, stubbing
+ * only the underlying Airtable table via the getLeadsTable() seam.
+ */
+function stubLeadsTable(t, { currentStage, onUpdate } = {}) {
+  const original = airtable.getLeadsTable;
+  airtable.getLeadsTable = () => ({
+    find: async () => ({
+      get: (field) => (field === airtable.FIELDS.stage ? currentStage : undefined),
+    }),
+    update: async (recordId, fields, opts) => {
+      if (onUpdate) onUpdate(recordId, fields, opts);
+      return [{ id: recordId, fields: () => fields }];
+    },
+  });
+  t.after(() => { airtable.getLeadsTable = original; });
+}
+
+test('real updateRecord: a human-set stage (Emma Review) blocks the stage write', async (t) => {
+  const { FIELDS, STAGES } = airtable;
+  let updateCalled = false;
+  stubLeadsTable(t, {
+    currentStage: STAGES.emmaReview,
+    onUpdate: () => { updateCalled = true; },
+  });
+
+  const result = await airtable.updateRecord('recEmmaReview001', { [FIELDS.stage]: STAGES.priceDrop }, true);
+
+  assert.equal(result.updated, false);
+  assert.match(result.reason, /Emma Review/);
+  assert.equal(updateCalled, false, 'no write should reach the table when a human owns the stage');
+});
+
+test('real updateRecord: a scraper-managed stage (New Lead) allows the stage write', async (t) => {
+  const { FIELDS, STAGES } = airtable;
+  let updateArgs = null;
+  stubLeadsTable(t, {
+    currentStage: STAGES.newLead,
+    onUpdate: (recordId, fields, opts) => { updateArgs = { recordId, fields, opts }; },
+  });
+
+  const result = await airtable.updateRecord('recNewLead002', { [FIELDS.stage]: STAGES.priceDrop }, true);
+
+  assert.equal(result.updated, true);
+  assert.ok(updateArgs, 'the write must reach the table for a scraper-managed stage');
+  assert.equal(updateArgs.recordId, 'recNewLead002');
+  assert.equal(updateArgs.fields[FIELDS.stage], STAGES.priceDrop);
+  assert.equal(updateArgs.opts.typecast, true);
+});

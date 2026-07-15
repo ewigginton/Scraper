@@ -7,9 +7,13 @@ const http = require('http');
 // Deterministic even when run outside npm test: intake failures here must
 // come from the plain fetch, not a real browser launch
 process.env.SCRAPER_BROWSER_FALLBACK = 'false';
+// Integration tests below serve fixtures from 127.0.0.1; allow intake's SSRF
+// guard to fetch loopback for those. The dedicated SSRF test toggles this off.
+process.env.SCRAPER_ALLOW_LOOPBACK_FETCH = 'true';
 
 const airtable = require('../lib/airtable');
-const { processIntakeQueue, extractListingDetails, extractAcres, cleanTitle } = require('../lib/intake');
+const { locationKey } = require('../lib/fingerprint');
+const { processIntakeQueue, extractListingDetails, extractAcres, extractCountyState, cleanTitle } = require('../lib/intake');
 
 const LISTING_HTML = `<html><head>
   <title>Headwaters Ranch - 1,118 Acres in Pittsburg County | Republic Ranches</title>
@@ -69,6 +73,137 @@ test('extractListingDetails matches county from a URL slug', (t) => {
     'https://www.landwatch.com/pittsburg-county-oklahoma-farms-and-ranches-for-sale/pid/426088291');
   assert.equal(details.county, 'Pittsburg');
   assert.equal(details.state, 'OK');
+});
+
+const WAYNE_COUNTIES = [{ county: 'Wayne', state: 'KY' }, { county: 'Wayne', state: 'MO' }];
+
+test('extractCountyState disambiguates Wayne KY vs MO by URL slug (full state name)', (t) => {
+  stubAirtable(t, { queue: [], counties: WAYNE_COUNTIES });
+  assert.deepEqual(
+    extractCountyState('https://www.landwatch.com/wayne-county-missouri-land-for-sale/pid/123', ''),
+    { county: 'Wayne', state: 'MO' });
+  assert.deepEqual(
+    extractCountyState('https://www.landwatch.com/wayne-county-kentucky-land-for-sale/pid/456', ''),
+    { county: 'Wayne', state: 'KY' });
+});
+
+test('extractCountyState disambiguates by URL slug via a standalone state abbreviation token', (t) => {
+  stubAirtable(t, { queue: [], counties: WAYNE_COUNTIES });
+  assert.deepEqual(
+    extractCountyState('https://example.com/listings/wayne-county-mo/pid/9', ''),
+    { county: 'Wayne', state: 'MO' });
+});
+
+test('extractCountyState disambiguates Wayne KY vs MO by page text', (t) => {
+  stubAirtable(t, { queue: [], counties: WAYNE_COUNTIES });
+  // Comma-anchored abbreviation "Wayne County, MO"
+  assert.deepEqual(
+    extractCountyState('https://republicranches.com/listing/123', 'Timbered tract in Wayne County, MO near the river.'),
+    { county: 'Wayne', state: 'MO' });
+  // Full state name in text
+  assert.deepEqual(
+    extractCountyState('https://republicranches.com/listing/123', 'Wayne County property located in Kentucky.'),
+    { county: 'Wayne', state: 'KY' });
+});
+
+test('extractCountyState does NOT match a bare padded 2-letter word in text', (t) => {
+  stubAirtable(t, { queue: [], counties: WAYNE_COUNTIES });
+  // " me " / " or " style words must not stand in for a state abbreviation.
+  assert.deepEqual(
+    extractCountyState('https://republicranches.com/listing/123', 'Wayne County is a place you or me would love.'),
+    { county: null, state: null });
+});
+
+test('extractCountyState returns null when the county name is ambiguous with no state signal', (t) => {
+  stubAirtable(t, { queue: [], counties: WAYNE_COUNTIES });
+  assert.deepEqual(
+    extractCountyState('https://example.com/wayne-county-land/pid/9', 'A fine Wayne County acreage listing.'),
+    { county: null, state: null });
+});
+
+test('extractCountyState returns a lone match without needing a state signal', (t) => {
+  stubAirtable(t, { queue: [], counties: [{ county: 'Pittsburg', state: 'OK' }, { county: 'Wayne', state: 'KY' }] });
+  assert.deepEqual(
+    extractCountyState('https://www.landwatch.com/pittsburg-county-farms/pid/1', ''),
+    { county: 'Pittsburg', state: 'OK' });
+});
+
+test('intake: an ambiguous county still creates a lead and flags it for manual fill-in', { timeout: 60000 }, async (t) => {
+  const AMBIGUOUS_HTML = `<html><head>
+    <title>River Bottom Tract - 80 Acres</title>
+    <meta property="og:description" content="80 acres of Wayne County hunting ground.">
+    <script type="application/ld+json">{"@type":"Product","offers":{"price":"120000"}}</script>
+  </head><body><h1>River Bottom Tract</h1><p>80 acres in Wayne County.</p></body></html>`;
+  const server = http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/html' });
+    res.end(AMBIGUOUS_HTML);
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => server.close());
+  const url = `http://127.0.0.1:${server.address().port}/wayne-county-land`;
+
+  const calls = stubAirtable(t, {
+    queue: [{ id: 'recIntakeAmbig01X', fields: { URL: url, 'Submitted By': 'Emma' } }],
+    counties: WAYNE_COUNTIES,
+  });
+
+  const report = await processIntakeQueue({ dryRun: false });
+  assert.equal(report.created, 1, 'ambiguous county must not block lead creation');
+  assert.equal(calls.createdLeads.length, 1);
+  assert.equal(calls.createdLeads[0].county, null, 'ambiguous county stays unset');
+  assert.match(calls.createdLeads[0].description, /county/, 'notes list county as a gap');
+  assert.match(calls.createdLeads[0].description, /fill in manually/i);
+  assert.equal(calls.intakeUpdates[0].fields.Status, 'Added');
+});
+
+test('intake: a suspected cross-site duplicate is written with Possible Dup Reason propagated', { timeout: 60000 }, async (t) => {
+  const server = http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/html' });
+    res.end(LISTING_HTML);
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => server.close());
+  const url = `http://127.0.0.1:${server.address().port}/pittsburg-county-oklahoma-listing`;
+
+  // Layer-3 near-match: same county/state/acreage, price within tolerance,
+  // but NOT a URL or fingerprint duplicate — so it is written, flagged.
+  const locationMap = new Map([[locationKey('Pittsburg', 'OK', 1118), [{ price: 3018654 }]]]);
+  const calls = stubAirtable(t, {
+    queue: [{ id: 'recIntakeCross01X', fields: { URL: url, 'Submitted By': 'Emma' } }],
+    dedupIndex: { urlSet: new Set(), fingerprintSet: new Set(), locationMap, records: [] },
+  });
+
+  const report = await processIntakeQueue({ dryRun: false });
+  assert.equal(report.created, 1, 'suspected cross-site dup is still created');
+  assert.equal(report.duplicates, 0);
+  assert.equal(calls.createdLeads.length, 1);
+  assert.match(calls.createdLeads[0].possibleDuplicateReason, /Possible cross-site duplicate/);
+  assert.ok(
+    (calls.createdLeads[0].validationErrors || []).some(e => /cross-site duplicate/.test(e)),
+    'suspected cross-site note is also added to validationErrors',
+  );
+  assert.equal(calls.intakeUpdates[0].fields.Status, 'Added');
+});
+
+test('intake: a URL resolving to an internal address fails the SSRF guard and retries', { timeout: 60000 }, async (t) => {
+  // Turn the guard back ON for this case (the file globally bypasses it so the
+  // other integration tests can use loopback fixtures).
+  const priorAllow = process.env.SCRAPER_ALLOW_LOOPBACK_FETCH;
+  process.env.SCRAPER_ALLOW_LOOPBACK_FETCH = 'false';
+  t.after(() => { process.env.SCRAPER_ALLOW_LOOPBACK_FETCH = priorAllow; });
+
+  // Loopback literal — assertPublicUrl rejects before any fetch is attempted.
+  const url = 'http://127.0.0.1:9/internal-listing';
+  const calls = stubAirtable(t, {
+    queue: [{ id: 'recIntakeSsrf001X', fields: { URL: url, 'Submitted By': 'Emma' } }],
+  });
+
+  const report = await processIntakeQueue({ dryRun: false });
+  assert.equal(report.created, 0);
+  assert.equal(calls.createdLeads.length, 0, 'blocked URL must never be fetched or created');
+  assert.equal(report.retryQueued, 1, 'first SSRF rejection follows the normal Retry flow');
+  assert.equal(calls.intakeUpdates[0].fields.Status, 'Retry');
+  assert.match(calls.intakeUpdates[0].fields.Result, /private\/internal/);
 });
 
 test('intake: a fetchable URL becomes a New Lead and the row is marked Added', { timeout: 60000 }, async (t) => {

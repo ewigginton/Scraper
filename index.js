@@ -113,6 +113,8 @@ async function main() {
         try {
           intakeReport = await processIntakeQueue({ dryRun });
         } catch (err) {
+          // Not fatal (unlike review): intake has its own per-item Retry/Failed
+          // flow that re-attempts on the next nightly run.
           console.error(`[Main] Listing intake failed: ${err.message}`);
           console.error(err.stack);
           if (scraperReport) {

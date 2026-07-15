@@ -165,7 +165,9 @@ if [ "$IS_MAC" = true ]; then
   say "Checking for leftover jobs (old digest email, old intake poller)"
   OTHER_AGENTS="$(ls "$HOME/Library/LaunchAgents" 2>/dev/null | grep -iv '^com\.ccl\.land-scraper\.plist$' | grep -iE 'ccl|land|scraper|intake' || true)"
   if [ -n "$OTHER_AGENTS" ]; then
-    for AGENT in $OTHER_AGENTS; do
+    # Loop input on fd 3, NOT stdin — `ask` reads the user's answer from stdin.
+    while IFS= read -r AGENT <&3; do
+      [ -n "$AGENT" ] || continue
       note "Found launchd agent: $AGENT"
       if [ "$(ask "  Unload and delete $AGENT? (y/n)" 'y')" = "y" ]; then
         launchctl unload "$HOME/Library/LaunchAgents/$AGENT" 2>/dev/null || true
@@ -174,7 +176,7 @@ if [ "$IS_MAC" = true ]; then
       else
         note "  Kept $AGENT (it may keep sending its own emails / processing intake)"
       fi
-    done
+    done 3<<< "$OTHER_AGENTS"
   fi
   CRON_JOBS="$(crontab -l 2>/dev/null | grep -ivE '^[[:space:]]*#' | grep -iE 'ccl|land|scraper|report|intake' || true)"
   if [ -n "$CRON_JOBS" ]; then

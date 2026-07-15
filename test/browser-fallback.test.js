@@ -91,6 +91,24 @@ test('scrapeAll rescues an HTTP-200 challenge page through the browser', async (
   assert.equal(parser.stats.browserFetches, 1);
 });
 
+test('scrapeAll rescues a hard HTTP 403 (plain fetch refused outright) through the browser', async (t) => {
+  withStubbedBrowser(t, { enabled: true, html: '<html>REAL LISTING</html>' });
+  const parser = makeParser();
+  parser.sleep = async () => {};
+  parser.fetchPage = async () => {
+    const err = new Error('HTTP 403 for url');
+    err.status = 403;
+    throw err;
+  };
+
+  const listings = await parser.scrapeAll([{ county: 'Wayne', state: 'KY' }]);
+  assert.equal(listings.length, 1);
+  assert.equal(parser.stats.checked, 1, 'the rescued fetch still counts as a checked page');
+  assert.equal(parser.stats.browserFetches, 1);
+  assert.equal(parser.stats.blockedPages, 0, 'a rescued 403 must not count as blocked — fetchPageSmart never lets the error reach scrapeAll\'s catch block');
+  assert.equal(parser.stats.errors, 0);
+});
+
 test('scrapeAll still records a block when the browser also gets a challenge page', async (t) => {
   withStubbedBrowser(t, { enabled: true, html: '<html>Just a moment... px-captcha</html>' });
   const parser = makeParser();
