@@ -141,9 +141,9 @@ in `lib/airtable.js` — never hardcode field names elsewhere:
 - County targets loaded dynamically from Airtable `County` table using `CPA Target`
 - Filtering: accepts listings within 20% of CPA target, watches 20-30% over, rejects >30%
 - Deduplication: URL match + property fingerprint (county/state/acres/price hash) + location/price-tolerance match; the dedup index includes `Not Interested` records so rejected leads are not re-created
-- Results written to Airtable `Leads` table
+- Results written to the Airtable `Land` table
 - Failed Airtable writes are queued in `data/failed-writes/` and replayed automatically at the start of the next scrape (processed files move to `data/failed-writes/done/`)
 - The 2 AM nightly job runs scrape → price check → lead review and sends a
   single consolidated email (no separate scheduled review job/email)
 - Launch scripts use a local run lock so scraper/review jobs do not overlap
-- Parser fetch/parse failures, bot-block detections, and markup-drift suspicions are saved locally under `data/source-health/` (HTML evidence in `source-health/snapshots/`) and summarized in reports
+- Parser fetch/parse failures, bot-block detections, and markup-drift suspicions are saved locally under `data/source-health/` (HTML evidence in `data/source-health/snapshots/`) and summarized in reports
