@@ -30,9 +30,9 @@
     "domNegotiationDays": 180
   },
   "sites": {
-    "landwatch": { "enabled": false },
-    "landcom": { "enabled": false },
-    "landfarm": { "enabled": false },
+    "landwatch": { "enabled": false, "countyRotation": 3 },
+    "landcom": { "enabled": false, "countyRotation": 3 },
+    "landfarm": { "enabled": false, "countyRotation": 3 },
     "landsofamerica": { "enabled": false },
     "livingthedream": { "enabled": true },
     "whitetail": { "enabled": true },
