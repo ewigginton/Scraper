@@ -5,7 +5,14 @@ const assert = require('node:assert/strict');
 const { initFilter, filterListing } = require('../lib/filter');
 const { generateFingerprint } = require('../lib/fingerprint');
 const airtable = require('../lib/airtable');
-const { selectTargetCounties } = require('../lib/scraper');
+const {
+  selectTargetCounties,
+  processScrapedListings,
+  runBotWallRetries,
+  resolveBotWallCooldownMinutes,
+} = require('../lib/scraper');
+const { buildScraperBody } = require('../lib/notify');
+const BaseParser = require('../lib/parsers/base-parser');
 
 test('full pipeline: filter -> fingerprint -> dedup flow', () => {
   initFilter(new Map([
@@ -182,4 +189,190 @@ test('selectTargetCounties fails loudly when requested counties are missing', ()
   }, [
     { county: 'Wayne', state: 'KY' },
   ]), /Wayne, KY/);
+});
+
+// --- Bot-wall post-cooldown retry ---------------------------------------
+
+const VALID_LISTING = {
+  name: 'Retry Tract', price: 300000, acres: 100, county: 'Taney', state: 'MO', url: 'https://retry.example/1',
+};
+
+// A parser stub whose scrapeAll follows a scripted list of passes: each pass
+// declares the listings it returns and whether it trips the circuit breaker.
+// sleep() is a no-op so the cooldown never actually blocks the test.
+class FakeBotWallParser extends BaseParser {
+  constructor(passes) {
+    super('FakeSite');
+    this._passes = passes;
+    this._passIndex = 0;
+    this.scrapeCalls = 0;
+  }
+  sleep() { return Promise.resolve(); }
+  async scrapeAll() {
+    this.scrapeCalls++;
+    const pass = this._passes[this._passIndex++] || { listings: [], abort: false };
+    const listings = (pass.listings || []).map(l => ({ ...l, source: this.name }));
+    this.stats.checked += listings.length;
+    if (pass.abort) {
+      this.stats.abortedByBotWall = true;
+      this.stats.abortedAt = Date.now();
+    }
+    return listings;
+  }
+}
+
+function makeCtx() {
+  const report = {
+    sites: {},
+    totals: { checked: 0, parsed: 0, passed: 0, duplicates: 0, rejected: 0, written: 0, wouldWrite: 0, errors: 0 },
+    duplicateDetails: [], filterRejects: [], writeErrors: [], sourceIssues: [], warnings: [],
+    dryRun: true,
+  };
+  const ctx = {
+    dedupIndex: { urlSet: new Set(), fingerprintSet: new Set() },
+    sessionFingerprints: new Map(),
+    report,
+    dryRun: true,
+  };
+  return { report, ctx };
+}
+
+// Mirror the orchestrator's first pass: scrape, process, detect a breaker abort.
+async function runFirstPass(parser, ctx) {
+  const listings = await parser.scrapeAll([]);
+  const siteReport = await processScrapedListings(parser, listings, ctx);
+  ctx.report.sites[parser.name] = siteReport;
+  const abortedParsers = [];
+  if (parser.stats.abortedByBotWall) {
+    abortedParsers.push({ parser, abortedAt: parser.stats.abortedAt, firstPass: siteReport });
+  }
+  return abortedParsers;
+}
+
+function withEnv(overrides, fn) {
+  const saved = {};
+  for (const key of Object.keys(overrides)) {
+    saved[key] = process.env[key];
+    if (overrides[key] === undefined) delete process.env[key];
+    else process.env[key] = overrides[key];
+  }
+  return Promise.resolve()
+    .then(fn)
+    .finally(() => {
+      for (const key of Object.keys(overrides)) {
+        if (saved[key] === undefined) delete process.env[key];
+        else process.env[key] = saved[key];
+      }
+    });
+}
+
+test('bot-wall retry: aborts on pass 1, succeeds on pass 2 — listings reach report', async () => {
+  initFilter(new Map([['taney|MO', 4000]]));
+  const parser = new FakeBotWallParser([
+    { listings: [], abort: true },
+    { listings: [VALID_LISTING], abort: false },
+  ]);
+  const { report, ctx } = makeCtx();
+
+  await withEnv({ GITHUB_ACTIONS: undefined, SCRAPER_BOTWALL_COOLDOWN_MINUTES: '60' }, async () => {
+    const aborted = await runFirstPass(parser, ctx);
+    assert.equal(aborted.length, 1, 'first pass should register the breaker abort');
+    await runBotWallRetries(aborted, ctx, []);
+  });
+
+  assert.equal(parser.scrapeCalls, 2, 'exactly one first pass and one retry');
+  assert.equal(report.totals.passed, 1, 'retry listing should pass the pipeline into the report');
+  assert.equal(report.totals.wouldWrite, 1, 'retry listing counted for the dry-run write');
+  const site = report.sites.FakeSite;
+  assert.equal(site.status, 'retried_after_cooldown');
+  assert.equal(site.retryPass.blockedAgain, false);
+  assert.ok(
+    report.warnings.some(w => /retried after .* cooldown — succeeded/.test(w)),
+    `expected a success retry warning, got: ${report.warnings.join(' | ')}`
+  );
+});
+
+test('bot-wall retry: aborts on both passes — reported blocked, no third attempt', async () => {
+  initFilter(new Map([['taney|MO', 4000]]));
+  const parser = new FakeBotWallParser([
+    { listings: [], abort: true },
+    { listings: [], abort: true },
+  ]);
+  const { report, ctx } = makeCtx();
+
+  await withEnv({ GITHUB_ACTIONS: undefined, SCRAPER_BOTWALL_COOLDOWN_MINUTES: '60' }, async () => {
+    const aborted = await runFirstPass(parser, ctx);
+    await runBotWallRetries(aborted, ctx, []);
+  });
+
+  assert.equal(parser.scrapeCalls, 2, 'no third attempt after the retry also aborts');
+  const site = report.sites.FakeSite;
+  assert.equal(site.status, 'retried_after_cooldown');
+  assert.equal(site.retryPass.blockedAgain, true);
+  assert.ok(
+    report.warnings.some(w => /retried after .* cooldown — blocked again/.test(w)),
+    `expected a blocked-again retry warning, got: ${report.warnings.join(' | ')}`
+  );
+});
+
+test('bot-wall retry: SCRAPER_BOTWALL_COOLDOWN_MINUTES=0 disables the retry', async () => {
+  initFilter(new Map([['taney|MO', 4000]]));
+  const parser = new FakeBotWallParser([
+    { listings: [], abort: true },
+    { listings: [VALID_LISTING], abort: false },
+  ]);
+  const { report, ctx } = makeCtx();
+
+  await withEnv({ GITHUB_ACTIONS: undefined, SCRAPER_BOTWALL_COOLDOWN_MINUTES: '0' }, async () => {
+    assert.equal(resolveBotWallCooldownMinutes(), 0);
+    const aborted = await runFirstPass(parser, ctx);
+    await runBotWallRetries(aborted, ctx, []);
+  });
+
+  assert.equal(parser.scrapeCalls, 1, 'no retry attempted when cooldown is 0');
+  assert.equal(report.totals.passed, 0);
+  assert.equal(report.sites.FakeSite.status, 'ok', 'site keeps its first-pass status');
+  assert.ok(
+    report.warnings.some(w => /retry disabled \(SCRAPER_BOTWALL_COOLDOWN_MINUTES=0\)/.test(w)),
+    `expected a disabled-retry warning, got: ${report.warnings.join(' | ')}`
+  );
+});
+
+test('bot-wall retry: GITHUB_ACTIONS disables the retry (no hour-long sleep in CI)', async () => {
+  initFilter(new Map([['taney|MO', 4000]]));
+  const parser = new FakeBotWallParser([
+    { listings: [], abort: true },
+    { listings: [VALID_LISTING], abort: false },
+  ]);
+  const { report, ctx } = makeCtx();
+
+  await withEnv({ GITHUB_ACTIONS: '1', SCRAPER_BOTWALL_COOLDOWN_MINUTES: '60' }, async () => {
+    assert.equal(resolveBotWallCooldownMinutes(), 0, 'CI forces cooldown to 0 regardless of the override');
+    const aborted = await runFirstPass(parser, ctx);
+    await runBotWallRetries(aborted, ctx, []);
+  });
+
+  assert.equal(parser.scrapeCalls, 1, 'no retry attempted under GITHUB_ACTIONS');
+  assert.equal(report.sites.FakeSite.status, 'ok');
+  assert.ok(
+    report.warnings.some(w => /retry disabled in CI/.test(w)),
+    `expected a CI-disabled retry warning, got: ${report.warnings.join(' | ')}`
+  );
+});
+
+test('bot-wall retry: consolidated email surfaces the retried-after-cooldown outcome', () => {
+  const report = {
+    dryRun: false,
+    sites: {
+      FakeSite: {
+        status: 'retried_after_cooldown', parsed: 12, passed: 3, written: 3, duplicates: 0,
+        cooldownMinutes: 58, firstPass: { parsed: 0, passed: 0 },
+        retryPass: { parsed: 12, passed: 3, blockedAgain: false },
+      },
+    },
+    totals: { written: 3, wouldWrite: 0, duplicates: 0, rejected: 0, errors: 0 },
+    duplicateDetails: [], writeErrors: [], sourceIssues: [], warnings: [], elapsedMinutes: 120,
+  };
+  const body = buildScraperBody(report, null, 'Test Day', null, null);
+  assert.match(body, /retried after 58 min cooldown — succeeded/);
 });

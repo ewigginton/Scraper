@@ -11,7 +11,8 @@
     "requestDelayMs": 2000,
     "requestTimeoutMs": 30000,
     "maxRetries": 3,
-    "retryDelayMs": 5000
+    "retryDelayMs": 5000,
+    "botWallCooldownMinutes": 60
   },
   "priceCheck": {
     "delayBetweenChecksMs": 3000,
@@ -29,9 +30,9 @@
     "domNegotiationDays": 180
   },
   "sites": {
-    "landwatch": { "enabled": true },
-    "landcom": { "enabled": true },
-    "landfarm": { "enabled": true },
+    "landwatch": { "enabled": false },
+    "landcom": { "enabled": false },
+    "landfarm": { "enabled": false },
     "landsofamerica": { "enabled": false },
     "livingthedream": { "enabled": true },
     "whitetail": { "enabled": true },
