@@ -52,7 +52,35 @@ test('fetchPageSmart falls back to the browser on HTTP 403', async (t) => {
   assert.match(html, /REAL LISTING/);
 });
 
-test('fetchPageSmart rethrows non-403 errors without touching the browser', async (t) => {
+test('fetchPageSmart falls back to the browser on HTTP 400 (CoStar bot wall)', async (t) => {
+  withStubbedBrowser(t, { enabled: true, html: '<html>REAL LISTING</html>' });
+  const parser = makeParser();
+  parser.fetchPage = async () => {
+    const err = new Error('HTTP 400 for url');
+    err.status = 400;
+    throw err;
+  };
+
+  const html = await parser.fetchPageSmart('https://example.com/search?page=1');
+  assert.match(html, /REAL LISTING/);
+});
+
+test('fetchPageSmart falls back to the browser on HTTP 429 once plain retries are exhausted', async (t) => {
+  // fetchPage already retries 429 with backoff and rethrows when the budget
+  // runs out; fetchPageSmart then gets its one browser attempt.
+  withStubbedBrowser(t, { enabled: true, html: '<html>REAL LISTING</html>' });
+  const parser = makeParser();
+  parser.fetchPage = async () => {
+    const err = new Error('HTTP 429 for url');
+    err.status = 429;
+    throw err;
+  };
+
+  const html = await parser.fetchPageSmart('https://example.com/search?page=1');
+  assert.match(html, /REAL LISTING/);
+});
+
+test('fetchPageSmart rethrows non-bot-wall errors without touching the browser', async (t) => {
   let browserCalled = false;
   withStubbedBrowser(t, { enabled: true, html: '<html></html>' });
   const parser = makeParser();
@@ -64,6 +92,21 @@ test('fetchPageSmart rethrows non-403 errors without touching the browser', asyn
   };
 
   await assert.rejects(() => parser.fetchPageSmart('https://example.com/x'), /HTTP 500/);
+  assert.equal(browserCalled, false);
+});
+
+test('fetchPageSmart does NOT fall back on HTTP 404 (genuine removed listing)', async (t) => {
+  let browserCalled = false;
+  withStubbedBrowser(t, { enabled: true, html: '<html></html>' });
+  const parser = makeParser();
+  parser.browserFetch = async () => { browserCalled = true; return '<html></html>'; };
+  parser.fetchPage = async () => {
+    const err = new Error('HTTP 404 for url');
+    err.status = 404;
+    throw err;
+  };
+
+  await assert.rejects(() => parser.fetchPageSmart('https://example.com/x'), /HTTP 404/);
   assert.equal(browserCalled, false);
 });
 
@@ -118,4 +161,32 @@ test('scrapeAll still records a block when the browser also gets a challenge pag
   const listings = await parser.scrapeAll([{ county: 'Wayne', state: 'KY' }]);
   assert.equal(listings.length, 0);
   assert.equal(parser.stats.blockedPages, 1);
+});
+
+test('scrapeAll counts a hard 400 as blocked when the browser fallback also fails, and aborts after 5', async (t) => {
+  // The browser attempt fails, so fetchPageSmart rethrows the original 400
+  // into scrapeAll's catch block, where isBotWallStatus(400) marks it blocked.
+  withStubbedBrowser(t, { enabled: true, error: new Error('browser navigation failed') });
+  const parser = new BaseParser('TestSite');
+  parser.sleep = async () => {};
+  // Six distinct county series so each contributes one blocked page — a single
+  // county series collapses to one seriesKey and would only block once.
+  const counties = ['Wayne', 'Pike', 'Shannon', 'Taney', 'Butler', 'Ripley'];
+  parser.buildSearchUrls = () => counties.map((county, i) => ({
+    url: `https://example.com/${county}/search?page=1`, county, state: 'MO', page: 1,
+  }));
+  parser.parseSearchPage = () => [];
+  parser.fetchPage = async () => {
+    const err = new Error('HTTP 400 for url');
+    err.status = 400;
+    throw err;
+  };
+
+  const listings = await parser.scrapeAll(counties.map(county => ({ county, state: 'MO' })));
+  assert.equal(listings.length, 0);
+  // Circuit breaker trips at BLOCKED_PAGES_ABORT_THRESHOLD (5); the 6th county
+  // is skipped, so exactly 5 pages count as blocked.
+  assert.equal(parser.stats.blockedPages, 5);
+  assert.ok(parser.sourceIssues.some(issue => issue.type === 'site_abandoned'),
+    'the run must abandon the site with a site_abandoned source issue');
 });

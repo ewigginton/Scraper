@@ -133,3 +133,52 @@ test('a page with cards but no parseable price/acres yields no listings but coun
   assert.deepEqual(listings, []);
   assert.equal(parser._lastCardCount, 1, 'card was seen even though it was unparseable');
 });
+
+// ---------- naming: photo-overlay anchors must not win the listing name ----------
+
+test('a title anchor beats a photo-overlay anchor sharing the same detail href', () => {
+  const parser = new MossyOakParser();
+  const html = `
+    <html><body>
+      <div>
+        <a href="/property/reynolds-farm-789"><img src="x.jpg" alt="">Click to View More Photos</a>
+        <a href="/property/reynolds-farm-789">Beautiful Reynolds County Farm</a>
+        <span>Reynolds County, MO</span> <span>200 acres</span> <span>$400,000</span>
+      </div>
+    </body></html>`;
+  const listings = parser.parseSearchPage(html, 'Reynolds', 'MO');
+  assert.equal(listings.length, 1);
+  assert.equal(listings[0].name, 'Beautiful Reynolds County Farm');
+  assert.equal(parser._lastCardCount, 1, 'one detail href, not two cards');
+});
+
+test('a heading inside the card wins when every anchor for the href is junk', () => {
+  const parser = new MossyOakParser();
+  const html = `
+    <html><body>
+      <div>
+        <h3>Rolling Hills Hunting Tract</h3>
+        <a href="/property/rolling-hills-321">Click to View More Photos</a>
+        <a href="/property/rolling-hills-321">View Details</a>
+        <span>Reynolds County, MO</span> <span>150 acres</span> <span>$300,000</span>
+      </div>
+    </body></html>`;
+  const listings = parser.parseSearchPage(html, 'Reynolds', 'MO');
+  assert.equal(listings.length, 1);
+  assert.equal(listings[0].name, 'Rolling Hills Hunting Tract');
+});
+
+test('falls back to "${county} Land" when no anchor text or heading is usable', () => {
+  const parser = new MossyOakParser();
+  const html = `
+    <html><body>
+      <div>
+        <a href="/property/no-title-654">Click to View More Photos</a>
+        <a href="/property/no-title-654">More</a>
+        <span>Reynolds County, MO</span> <span>80 acres</span> <span>$200,000</span>
+      </div>
+    </body></html>`;
+  const listings = parser.parseSearchPage(html, 'Reynolds', 'MO');
+  assert.equal(listings.length, 1);
+  assert.equal(listings[0].name, 'Reynolds Land');
+});
