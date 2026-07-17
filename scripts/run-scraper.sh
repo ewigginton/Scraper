@@ -96,6 +96,76 @@ if [ -z "$NODE_BIN" ]; then
   exit 127
 fi
 
+# --- Self-update -----------------------------------------------------------
+# Production kept drifting behind GitHub (new parsers never ran because
+# nobody pulled). Fast-forward to origin/main before every run. A failed
+# update NEVER blocks the night's run — the run proceeds on current code and
+# the email carries the warning via SCRAPER_UPDATE_WARNING.
+#
+# The run lock is held for the whole self-update, so a stalled fetch must not
+# be allowed to hang forever (it would wedge every subsequent night). macOS
+# ships no `timeout` binary but always has perl, so `perl -e 'alarm shift;
+# exec @ARGV' SECONDS cmd...` is used as a portable timeout: alarm() fires
+# SIGALRM into the exec'd process; git doesn't catch it, so the default
+# (terminate) disposition applies and the shell sees a nonzero/signal exit
+# code, which is treated the same as any other fetch/merge failure below.
+UPDATE_WARNING=""
+NPM_INSTALL_SENTINEL="$SCRIPT_DIR/services/land-scraper/.npm-install-retry"
+if git -C "$SCRIPT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  CURRENT_BRANCH="$(git -C "$SCRIPT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
+  if [ "$CURRENT_BRANCH" = "main" ]; then
+    BEFORE_REV="$(git -C "$SCRIPT_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"
+    # No TTY under launchd — a credential prompt on a stalled/misconfigured
+    # remote would otherwise hang forever instead of failing fast.
+    export GIT_TERMINAL_PROMPT=0
+    if perl -e 'alarm shift; exec @ARGV' 120 \
+        git -C "$SCRIPT_DIR" -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=60 \
+        fetch origin main >> "$LOG_FILE" 2>&1; then
+      if perl -e 'alarm shift; exec @ARGV' 120 \
+          git -C "$SCRIPT_DIR" merge --ff-only origin/main >> "$LOG_FILE" 2>&1; then
+        :
+      else
+        UPDATE_WARNING="Self-update failed: $SCRIPT_DIR has local edits or diverged from GitHub — production is running OLD code. Run 'git status' there and reconcile."
+      fi
+    else
+      UPDATE_WARNING="Self-update failed: could not reach GitHub, or the fetch stalled and was killed after 120s — running possibly outdated code"
+    fi
+    unset GIT_TERMINAL_PROMPT
+    AFTER_REV="$(git -C "$SCRIPT_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"
+    if [ "$BEFORE_REV" != "$AFTER_REV" ]; then
+      echo "Self-update: $BEFORE_REV -> $AFTER_REV" >> "$LOG_FILE"
+    fi
+    # `git merge --ff-only` above already advanced HEAD, so BEFORE/AFTER can't
+    # gate npm install on its own: if npm install then fails, next night's
+    # revs are equal and a plain rev-check would never retry, leaving new
+    # code running on stale node_modules indefinitely. A sentinel file
+    # (outside $LOCK_DIR, which is removed every run) survives across nights
+    # so a failed install is retried until it succeeds.
+    if [ "$BEFORE_REV" != "$AFTER_REV" ] || [ -f "$NPM_INSTALL_SENTINEL" ]; then
+      if [ -f "$NPM_INSTALL_SENTINEL" ] && [ "$BEFORE_REV" = "$AFTER_REV" ]; then
+        echo "Retrying npm install (previous attempt failed)" >> "$LOG_FILE"
+      fi
+      if npm install --silent --no-audit --no-fund >> "$LOG_FILE" 2>&1; then
+        rm -f "$NPM_INSTALL_SENTINEL"
+      else
+        touch "$NPM_INSTALL_SENTINEL"
+        NPM_WARNING="'npm install' failed — run it manually in $SCRIPT_DIR (will retry automatically next run)"
+        if [ -n "$UPDATE_WARNING" ]; then
+          UPDATE_WARNING="$UPDATE_WARNING Also: $NPM_WARNING"
+        else
+          UPDATE_WARNING="Code was updated but $NPM_WARNING"
+        fi
+      fi
+    fi
+  else
+    UPDATE_WARNING="Self-update skipped: checkout is on branch '$CURRENT_BRANCH', not main — production may be running OLD code"
+  fi
+fi
+[ -n "$UPDATE_WARNING" ] && echo "WARNING: $UPDATE_WARNING" >> "$LOG_FILE"
+export SCRAPER_UPDATE_WARNING="$UPDATE_WARNING"
+export SCRAPER_GIT_COMMIT="$(git -C "$SCRIPT_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+# ---------------------------------------------------------------------------
+
 # Run the scraper, capturing all output. Keep logging even if Node fails.
 set +e
 "$NODE_BIN" index.js >> "$LOG_FILE" 2>&1

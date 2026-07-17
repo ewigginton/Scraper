@@ -89,3 +89,81 @@ test('review subject and body surface errors', () => {
   assert.match(buildReviewSubject(report), /2 errors/);
   assert.match(buildReviewBody(report, 'Monday'), /Errors: 2/);
 });
+
+test('consolidated body includes the lead review section', () => {
+  const { buildScraperBody } = require('../lib/notify');
+  const scraperReport = {
+    dryRun: false,
+    sites: {},
+    totals: { written: 1, wouldWrite: 0, duplicates: 0, rejected: 0, errors: 0 },
+    duplicateDetails: [],
+    writeErrors: [],
+    sourceIssues: [],
+    warnings: [],
+    elapsedMinutes: 1,
+  };
+  const reviewReport = {
+    reviewed: 5,
+    errors: 0,
+    standouts: [{ name: 'Big Tract', county: 'Wayne', state: 'KY', acres: 200, price: 400000, cpa: 2000, positives: ['creek'] }],
+    flagged: [{ name: 'Sketchy Tract', flags: ['hoa'] }],
+    autoRejected: [],
+  };
+  const body = buildScraperBody(scraperReport, null, 'Monday', reviewReport);
+  assert.match(body, /LEAD REVIEW/);
+  assert.match(body, /Reviewed: 5 leads/);
+  assert.match(body, /STANDOUT PROPERTIES/);
+  assert.match(body, /Big Tract/);
+  assert.match(body, /Sketchy Tract/);
+});
+
+test('review crash is surfaced in the consolidated body and subject', () => {
+  const { buildScraperBody, buildScraperSubject } = require('../lib/notify');
+  const scraperReport = {
+    dryRun: false,
+    sites: {},
+    totals: { written: 0, wouldWrite: 0, duplicates: 0, rejected: 0, errors: 1 },
+    duplicateDetails: [],
+    writeErrors: [],
+    sourceIssues: [],
+    warnings: [],
+    elapsedMinutes: 1,
+    reviewError: 'Airtable exploded during review',
+  };
+  const body = buildScraperBody(scraperReport, null, 'Monday', null);
+  assert.match(body, /LEAD REVIEW: FAILED/);
+  assert.match(body, /Airtable exploded during review/);
+  assert.match(buildScraperSubject(scraperReport, null), /⚠️/);
+});
+
+test('awaiting-decision leads appear with their age', () => {
+  const { buildReviewBody } = require('../lib/notify');
+  const report = {
+    reviewed: 1,
+    errors: 0,
+    standouts: [],
+    flagged: [],
+    autoRejected: [],
+    awaiting: [
+      { name: 'Perry Tract', county: 'Perry', state: 'TN', acres: 969, price: 975000, stage: 'New Lead', ageDays: 7 },
+    ],
+  };
+  const body = buildReviewBody(report, 'Monday');
+  assert.match(body, /WAITING ON YOU IN AIRTABLE \(1\)/);
+  assert.match(body, /Perry Tract/);
+  assert.match(body, /waiting 7 days/);
+  assert.match(body, /\(New Lead\)/);
+});
+
+test('standouts appear in the consolidated subject', () => {
+  const { buildScraperSubject } = require('../lib/notify');
+  const scraperReport = {
+    dryRun: false,
+    writeErrors: [],
+    totals: { written: 2, duplicates: 0, rejected: 0, errors: 0 },
+  };
+  const reviewReport = { reviewed: 3, errors: 0, standouts: [{ name: 'A' }], flagged: [], autoRejected: [] };
+  const subject = buildScraperSubject(scraperReport, reviewReport);
+  assert.match(subject, /2 new leads/);
+  assert.match(subject, /1 standout/);
+});

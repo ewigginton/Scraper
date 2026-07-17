@@ -9,7 +9,12 @@ const { runPriceCheck } = require('./lib/price-checker');
 const { sendReviewEmail } = require('./lib/notify');
 
 /**
- * Review entry point — runs on Nora's Mac at 6:00 AM via launchd.
+ * Standalone review entry point — MANUAL runs only.
+ *
+ * The nightly review runs inside `node index.js` and is included in the
+ * single consolidated email; there is no separate scheduled review job
+ * anymore. Use this script to re-run the review on demand (it sends its
+ * own review-only email).
  *
  * Modes:
  *   node review-leads.js           → Review only (default)
