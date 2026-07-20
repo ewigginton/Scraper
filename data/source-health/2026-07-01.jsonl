@@ -1,0 +1,1 @@
+{"savedAt":"2026-07-01T07:11:47.314Z","issue":{"source":"LandAndFarm","type":"fetch_or_parse_error","url":"https://www.landandfarm.com/search/kentucky/knott-county-land-for-sale/acres-40-50000/","county":"Knott","state":"KY","page":1,"error":"Network.enable timed out. Increase the 'protocolTimeout' setting in launch/connect calls for a higher timeout if needed."}}

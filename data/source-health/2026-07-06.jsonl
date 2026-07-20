@@ -1,0 +1,1 @@
+{"savedAt":"2026-07-06T07:24:47.387Z","issue":{"source":"LandAndFarm","type":"fetch_or_parse_error","url":"https://www.landandfarm.com/search/missouri/phelps-county-land-for-sale/acres-40-50000/","county":"Phelps","state":"MO","page":1,"error":"Network.enable timed out. Increase the 'protocolTimeout' setting in launch/connect calls for a higher timeout if needed."}}
