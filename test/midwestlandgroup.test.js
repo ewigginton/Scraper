@@ -1,5 +1,11 @@
 'use strict';
 
+// The trimmed fixtures below (index + one detail page) are enough to pin the
+// parser's selectors. The FULL raw captured evidence (complete pages, not the
+// reduced fixtures) lives on the `source-evidence` branch at commit c5f5853 —
+// it is kept off main because data/evidence is gitignored here. Pull that branch
+// when re-verifying against the real markup or refreshing these fixtures.
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');

@@ -165,11 +165,10 @@ test('keyword matching uses word boundaries — "Shoal Creek" is not an HOA', ()
   assert.equal(matchesKeyword('property has an hoa with fees', 'hoa'), true);
 });
 
-test('keyword matching word-boundary — "resold"/"soldier" do not match "sold", but "sold" alone and "under contract" do', () => {
-  assert.equal(matchesKeyword('the neighboring tract was recently resold', 'sold'), false);
-  assert.equal(matchesKeyword('a soldier once trained on this land', 'sold'), false);
-  assert.equal(matchesKeyword('this listing has been sold', 'sold'), true);
+test('keyword matching uses word boundaries — availability phrases match, unrelated prose does not', () => {
   assert.equal(matchesKeyword('property is under contract', 'under contract'), true);
+  assert.equal(matchesKeyword('this tract is now off-market', 'off-market'), true);
+  assert.equal(matchesKeyword('open pasture with no restrictions', 'under contract'), false);
 });
 
 // ---------- availability-status flags ----------
@@ -195,12 +194,15 @@ test('analyzeLead flags "under contract" as availability, NOT a dealbreaker, and
   assert.equal(analysis.yellowFlags.length, 0, 'availability status is not a yellow flag either');
 });
 
-test('analyzeLead does not false-positive "sold" on "resold"/"soldier" prose', () => {
+test('analyzeLead: bare "sold"/"contingent" removed — comp/closing prose does not raise an availability flag', () => {
+  // 'sold' and 'contingent' were dropped from AVAILABILITY_FLAGS because they
+  // false-positive on ordinary comp/closing prose that describes NEIGHBORING
+  // sales or a closing condition, not this listing's own status.
   initFilter(new Map([['taney|MO', 4000]]));
   const record = {
     fields: {
-      Name: 'Clean Tract',
-      'Scraper Notes': 'The neighboring 40 acres was recently resold; a soldier grew up on this farm.',
+      Name: 'Comp Prose Tract',
+      'Scraper Notes': 'Similar tracts have sold for $3,000/acre. Access is contingent upon a completed survey.',
       Acres: 200,
       '$/A': 3000,
       County: 'Taney',
@@ -208,7 +210,7 @@ test('analyzeLead does not false-positive "sold" on "resold"/"soldier" prose', (
     },
   };
   const analysis = analyzeLead(record);
-  assert.deepEqual(analysis.availabilityFlags, []);
+  assert.deepEqual(analysis.availabilityFlags, [], 'comp/closing prose must not raise an availability flag');
 });
 
 test('runReview surfaces an availability flag in report.flagged without touching Stage', async (t) => {

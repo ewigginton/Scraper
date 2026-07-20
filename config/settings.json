@@ -35,7 +35,7 @@
     "landfarm": { "enabled": false, "countyRotation": 3 },
     "landsofamerica": { "enabled": false },
     "livingthedream": { "enabled": true },
-    "whitetail": { "enabled": true },
+    "whitetail": { "enabled": true, "countyRotation": 3 },
     "mossyoak": { "enabled": true },
     "midwestlandgroup": { "enabled": true },
     "landflip": { "enabled": true }

@@ -31,8 +31,6 @@ async function main() {
   // also set it, but a workflow edit must not be able to write to production
   const inGithubActions = process.env.GITHUB_ACTIONS === 'true';
   const dryRun = process.argv.includes('--dry-run') || process.env.DRY_RUN === 'true' || inGithubActions;
-  const limitCounties = parseIntegerOption('--limit-counties', process.env.SCRAPER_LIMIT_COUNTIES);
-  const targetCounties = parseTargetCountiesOption('--target-counties', process.env.SCRAPER_TARGET_COUNTIES);
   const startTime = Date.now();
 
   console.log('='.repeat(60));
@@ -59,6 +57,13 @@ async function main() {
   let fatalError = null;
 
   try {
+    // Parse the county-selection options INSIDE the guarded region: a malformed
+    // SCRAPER_TARGET_COUNTIES makes parseTargetCountiesOption throw, and doing it
+    // here routes that throw into the catch below so it still produces the
+    // failure email + healthcheck ping instead of a silent unhandled exit.
+    const limitCounties = parseIntegerOption('--limit-counties', process.env.SCRAPER_LIMIT_COUNTIES);
+    const targetCounties = parseTargetCountiesOption('--target-counties', process.env.SCRAPER_TARGET_COUNTIES);
+
     // Step 1: Scrape new listings (unless price-check-only mode)
     if (!priceCheckOnly) {
       // runScraper() loads county targets and inits the filter itself

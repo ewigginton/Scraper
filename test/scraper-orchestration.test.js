@@ -11,6 +11,7 @@ const {
   processScrapedListings,
   runBotWallRetries,
   resolveBotWallCooldownMinutes,
+  isMissingFilterCriticalField,
 } = require('../lib/scraper');
 const { stableHash, dayIndex, selectRotationCounties } = require('../lib/county-rotation');
 const { buildScraperBody } = require('../lib/notify');
@@ -463,6 +464,36 @@ test('county rotation: SCRAPER_TARGET_COUNTIES (targeted mode) bypasses rotation
     report2.warnings.some(w => /county rotation 3 — swept \d+ of \d+ counties \(group \d of 3\)/.test(w)),
     `expected a rotation warning, got: ${report2.warnings.join(' | ')}`
   );
+});
+
+test('county rotation: a parser with usesCountyUrls === false is never rotated (full list, no warning)', () => {
+  // MidwestLandGroup fetches ONE national index regardless of the county subset,
+  // so rotation would only starve its downstream county filter for zero request
+  // savings. resolveParserCounties must hand it the full list and emit no line.
+  const parser = { name: 'MidwestLandGroup', countyRotation: 3, usesCountyUrls: false };
+  const report = { warnings: [] };
+  const plan = resolveParserCounties(
+    [parser], ROTATION_COUNTIES, /* bypassRotation */ false, new Date(2026, 5, 10), report
+  );
+  const resolved = plan.get(parser);
+  assert.equal(resolved.counties.length, ROTATION_COUNTIES.length, 'gets every county, unrotated');
+  assert.equal(resolved.rotation, null, 'no rotation metadata for a no-county-URL parser');
+  assert.equal(report.warnings.length, 0, 'no rotation warning emitted for a no-county-URL parser');
+});
+
+// --- isMissingFilterCriticalField boundary -----------------------------------
+
+test('isMissingFilterCriticalField: exactly one missing field → true; none missing → false', () => {
+  const complete = { price: 300000, acres: 100, county: 'Taney', state: 'MO' };
+  assert.equal(isMissingFilterCriticalField(complete), false, 'a complete listing is not missing anything');
+
+  for (const field of ['price', 'acres', 'county', 'state']) {
+    const oneMissing = { ...complete, [field]: null };
+    assert.equal(
+      isMissingFilterCriticalField(oneMissing), true,
+      `a listing missing only ${field} is flagged as missing a filter-critical field`,
+    );
+  }
 });
 
 // --- Incremental early-stop sweeps -------------------------------------------
