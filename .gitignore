@@ -5,3 +5,4 @@ data/
 reports/
 *.log
 .DS_Store
+data/evidence/
