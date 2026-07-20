@@ -174,6 +174,18 @@ set -e
 
 echo "=== Scraper finished at $(date) with exit code $EXIT_CODE ===" >> "$LOG_FILE"
 
+# --- Evidence capture (post-scrape) ----------------------------------------
+# Fetch the URLs the assistant queued in config/evidence-requests.json and push
+# the rendered HTML to the disposable `evidence-inbox` branch. Runs AFTER the
+# scrape + email so it never delays lead generation, and is fully guarded with
+# `|| true`: a capture/push failure must never fail the night's run or change
+# its exit code. Idempotent (already-captured URLs are skipped), ~8 requests, so
+# holding the run lock for it is fine.
+echo "=== Evidence capture starting at $(date) ===" >> "$LOG_FILE"
+"$NODE_BIN" scripts/process-evidence-requests.js >> "$LOG_FILE" 2>&1 || true
+echo "=== Evidence capture finished at $(date) ===" >> "$LOG_FILE"
+# ---------------------------------------------------------------------------
+
 # Clean up old logs and evidence files
 find "$LOG_DIR" -name "scrape-*.log" -mtime +30 -delete 2>/dev/null || true
 find "$SCRIPT_DIR/data/source-health" -name "*.jsonl" -mtime +30 -delete 2>/dev/null || true

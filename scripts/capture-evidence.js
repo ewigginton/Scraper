@@ -12,14 +12,17 @@
 const fs = require('fs');
 const path = require('path');
 const browserFetch = require('../lib/browser-fetch');
+const { slugForUrl } = require('../lib/evidence-capture');
 
 const EVIDENCE_DIR = path.join(__dirname, '..', 'data', 'evidence');
 
+// Manual captures keep a timestamp so repeated runs of the same URL don't
+// clobber each other; the shared slug keeps naming consistent with the nightly
+// pipeline (scripts/process-evidence-requests.js, which content-addresses by
+// hash instead for idempotency).
 function fileNameFor(url) {
-  const { hostname, pathname } = new URL(url);
-  const slug = pathname.replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '') || 'index';
   const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
-  return `${hostname}-${slug}-${stamp}.html`;
+  return `${slugForUrl(url)}-${stamp}.html`;
 }
 
 async function main() {
