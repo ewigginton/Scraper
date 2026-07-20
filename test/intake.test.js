@@ -262,6 +262,40 @@ test('intake: first failure queues a next-day retry; second failure is final', {
   assert.equal(report.failures[0].final, true);
 });
 
+test('intake: a page saying "sale pending" still creates the lead, but Result and notes carry the warning', { timeout: 60000 }, async (t) => {
+  const PENDING_HTML = `<html><head>
+    <title>Quiet Ridge Tract - 80 Acres | Republic Ranches</title>
+    <meta property="og:description" content="80 acres in Pittsburg County, Oklahoma.">
+    <script type="application/ld+json">{"@type":"Product","offers":{"price":"250000"}}</script>
+  </head><body><h1>Quiet Ridge Tract</h1><p>80 acres in Pittsburg County. Sale pending — offer accepted.</p></body></html>`;
+  const server = http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/html' });
+    res.end(PENDING_HTML);
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => server.close());
+  const url = `http://127.0.0.1:${server.address().port}/pittsburg-county-oklahoma-quiet-ridge`;
+
+  const calls = stubAirtable(t, {
+    queue: [{ id: 'recIntakePending01X', fields: { URL: url, 'Submitted By': 'Emma' } }],
+  });
+
+  const report = await processIntakeQueue({ dryRun: false });
+
+  assert.equal(report.created, 1, 'the lead is still created — Emma decides, not the importer');
+  assert.equal(calls.createdLeads.length, 1);
+  assert.match(calls.createdLeads[0].description, /sale pending/i, 'the phrase reaches notes so analyzeLead also flags it');
+  assert.match(calls.intakeUpdates[0].fields.Result, /sale pending/i, 'the Result text carries the warning');
+  assert.equal(calls.intakeUpdates[0].fields.Status, 'Added');
+});
+
+test('intake: extractListingDetails surfaces availabilityFlags from the fetched page text', (t) => {
+  stubAirtable(t, { queue: [] });
+  const html = `<html><body><h1>Tract</h1><p>160 acres. This property is under contract.</p></body></html>`;
+  const details = extractListingDetails(html, 'https://example.com/listing');
+  assert.ok(details.availabilityFlags.some(f => f === 'under contract'));
+});
+
 test('intake: duplicate URLs are marked Duplicate, not re-created', { timeout: 60000 }, async (t) => {
   const server = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/html' });

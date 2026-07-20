@@ -618,6 +618,22 @@ test('incremental early-stop: consolidated email renders the incremental line', 
   assert.match(body, /incremental: stopped 7 county series early \(page of already-known listings\)/);
 });
 
+test('detail enrichment: consolidated email renders the detail-pages-fetched line', () => {
+  const report = {
+    dryRun: false,
+    sites: {
+      MossyOakProperties: {
+        status: 'ok', parsed: 20, passed: 4, written: 4, duplicates: 0,
+        enrichmentFetched: 4, enrichmentFailed: 1,
+      },
+    },
+    totals: { written: 4, wouldWrite: 0, duplicates: 0, rejected: 0, errors: 0 },
+    duplicateDetails: [], writeErrors: [], sourceIssues: [], warnings: [], elapsedMinutes: 33,
+  };
+  const body = buildScraperBody(report, null, 'Test Day', null, null);
+  assert.match(body, /detail pages fetched: 4 \(1 failed\)/);
+});
+
 test('county rotation: consolidated email renders the rotation line', () => {
   const report = {
     dryRun: true,
