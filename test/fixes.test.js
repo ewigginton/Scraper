@@ -9,7 +9,7 @@ const fs = require('fs');
 const { initFilter, filterListing, getCPATarget } = require('../lib/filter');
 const { generateFingerprint, locationKey, roundTo } = require('../lib/fingerprint');
 const { extractPrice, parsePriceText, mergeNoteEntry } = require('../lib/price-checker');
-const { matchesKeyword, analyzeLead } = require('../lib/review');
+const { matchesKeyword, analyzeLead, runReview } = require('../lib/review');
 const { parseFloodResponse, parseCoordinateString, isHighRiskZone } = require('../lib/flood');
 const airtable = require('../lib/airtable');
 const localStore = require('../lib/local-store');
@@ -163,6 +163,84 @@ test('escapeFormulaValue escapes single quotes', () => {
 test('keyword matching uses word boundaries — "Shoal Creek" is not an HOA', () => {
   assert.equal(matchesKeyword('beautiful land near shoal creek', 'hoa'), false);
   assert.equal(matchesKeyword('property has an hoa with fees', 'hoa'), true);
+});
+
+test('keyword matching word-boundary — "resold"/"soldier" do not match "sold", but "sold" alone and "under contract" do', () => {
+  assert.equal(matchesKeyword('the neighboring tract was recently resold', 'sold'), false);
+  assert.equal(matchesKeyword('a soldier once trained on this land', 'sold'), false);
+  assert.equal(matchesKeyword('this listing has been sold', 'sold'), true);
+  assert.equal(matchesKeyword('property is under contract', 'under contract'), true);
+});
+
+// ---------- availability-status flags ----------
+
+test('analyzeLead flags "under contract" as availability, NOT a dealbreaker, and never auto-rejects', () => {
+  initFilter(new Map([['taney|MO', 4000]]));
+  const record = {
+    fields: {
+      Name: 'Pending Tract',
+      'Scraper Notes': 'Beautiful rolling pasture. This property is under contract as of last week.',
+      Acres: 200,
+      '$/A': 3000,
+      County: 'Taney',
+      State: 'MO',
+    },
+  };
+  const analysis = analyzeLead(record);
+  assert.ok(
+    analysis.availabilityFlags.some(f => f.includes('under contract')),
+    `expected an availability flag, got: ${analysis.availabilityFlags}`
+  );
+  assert.deepEqual(analysis.dealbreakers, [], 'availability status must never count as a dealbreaker');
+  assert.equal(analysis.yellowFlags.length, 0, 'availability status is not a yellow flag either');
+});
+
+test('analyzeLead does not false-positive "sold" on "resold"/"soldier" prose', () => {
+  initFilter(new Map([['taney|MO', 4000]]));
+  const record = {
+    fields: {
+      Name: 'Clean Tract',
+      'Scraper Notes': 'The neighboring 40 acres was recently resold; a soldier grew up on this farm.',
+      Acres: 200,
+      '$/A': 3000,
+      County: 'Taney',
+      State: 'MO',
+    },
+  };
+  const analysis = analyzeLead(record);
+  assert.deepEqual(analysis.availabilityFlags, []);
+});
+
+test('runReview surfaces an availability flag in report.flagged without touching Stage', async (t) => {
+  const { FIELDS, STAGES } = airtable;
+  const record = {
+    id: 'recAvail0000001X',
+    fields: {
+      Name: 'Under Contract Tract',
+      Stage: STAGES.newLead,
+      [FIELDS.price]: 200000,
+      [FIELDS.acres]: 100,
+      [FIELDS.notes]: 'Nice tract. Sale pending as of this week.',
+      [FIELDS.created]: new Date().toISOString(),
+    },
+  };
+  const original = {
+    getRecordsByStage: airtable.getRecordsByStage,
+    resolveCountyFields: airtable.resolveCountyFields,
+    updateRecord: airtable.updateRecord,
+  };
+  const updates = [];
+  airtable.getRecordsByStage = async stage => (stage === STAGES.newLead ? [record] : []);
+  airtable.resolveCountyFields = () => ({ county: 'Taney', state: 'MO' });
+  airtable.updateRecord = async (recordId, fields) => { updates.push({ recordId, fields }); return { id: recordId }; };
+  t.after(() => Object.assign(airtable, original));
+
+  initFilter(new Map([['taney|MO', 4000]]));
+  const report = await runReview();
+
+  assert.equal(report.flagged.length, 1);
+  assert.ok(report.flagged[0].flags.some(f => f.includes('sale pending')));
+  for (const u of updates) assert.equal('Stage' in u.fields, false, 'review must never write Stage');
 });
 
 test('"no road noise" does not trip a road-access dealbreaker', () => {
