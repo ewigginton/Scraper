@@ -36,6 +36,7 @@
     "landsofamerica": { "enabled": false },
     "livingthedream": { "enabled": true },
     "whitetail": { "enabled": true },
-    "mossyoak": { "enabled": true }
+    "mossyoak": { "enabled": true },
+    "midwestlandgroup": { "enabled": true }
   }
 }
