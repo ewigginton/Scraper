@@ -155,6 +155,121 @@ test('awaiting-decision leads appear with their age', () => {
   assert.match(body, /\(New Lead\)/);
 });
 
+test('kitchen sink: every section renders its key line, in order, with no undefined/NaN', () => {
+  const { buildScraperBody } = require('../lib/notify');
+
+  const scraperReport = {
+    dryRun: false,
+    sites: {
+      MossyOakProperties: {
+        status: 'retried_after_cooldown',
+        parsed: 24, passed: 6, written: 6, duplicates: 3, checked: 24,
+        earlyStoppedSeries: 2, enrichmentFetched: 6, enrichmentFailed: 1,
+        rotation: { groupsTotal: 3, groupIndex: 1, sweptCount: 63, totalCount: 189 },
+        cooldownMinutes: 58,
+        firstPass: { parsed: 0, passed: 0 },
+        retryPass: { parsed: 24, passed: 6, blockedAgain: false },
+      },
+      Whitetail: {
+        status: 'ok', parsed: 0, passed: 0, written: 0, duplicates: 0, checked: 3,
+      },
+    },
+    totals: { checked: 27, parsed: 24, passed: 6, duplicates: 3, rejected: 5, written: 6, wouldWrite: 0, errors: 2 },
+    duplicateDetails: [
+      { source: 'MossyOakProperties', name: 'Twin Creek Tract', url: 'https://x/1', reason: 'same fingerprint as LandWatch: Twin Creek', matchType: 'fingerprint' },
+    ],
+    writeErrors: [
+      { site: 'MossyOakProperties', error: 'HTTP 422 field mismatch', savedTo: 'data/failed-writes/x.jsonl' },
+    ],
+    sourceIssues: [
+      { source: 'MossyOakProperties', type: 'blocked', error: 'Bot-block/challenge page served with HTTP 200', county: 'Wayne', state: 'KY', url: 'https://mossy/wayne', savedTo: 'data/source-health/a.jsonl' },
+      { source: 'Whitetail', type: 'markup_drift', error: 'Page fetched OK but zero listing cards matched', county: 'Butler', state: 'KY', url: 'https://whitetail/butler', savedTo: 'data/source-health/b.jsonl' },
+    ],
+    warnings: ['MossyOakProperties: county rotation 3 — swept 63 of 189 counties (group 2 of 3)'],
+    elapsedMinutes: 96,
+  };
+
+  const priceCheckReport = {
+    checked: 40, priceDrops: 3, promoted: 2, expired: 1, removed: 1, errors: 1, elapsedMinutes: 12,
+    details: [
+      { action: 'promoted', name: 'Cedar Ridge', oldPrice: 500000, newPrice: 450000, newCPA: 2250, target: 2500 },
+    ],
+  };
+
+  const intakeReport = {
+    processed: 4, created: 2, duplicates: 1, reclaimed: 1, loadError: null,
+    added: [{ url: 'https://intake/1', submitter: 'Nora', summary: '160ac in Wayne, KY' }],
+    failures: [
+      { url: 'https://intake/2', submitter: 'Jo', error: 'timeout', final: false },
+      { url: 'https://intake/3', submitter: 'Sam', error: 'bot wall', final: true },
+    ],
+  };
+
+  const reviewReport = {
+    reviewed: 8, errors: 1, floodChecked: 2, floodHighRisk: 1,
+    standouts: [{ name: 'Big Bend', county: 'Wayne', state: 'KY', acres: 200, price: 400000, cpa: 2000, positives: ['creek', 'paved road'] }],
+    flagged: [{ name: 'Iffy Tract', flags: ['hoa', 'listed as under contract'] }],
+    autoRejected: [],
+    awaiting: [{ name: 'Perry Tract', county: 'Perry', state: 'TN', acres: 969, price: 975000, stage: 'New Lead', ageDays: 7 }],
+  };
+
+  const body = buildScraperBody(scraperReport, priceCheckReport, 'Monday', reviewReport, intakeReport);
+
+  // Multi-site scan and its per-site detail lines.
+  assert.match(body, /NEW LISTING SCAN/);
+  assert.match(body, /county rotation: swept 63 of 189 counties \(group 2 of 3\)/);
+  assert.match(body, /retried after 58 min cooldown — succeeded/);
+  assert.match(body, /incremental: stopped 2 county series early/);
+  assert.match(body, /detail pages fetched: 6 \(1 failed\)/);
+  assert.match(body, /3 duplicates caught/);
+  assert.match(body, /TOTALS: 6 written, 3 dupes, 5 rejected/);
+  assert.match(body, /Runtime: 96 minutes/);
+
+  // Warnings.
+  assert.match(body, /WARNINGS/);
+
+  // Price check + promotion.
+  assert.match(body, /PRICE DROP CHECK/);
+  assert.match(body, /Promoted to leads: 2/);
+  assert.match(body, /PROMOTED TO LEADS/);
+  assert.match(body, /Cedar Ridge/);
+  assert.match(body, /450,000/);
+
+  // Intake results (both retry and given-up buckets).
+  assert.match(body, /LISTING INTAKE/);
+  assert.match(body, /Processed: 4 \| Added: 2 \| Duplicates: 1/);
+  assert.match(body, /WILL RETRY AUTOMATICALLY TOMORROW NIGHT/);
+  assert.match(body, /FAILED ON RETRY — GIVEN UP/);
+
+  // Review standouts / flagged / awaiting.
+  assert.match(body, /LEAD REVIEW/);
+  assert.match(body, /Reviewed: 8 leads/);
+  assert.match(body, /STANDOUT PROPERTIES/);
+  assert.match(body, /Big Bend/);
+  assert.match(body, /FLAGGED/);
+  assert.match(body, /Iffy Tract/);
+  assert.match(body, /WAITING ON YOU IN AIRTABLE/);
+  assert.match(body, /Perry Tract/);
+
+  // Cross-site dupes + write errors.
+  assert.match(body, /CROSS-SITE DUPLICATES CAUGHT/);
+  assert.match(body, /Twin Creek Tract/);
+  assert.match(body, /WRITE ERRORS/);
+  assert.match(body, /HTTP 422 field mismatch/);
+
+  // Diagnosis renders ABOVE the raw source-health evidence.
+  assert.match(body, /SITE DIAGNOSIS/);
+  assert.match(body, /SOURCE HEALTH ISSUES/);
+  assert.ok(
+    body.indexOf('SITE DIAGNOSIS') < body.indexOf('SOURCE HEALTH ISSUES'),
+    'SITE DIAGNOSIS must appear above SOURCE HEALTH ISSUES',
+  );
+
+  // No formatting holes anywhere in the fully-populated body.
+  assert.ok(!body.includes('undefined'), 'no "undefined" in the rendered body');
+  assert.ok(!body.includes('NaN'), 'no "NaN" in the rendered body');
+});
+
 test('standouts appear in the consolidated subject', () => {
   const { buildScraperSubject } = require('../lib/notify');
   const scraperReport = {

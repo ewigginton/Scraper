@@ -182,7 +182,18 @@ echo "=== Scraper finished at $(date) with exit code $EXIT_CODE ===" >> "$LOG_FI
 # its exit code. Idempotent (already-captured URLs are skipped), ~8 requests, so
 # holding the run lock for it is fine.
 echo "=== Evidence capture starting at $(date) ===" >> "$LOG_FILE"
-"$NODE_BIN" scripts/process-evidence-requests.js >> "$LOG_FILE" 2>&1 || true
+# The evidence step fetches URLs and pushes to a branch WHILE STILL HOLDING the
+# run lock, so a stalled fetch/push must not be allowed to hang forever (it would
+# wedge every subsequent night). Bound it with the same portable perl-alarm
+# timeout the self-update block uses (macOS ships no `timeout` binary), and set
+# GIT_TERMINAL_PROMPT=0 (scoped to this step) so a misconfigured remote fails
+# fast under launchd's no-TTY session instead of blocking on a credential prompt.
+# Still fully `|| true`: a timeout or failure here must never fail the night's
+# run or change its exit code.
+export GIT_TERMINAL_PROMPT=0
+perl -e 'alarm shift; exec @ARGV' 600 \
+    "$NODE_BIN" scripts/process-evidence-requests.js >> "$LOG_FILE" 2>&1 || true
+unset GIT_TERMINAL_PROMPT
 echo "=== Evidence capture finished at $(date) ===" >> "$LOG_FILE"
 # ---------------------------------------------------------------------------
 

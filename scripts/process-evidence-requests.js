@@ -72,6 +72,11 @@ function gitPushEvidence(capturedFileNames) {
   const git = (args, cwd) => execFileSync('git', args, {
     cwd: cwd || REPO_DIR,
     stdio: ['ignore', 'pipe', 'pipe'],
+    // Hard ceiling so a stalled worktree/commit/push (hung credential helper,
+    // unreachable remote) can never block indefinitely even when this runs
+    // outside the shell wrapper's perl-alarm timeout. execFileSync raises on
+    // timeout and gitPushEvidence's try/catch makes that non-fatal.
+    timeout: 120000,
   });
 
   let worktreeAdded = false;

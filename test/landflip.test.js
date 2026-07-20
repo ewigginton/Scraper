@@ -131,6 +131,33 @@ test('parseSearchPage and parseDetailPage survive garbage/empty/null HTML withou
   assert.equal(g.state, undefined);
 });
 
+// ---------- pagination series key: a blocked page 1 short-circuits the state ----------
+
+test('a blocked LANDFLIP page 1 prevents the page-2 fetch (page 1 and 2 share one series key)', async () => {
+  // Page 1 (/land-for-sale/kentucky) and page 2 (/land-for-sale/kentucky/2-p)
+  // must collapse to one pagination series key so that once page 1 is blocked,
+  // exhaustedSeries skips page 2 — no point re-hitting a state that just refused
+  // us. Drive the REAL scrapeAll with a fetch stubbed to throw a bot-wall error.
+  const parser = new LandflipParser();
+  parser.sleep = () => Promise.resolve();
+  const fetched = [];
+  parser.fetchPageSmart = async (url) => {
+    fetched.push(url);
+    const err = new Error(`HTTP 403 for ${url}`);
+    err.status = 403;
+    throw err;
+  };
+
+  const listings = await parser.scrapeAll([{ county: 'Wayne', state: 'KY', maxCPA: 3000 }]);
+
+  assert.deepEqual(
+    fetched,
+    ['https://www.landflip.com/land-for-sale/kentucky'],
+    'only page 1 is fetched; blocking it exhausts the shared series so page 2 is skipped',
+  );
+  assert.equal(listings.length, 0);
+});
+
 // ---------- GOAL 2: enrichment-ordering (card-sparse listing rescued before filter) ----------
 
 // Patch airtable.writeListings on the shared module object scraper.js calls
