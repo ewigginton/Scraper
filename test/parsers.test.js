@@ -43,11 +43,15 @@ test('LandsOfAmerica generates lowercase state slugs', () => {
   assert.match(first, /landsofamerica\.com\/property\/texas\/san-augustine-county/);
 });
 
-test('LivingTheDream generates state-abbreviation URLs', () => {
+test('LivingTheDream builds per-state /land-for-sale/{state}/ URLs, only for covered states', () => {
   const parser = new LivingTheDreamParser();
+  // testCounties = San Augustine/TX + Taney/MO. TX is NOT one of the site's
+  // covered states (MO, KY, KS, AR, IL), so only the MO state page is built.
   const urls = parser.buildSearchUrls(testCounties);
-  const txUrl = urls[0].url;
-  assert.match(txUrl, /state=tx/);
+  assert.ok(!urls.some(u => u.state === 'TX'), 'non-covered TX produces no URL');
+  const mo = urls.find(u => u.state === 'MO');
+  assert.ok(mo, 'covered MO produces a state page');
+  assert.equal(mo.url, 'https://www.livingthedreamland.com/land-for-sale/missouri/');
 });
 
 test('all parsers generate both pass-1 and pass-2 (large tract) URLs', () => {
@@ -174,7 +178,7 @@ test('zero listings on page 1 without a no-results marker records markup drift',
   }
 });
 
-test('cards found but all filtered out is NOT markup drift (LivingTheDream state-wide search)', async () => {
+test('real cards on a state page are emitted and never mis-flagged as markup drift (LivingTheDream)', async () => {
   const os = require('os');
   const path = require('path');
   const fs = require('fs');
@@ -187,25 +191,31 @@ test('cards found but all filtered out is NOT markup drift (LivingTheDream state
   process.env.SCRAPER_MAX_PAGE = '1';
 
   const parser = new LivingTheDreamParser();
-  // A healthy page whose listings are all in NON-target counties — cards
-  // match the selectors but every one is filtered out
+  // A healthy state page with a real RealStack card. parseSearchPage emits
+  // EVERY card (county selection is downstream in lib/filter.js now), so the
+  // card is returned and, cards having matched, no markup-drift issue is raised
+  // even though this listing sits in a non-target county.
   parser.fetchPage = async () => `
     <html><body>
-      <div class="property-listing">
-        <h2 class="property-title">80 Acres</h2>
-        <div class="property-price">$200,000</div>
-        <div class="property-acres">80 acres</div>
-        <div class="property-location">Some Other County, MO</div>
-        <a href="/properties/123">View</a>
+      <div class="rs-listing-card rs-listing-item" data-lat="37.0" data-lng="-90.0">
+        <div class="card-title"><a href="https://www.livingthedreamland.com/property/x-some-other-missouri/123/">80 Acres</a></div>
+        <div class="location"><span>Some Other County,</span><span>MO</span></div>
+        <div class="description">nice tract</div>
+        <div class="info">
+          <div class="info-label label--acre">80± Acres</div>
+          <div class="info-label label--price">$200,000</div>
+        </div>
       </div>
     </body></html>`;
 
   try {
     const listings = await parser.scrapeAll([{ county: 'Taney', state: 'MO', maxCPA: 4000 }]);
-    assert.deepEqual(listings, [], 'non-target-county listing should be filtered');
+    assert.equal(listings.length, 1, 'the real card is emitted (filtering happens downstream)');
+    assert.equal(listings[0].county, 'Some Other');
+    assert.equal(listings[0].state, 'MO');
     assert.ok(
       !parser.sourceIssues.some(i => i.type === 'markup_drift'),
-      'filtered-out cards must not be reported as markup drift'
+      'matched cards must not be reported as markup drift'
     );
   } finally {
     if (originalDataDir === undefined) delete process.env.SCRAPER_DATA_DIR;

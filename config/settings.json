@@ -38,6 +38,7 @@
     "whitetail": { "enabled": true, "countyRotation": 3 },
     "mossyoak": { "enabled": true },
     "midwestlandgroup": { "enabled": true },
-    "landflip": { "enabled": true }
+    "landflip": { "enabled": true },
+    "nationalland": { "enabled": true }
   }
 }
