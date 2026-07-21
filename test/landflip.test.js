@@ -14,6 +14,10 @@ const searchHtml = fs.readFileSync(
   path.join(__dirname, 'fixtures', 'landflip-kentucky-search.html'),
   'utf8',
 );
+const detailHtml = fs.readFileSync(
+  path.join(__dirname, 'fixtures', 'landflip-detail-420517.html'),
+  'utf8',
+);
 
 // ---------- buildSearchUrls ----------
 
@@ -85,34 +89,50 @@ test('parseSearchPage excludes nav/filter/keyword/news links — only /land/{id}
   assert.ok(!urls.some(u => u.includes('/news/')), 'no news-carousel links');
 });
 
-// ---------- parseDetailPage (defensive; no real detail fixture) ----------
+// ---------- parseDetailPage (real captured /land/420517 detail page) ----------
 
-test('parseDetailPage reads the site text signatures when present, and validates the state token', () => {
+test('parseDetailPage extracts price/acres/county/state from the real detail fixture', () => {
   const parser = new LandflipParser();
-  // A detail page reusing the site-wide "N Acres : $X" tag and "County Co : ST"
-  // location phrasing (block boundaries with no whitespace, as cheerio yields).
-  const detail = '<html><body><h1>Big Farm</h1>'
-    + '<span class="tag price-ac">160 Acres : $400,000</span>'
-    + '<p>Monticello : Wayne Co : KY</p>'
-    + '<div>Rolling pasture with mature timber and road frontage.</div>'
-    + '</body></html>';
-  const out = parser.parseDetailPage(detail);
-  assert.equal(out.price, 400000);
-  assert.equal(out.acres, 160);
-  assert.equal(out.county, 'Wayne');
-  assert.equal(out.state, 'KY');
-  assert.ok(out.description && out.description.length > 10);
+  const out = parser.parseDetailPage(detailHtml);
 
-  // A two-word state name resolves; a bogus state token is rejected (county
-  // dropped with it, never invented from stray prose).
-  assert.deepEqual(
-    { c: parser.parseDetailPage('<body><p>X : Sandoval Co : New Mexico</p></body>').county,
-      s: parser.parseDetailPage('<body><p>X : Sandoval Co : New Mexico</p></body>').state },
-    { c: 'Sandoval', s: 'NM' },
+  // Golden values from the captured page:
+  //   price  — schema.org Product JSON-LD offers.price ("489900")
+  //   acres  — "... with 11 acres ..." in the meta/og description
+  //   county — "... in Taylor County, ..." in the description
+  //   state  — "... Taylor County, Kentucky 42718 ..." → KY (validated)
+  assert.equal(out.price, 489900);
+  assert.equal(out.acres, 11);
+  assert.equal(out.county, 'Taylor');
+  assert.equal(out.state, 'KY'); // stored as the two-letter abbreviation
+  assert.ok(out.description && out.description.length > 10);
+  assert.match(out.description, /Campbellsville KY Barndominium/);
+});
+
+test('parseDetailPage reads price from structured data only, not the price-filter dropdown', () => {
+  const parser = new LandflipParser();
+  // The fixture's visible "$N" options (10k/500k/9M) belong to a filter
+  // dropdown; only the JSON-LD offer price (489900) is this listing's price.
+  const out = parser.parseDetailPage(detailHtml);
+  assert.equal(out.price, 489900);
+});
+
+test('parseDetailPage validates the state token — a bogus state drops county+state', () => {
+  const parser = new LandflipParser();
+  // A two-word state name in the description resolves...
+  const nm = parser.parseDetailPage(
+    '<html><head><meta name="description" content="Nice tract with 40 acres in Sandoval County, New Mexico 87001."></head><body></body></html>',
   );
-  const bogus = parser.parseDetailPage('<body><p>X : Fake Co : ZZ</p></body>');
+  assert.equal(nm.county, 'Sandoval');
+  assert.equal(nm.state, 'NM');
+  // ...but an unrecognized state token is rejected, and the county drops with it
+  // (never invented from stray prose).
+  const bogus = parser.parseDetailPage(
+    '<html><head><meta name="description" content="Nice tract with 40 acres in Fake County, Zzzland 00000."></head><body></body></html>',
+  );
   assert.equal(bogus.county, undefined);
   assert.equal(bogus.state, undefined);
+  // Acreage still parses independently of the location validation.
+  assert.equal(bogus.acres, 40);
 });
 
 // ---------- robustness ----------
@@ -206,6 +226,17 @@ function makeCtx() {
 // A real LandflipParser with its network + delay stubbed: fetchPageSmart returns
 // scripted detail HTML per URL and records which URLs were fetched, so the test
 // proves a URL-only card is enriched via the REAL parseDetailPage before filter.
+// Build a detail page in the REAL LANDFLIP shape parseDetailPage reads: acreage
+// + county/state in the meta description, total price in a Product JSON-LD offer
+// (the visible dollar figures on a real page are a filter dropdown, not price).
+function detailPage({ price, acres, county, stateName }) {
+  return '<html><head>'
+    + `<meta name="description" content="A tract with ${acres} acres by Town in ${county} County, ${stateName} 40000.">`
+    + '<script type="application/ld+json">'
+    + `{"@type":"Product","offers":{"@type":"Offer","priceCurrency":"USD","price":"${price}"}}`
+    + '</script></head><body><div>Rolling pasture and timber.</div></body></html>';
+}
+
 function stubParser(detailHtmlByUrl) {
   const parser = new LandflipParser();
   parser.detailFetches = [];
@@ -226,8 +257,7 @@ test('GOAL 2: a card-sparse (URL-only) listing is detail-enriched BEFORE filteri
 
   // Detail page carries the fields the card omitted: 160ac @ $400k in Wayne, KY.
   const detailHtmlByUrl = {
-    [sparseUrl]: '<html><body><span class="tag price-ac">160 Acres : $400,000</span>'
-      + '<p>Monticello : Wayne Co : KY</p><div>Rolling pasture and timber.</div></body></html>',
+    [sparseUrl]: detailPage({ price: 400000, acres: 160, county: 'Wayne', stateName: 'Kentucky' }),
   };
 
   // The sparse listing arrived with ONLY a URL — every filter-critical field
@@ -281,8 +311,7 @@ test('GOAL 2: detail enrichment never overwrites a non-null field the card alrea
   const url = 'https://www.landflip.com/land/999003';
   // Detail page reports a DIFFERENT price than the card — the card value wins.
   const detailHtmlByUrl = {
-    [url]: '<html><body><span class="tag price-ac">160 Acres : $999,999</span>'
-      + '<p>Monticello : Wayne Co : KY</p></body></html>',
+    [url]: detailPage({ price: 999999, acres: 160, county: 'Wayne', stateName: 'Kentucky' }),
   };
 
   // Card has price + acres, but is MISSING county/state (so it is still sparse

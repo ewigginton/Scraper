@@ -30,17 +30,56 @@ test('MossyOak builds /land-for-sale/{state}/{county}-county/ URLs with ?pg pagi
   assert.match(page2.url, /wayne-county\/\?pg=2$/);
 });
 
-test('pagination series keys normalize the ?pg= parameter', () => {
+test('pagination series keys collapse page 1 (no param) and deeper ?pg=N/?page=N pages into one key', () => {
   const parser = new MossyOakParser();
-  const k1 = parser.paginationSeriesKey('https://x.com/land-for-sale/kentucky/wayne-county/', 'Wayne', 'KY');
-  const k2 = parser.paginationSeriesKey('https://x.com/land-for-sale/kentucky/wayne-county/?pg=2', 'Wayne', 'KY');
-  // page 1 has no param so keys differ only by the normalized param — an
-  // empty page 2 must not be treated as a separate healthy series
-  assert.notEqual(k2, parser.paginationSeriesKey('https://x.com/land-for-sale/kentucky/wayne-county/?pg=3', 'Wayne', 'KY') === k2 ? 'x' : k2 + 'y', 'sanity');
+  const page1 = parser.paginationSeriesKey('https://x.com/land-for-sale/kentucky/wayne-county/', 'Wayne', 'KY');
+  const page2 = parser.paginationSeriesKey('https://x.com/land-for-sale/kentucky/wayne-county/?pg=2', 'Wayne', 'KY');
+  const page3 = parser.paginationSeriesKey('https://x.com/land-for-sale/kentucky/wayne-county/?pg=3', 'Wayne', 'KY');
+  // Page 1 carries NO ?pg param while deeper pages do — stripping the param
+  // entirely makes all three share ONE key, so once page 1 404s exhaustedSeries
+  // skips page 2 instead of re-hitting a county whose page 1 already failed.
+  assert.equal(page1, page2);
+  assert.equal(page2, page3);
+  // ?page=N is stripped identically to ?pg=N.
   assert.equal(
-    parser.paginationSeriesKey('https://x.com/a?pg=2', 'W', 'KY'),
-    parser.paginationSeriesKey('https://x.com/a?pg=9', 'W', 'KY')
+    parser.paginationSeriesKey('https://x.com/hunting-land/kentucky/wayne', 'Wayne', 'KY'),
+    parser.paginationSeriesKey('https://x.com/hunting-land/kentucky/wayne?page=4', 'Wayne', 'KY'),
   );
+  // Other query params survive when the stripped param is LAST...
+  assert.equal(
+    parser.paginationSeriesKey('https://x.com/s?minAcres=40&sort=newest', 'W', 'KY'),
+    parser.paginationSeriesKey('https://x.com/s?minAcres=40&sort=newest&page=2', 'W', 'KY'),
+  );
+  // ...and when it is FIRST but followed by other params (separator handling).
+  assert.equal(
+    parser.paginationSeriesKey('https://x.com/s?foo=bar', 'W', 'KY'),
+    parser.paginationSeriesKey('https://x.com/s?pg=3&foo=bar', 'W', 'KY'),
+  );
+});
+
+test('a 404 on MossyOak page 1 (no param) prevents the ?pg=2 fetch', async () => {
+  // MossyOak's page 1 is /...county/ with NO param and page 2 is /...county/?pg=2.
+  // Once page 1 404s, the shared series key must let exhaustedSeries skip page 2
+  // — last night the differing keys let it fetch ?pg=2 of already-404'd counties.
+  // Drive the REAL scrapeAll with the REAL parser and a fetch stubbed to throw.
+  const parser = new MossyOakParser();
+  parser.sleep = () => Promise.resolve();
+  const fetched = [];
+  parser.fetchPageSmart = async (url) => {
+    fetched.push(url);
+    const err = new Error(`HTTP 404 for ${url}`);
+    err.status = 404;
+    throw err;
+  };
+
+  const listings = await parser.scrapeAll([{ county: 'Wayne', state: 'KY', maxCPA: 2500 }]);
+
+  assert.deepEqual(
+    fetched,
+    ['https://www.mossyoakproperties.com/land-for-sale/kentucky/wayne-county/'],
+    'only page 1 is fetched; its 404 exhausts the shared series so page 2 is skipped',
+  );
+  assert.equal(listings.length, 0);
 });
 
 // ---------- generic extraction engine ----------
