@@ -12,6 +12,7 @@ const fs = require('fs');
 const path = require('path');
 
 const MidwestLandGroupParser = require('../lib/parsers/midwestlandgroup');
+const browserFetch = require('../lib/browser-fetch');
 
 const indexHtml = fs.readFileSync(
   path.join(__dirname, 'fixtures', 'midwestlandgroup-index.html'),
@@ -115,4 +116,56 @@ test('parseDetailPage on a garbage/empty/null page returns no listing fields wit
   assert.equal(garbage.acres, undefined);
   assert.equal(garbage.county, undefined);
   assert.equal(garbage.state, undefined);
+});
+
+// ---------- BUG 2: the client-rendered index is fetched through the browser ----------
+
+test('requiresBrowserRender is set — the /listings/ index is client-rendered', () => {
+  // A plain fetch returns only the hidden JS card template, so scrapeAll must
+  // route this source through the real browser.
+  assert.equal(new MidwestLandGroupParser().requiresBrowserRender, true);
+});
+
+test('scrapeAll fetches the client-rendered index via browserFetch, never fetchPageSmart', async (t) => {
+  const originalIsEnabled = browserFetch.isEnabled;
+  browserFetch.isEnabled = () => true;
+  t.after(() => { browserFetch.isEnabled = originalIsEnabled; });
+
+  const parser = new MidwestLandGroupParser();
+  parser.sleep = () => Promise.resolve();
+  let browserCalls = 0;
+  let smartCalls = 0;
+  // The browser renders the real index; the plain path must never be taken.
+  parser.browserFetch = async () => { browserCalls++; return indexHtml; };
+  parser.fetchPageSmart = async () => { smartCalls++; return '<html>empty skeleton</html>'; };
+
+  const listings = await parser.scrapeAll([{ county: 'Barron', state: 'WI', maxCPA: 5000 }]);
+
+  assert.equal(browserCalls, 1, 'index fetched through the browser exactly once');
+  assert.equal(smartCalls, 0, 'plain fetchPageSmart never used for a client-rendered source');
+  assert.ok(listings.length >= 1, 'real cards parsed from the browser-rendered index');
+  assert.equal(parser.sourceIssues.length, 0, 'a healthy browser render records no source issue');
+});
+
+test('flag + browser unavailable → clean skip with an explanatory issue, no drift issue', async (t) => {
+  const originalIsEnabled = browserFetch.isEnabled;
+  browserFetch.isEnabled = () => false; // browser disabled/unavailable this run
+  t.after(() => { browserFetch.isEnabled = originalIsEnabled; });
+
+  const parser = new MidwestLandGroupParser();
+  parser.sleep = () => Promise.resolve();
+  let smartCalls = 0;
+  parser.fetchPageSmart = async () => { smartCalls++; return '<html>empty skeleton</html>'; };
+
+  const listings = await parser.scrapeAll([{ county: 'Barron', state: 'WI', maxCPA: 5000 }]);
+
+  assert.equal(listings.length, 0, 'no listings — the site is skipped, not mis-parsed');
+  assert.equal(smartCalls, 0, 'the plain skeleton fetch is never attempted');
+  // Exactly one issue, and it explains the browser-render requirement — NOT the
+  // "zero cards matched" markup-drift mis-diagnosis last night produced.
+  assert.equal(parser.sourceIssues.length, 1);
+  assert.equal(parser.sourceIssues[0].type, 'fetch_or_parse_error');
+  assert.match(parser.sourceIssues[0].error, /browser rendering/i);
+  assert.ok(!parser.sourceIssues.some(i => i.type === 'markup_drift'), 'no markup-drift mis-diagnosis');
+  assert.equal(parser.stats.driftPages, 0);
 });
