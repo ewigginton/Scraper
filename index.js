@@ -22,11 +22,24 @@ const { sendScraperEmail, pingHealthcheck } = require('./lib/notify');
  *   node index.js --skip-price-check → Skip watched-listing price checks
  *   node index.js --skip-review → Skip the lead review step
  *   node index.js --dry-run    → Scrape and check without writing Airtable changes
+ *   SCRAPER_MIDDAY=1 node index.js → Midday mode (services/*.midday.plist, 12:30 PM):
+ *                                scrape + intake only (price check and review stay
+ *                                nightly-only); the email is skipped entirely when
+ *                                the run found nothing noteworthy (see lib/notify.js
+ *                                isMiddayRunNoteworthy). Evidence capture is skipped
+ *                                by scripts/run-scraper.sh, not here.
  */
 async function main() {
   const priceCheckOnly = process.argv.includes('--price-check-only');
-  const skipPriceCheck = process.argv.includes('--skip-price-check') || process.env.SKIP_PRICE_CHECK === 'true';
-  const skipReview = process.argv.includes('--skip-review') || process.env.SKIP_REVIEW === 'true';
+  // Midday mode (services/com.ccl.land-scraper.midday.plist, 12:30 PM): a
+  // light second sweep so same-day listings surface within hours. Reuses the
+  // existing skip flags rather than a parallel code path — a midday run IS a
+  // scrape+intake-only run, nothing more. Checked here (not only in
+  // scripts/run-scraper.sh) so `SCRAPER_MIDDAY=1 node index.js` alone is
+  // correct even outside the launchd wrapper.
+  const midday = process.env.SCRAPER_MIDDAY === '1' || process.env.SCRAPER_MIDDAY === 'true';
+  const skipPriceCheck = process.argv.includes('--skip-price-check') || process.env.SKIP_PRICE_CHECK === 'true' || midday;
+  const skipReview = process.argv.includes('--skip-review') || process.env.SKIP_REVIEW === 'true' || midday;
   // CI runs are always dry-run, enforced here in code — the workflow files
   // also set it, but a workflow edit must not be able to write to production
   const inGithubActions = process.env.GITHUB_ACTIONS === 'true';
@@ -35,7 +48,7 @@ async function main() {
 
   console.log('='.repeat(60));
   console.log(`CCL Land Scraper v2.0 — ${new Date().toISOString()}`);
-  console.log(`Mode: ${priceCheckOnly ? 'Price check only' : 'Full scrape + price check + review'}${dryRun ? ' (dry run)' : ''}`);
+  console.log(`Mode: ${priceCheckOnly ? 'Price check only' : 'Full scrape + price check + review'}${midday ? ' (midday — scrape+intake only)' : ''}${dryRun ? ' (dry run)' : ''}`);
   if (inGithubActions) {
     console.log('[Main] GitHub Actions detected — dry run enforced');
   }
@@ -175,7 +188,10 @@ async function main() {
     };
   }
 
-  // Step 5: Send the single consolidated email (always, even on failure)
+  // Step 5: Send the single consolidated email (always, even on failure).
+  // Midday runs pass { midday: true }: notify.js marks the subject and, when
+  // nothing noteworthy happened (no new leads/write errors/abandoned sites/
+  // crashed sites), skips sending entirely — see isMiddayRunNoteworthy.
   let emailSent = true;
   try {
     if (scraperReport || priceCheckReport || reviewReport || intakeReport) {
@@ -183,7 +199,8 @@ async function main() {
         scraperReport || { sites: {}, totals: { written: 0, duplicates: 0, rejected: 0, errors: 0 }, duplicateDetails: [], writeErrors: [], sourceIssues: [], elapsedMinutes: 0 },
         priceCheckReport,
         reviewReport,
-        intakeReport
+        intakeReport,
+        { midday }
       );
       emailSent = result.sent || result.skipped;
     }

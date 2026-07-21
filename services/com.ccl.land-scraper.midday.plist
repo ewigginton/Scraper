@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.ccl.land-scraper.midday</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/nora/ccl-land-scraper/scripts/run-scraper.sh</string>
+    </array>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>12</integer>
+        <key>Minute</key>
+        <integer>30</integer>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/Users/nora/ccl-land-scraper/services/land-scraper/logs/launchd-scraper-midday.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/nora/ccl-land-scraper/services/land-scraper/logs/launchd-scraper-midday-error.log</string>
+    <key>WorkingDirectory</key>
+    <string>/Users/nora/ccl-land-scraper</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>SCRAPER_MIDDAY</key>
+        <string>1</string>
+    </dict>
+</dict>
+</plist>
