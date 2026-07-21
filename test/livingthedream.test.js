@@ -42,6 +42,23 @@ test('buildSearchUrls builds per-state pages only for covered states, deduped, w
   assert.equal(urls[1].page, 2);
 });
 
+test('KS/AR/IL are NOT covered — the captured index links only MO and KY state pages', () => {
+  // The page title/meta advertise "MO, KY, KS, AR, IL", but the captured
+  // /land-for-sale/ index links exactly two per-state pages (missouri, kentucky)
+  // and every listing on it is MO or KY. Kansas/Arkansas/Illinois state pages
+  // 404'd last run, so buildSearchUrls must skip them. Verified against
+  // data/evidence/www.livingthedreamland.com-land-for-sale-8f92fbe0.html.
+  const parser = new LivingTheDreamParser();
+  const urls = parser.buildSearchUrls([
+    { county: 'Cherokee', state: 'KS' },
+    { county: 'Benton', state: 'AR' },
+    { county: 'Pope', state: 'IL' },
+    { county: 'Wayne', state: 'MO' },
+  ]);
+  assert.ok(!urls.some(u => ['KS', 'AR', 'IL'].includes(u.state)), 'no KS/AR/IL URLs');
+  assert.deepEqual(urls.map(u => u.state), ['MO', 'MO'], 'only the covered MO state series is built');
+});
+
 test('resultsSortedNewestFirst is false — the default page order is price-descending, newest sort is JS-only', () => {
   // The captured page runs $17.5M -> $2.25M (price desc) and the "Newest"
   // option is a JS-driven data-rsfs select with no crawlable URL param, so

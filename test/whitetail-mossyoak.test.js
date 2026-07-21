@@ -2,9 +2,19 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('fs');
+const path = require('path');
 
 const WhitetailParser = require('../lib/parsers/whitetail');
 const MossyOakParser = require('../lib/parsers/mossyoak');
+
+// Every Oklahoma county-navigation anchor (display name + exact slug) trimmed
+// from data/evidence/www.mossyoakproperties.com-land-for-sale-oklahoma-d2ddfcda.html
+// (full raw capture on the evidence-inbox branch — data/evidence is gitignored).
+const okCountyLinksHtml = fs.readFileSync(
+  path.join(__dirname, 'fixtures', 'mossyoak-oklahoma-county-links.html'),
+  'utf8',
+);
 
 const counties = [
   { county: 'Wayne', state: 'KY', maxCPA: 2500 },
@@ -28,6 +38,54 @@ test('MossyOak builds /land-for-sale/{state}/{county}-county/ URLs with ?pg pagi
   assert.match(urls[0].url, /mossyoakproperties\.com\/land-for-sale\/kentucky\/wayne-county\/$/);
   const page2 = urls.find(u => u.county === 'Wayne' && u.page === 2);
   assert.match(page2.url, /wayne-county\/\?pg=2$/);
+});
+
+test('MossyOak countySlug reproduces EVERY real Oklahoma county href from its display name', () => {
+  const parser = new MossyOakParser();
+
+  // Pull (slug, displayName) from every county anchor in the captured OK page.
+  const re = /href="[^"]*land-for-sale\/oklahoma\/([a-z0-9-]+)-county\/"[^>]*>([^<]+)</gi;
+  const pairs = [];
+  let m;
+  while ((m = re.exec(okCountyLinksHtml))) {
+    const slug = m[1];
+    // Display name is the text before " County ..." ("McClain County Oklahoma
+    // Land for Sale" -> "McClain", "Le Flore County ..." -> "Le Flore").
+    const countyName = m[2].replace(/\s+County\b[\s\S]*$/i, '').trim();
+    pairs.push({ slug, countyName });
+  }
+
+  assert.equal(pairs.length, 77, 'all 77 OK county anchors present in the fixture');
+
+  // The bug counties must be in the table (proves the fixture really exercises
+  // the camel-case rule, not just plain names).
+  const bySlug = Object.fromEntries(pairs.map(p => [p.slug, p.countyName]));
+  assert.equal(bySlug['mc-clain'], 'McClain');
+  assert.equal(bySlug['mc-curtain'], 'McCurtain');
+  assert.equal(bySlug['mc-intosh'], 'McIntosh');
+  assert.equal(bySlug['le-flore'], 'Le Flore');
+
+  for (const { slug, countyName } of pairs) {
+    assert.equal(
+      parser.countySlug(countyName),
+      slug,
+      `countySlug(${JSON.stringify(countyName)}) should be "${slug}"`,
+    );
+  }
+});
+
+test('MossyOak countySlug handles the Airtable "Leflore" spelling and other Mc counties', () => {
+  const parser = new MossyOakParser();
+  // Airtable stores LeFlore without the internal capital, so the camel-case
+  // rule can't recover the hyphen — the explicit override map does.
+  assert.equal(parser.countySlug('Leflore'), 'le-flore');
+  assert.equal(parser.countySlug('leflore'), 'le-flore');
+  // Mc-counties outside the OK page still follow the hyphenation rule.
+  assert.equal(parser.countySlug('McNairy'), 'mc-nairy');   // TN
+  assert.equal(parser.countySlug('McCreary'), 'mc-creary'); // KY
+  // Plain names with no internal capital are untouched.
+  assert.equal(parser.countySlug('Logan'), 'logan');
+  assert.equal(parser.countySlug('Roger Mills'), 'roger-mills');
 });
 
 test('pagination series keys collapse page 1 (no param) and deeper ?pg=N/?page=N pages into one key', () => {
@@ -144,6 +202,29 @@ test('"St. Francois" card text matches a "Saint Francois" target (and vice versa
   const html = whitetailCard({ location: 'Saint Francois County, MO' });
   const listings = parser.parseSearchPage(html, 'St. Francois', 'MO');
   assert.equal(listings.length, 1);
+});
+
+test('the Airtable "Leflore" target matches "Le Flore County" card text (and vice versa)', () => {
+  // The real OK page spells it "Le Flore County," on cards while Airtable
+  // stores "Leflore" — without the space-variant matching, verifyCounty would
+  // drop every Le Flore card the moment the fixed slug starts resolving.
+  const parser = new MossyOakParser();
+  const html = `
+    <html><body>
+      <div>
+        <a href="/property/beech-creek-90652">Beech Creek Tract</a>
+        <span>Le Flore County, OK</span> <span>120 acres</span> <span>$300,000</span>
+      </div>
+    </body></html>`;
+  const listings = parser.parseSearchPage(html, 'Leflore', 'OK');
+  assert.equal(listings.length, 1, 'space-less Airtable spelling must match the spaced site spelling');
+
+  // Reverse direction: a spaced target matches space-less card text.
+  const squashed = html.replace('Le Flore County', 'Leflore County');
+  assert.equal(parser.parseSearchPage(squashed, 'Le Flore', 'OK').length, 1);
+
+  // A genuinely different county still drops.
+  assert.equal(parser.parseSearchPage(html, 'Latimer', 'OK').length, 0);
 });
 
 test('MossyOak ignores county/region navigation links entirely', () => {
