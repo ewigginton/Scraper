@@ -46,7 +46,7 @@ test('LandsOfAmerica generates lowercase state slugs', () => {
 test('LivingTheDream builds per-state /land-for-sale/{state}/ URLs, only for covered states', () => {
   const parser = new LivingTheDreamParser();
   // testCounties = San Augustine/TX + Taney/MO. TX is NOT one of the site's
-  // covered states (MO, KY, KS, AR, IL), so only the MO state page is built.
+  // covered states (only MO and KY are navigable), so only the MO state page is built.
   const urls = parser.buildSearchUrls(testCounties);
   assert.ok(!urls.some(u => u.state === 'TX'), 'non-covered TX produces no URL');
   const mo = urls.find(u => u.state === 'MO');
