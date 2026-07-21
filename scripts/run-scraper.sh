@@ -1,19 +1,39 @@
 #!/bin/bash
 # CCL Land Scraper — launchd wrapper
-# Schedule: 2:00 AM daily on Classic's iMac
-# Service: com.ccl.land-scraper
+# Schedule: 2:00 AM daily on Classic's iMac (nightly: scrape + price check +
+# intake + review + evidence capture, one email), plus an optional 12:30 PM
+# midday sweep (services/com.ccl.land-scraper.midday.plist, SCRAPER_MIDDAY=1:
+# scrape + intake only, no price check/review/evidence — see index.js and the
+# quiet-if-empty gate in lib/notify.js). Both services run this SAME script
+# and share the SAME run lock below, so a midday run can never overlap a
+# nightly one (or vice versa).
+# Service: com.ccl.land-scraper (+ com.ccl.land-scraper.midday)
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 LOG_DIR="$SCRIPT_DIR/services/land-scraper/logs"
-LOG_FILE="$LOG_DIR/scrape-$(date +%Y-%m-%d).log"
+# Midday runs get their own log file so a same-day nightly/midday pair don't
+# interleave into one file.
+LOG_SUFFIX=""
+MODE_LABEL="nightly"
+if [ "${SCRAPER_MIDDAY:-}" = "1" ]; then
+  LOG_SUFFIX="-midday"
+  MODE_LABEL="midday"
+fi
+LOG_FILE="$LOG_DIR/scrape-$(date +%Y-%m-%d)${LOG_SUFFIX}.log"
 LOCK_DIR="$SCRIPT_DIR/services/land-scraper/.run.lock"
 LOCK_MAX_AGE_SECONDS=28800
 
 mkdir -p "$LOG_DIR"
 
-echo "=== Scraper starting at $(date) ===" >> "$LOG_FILE"
+# Nightly's banner text is unchanged from before this feature; midday gets an
+# explicit mode tag so its log is unambiguous at a glance.
+if [ "$MODE_LABEL" = "midday" ]; then
+  echo "=== Scraper starting (midday) at $(date) ===" >> "$LOG_FILE"
+else
+  echo "=== Scraper starting at $(date) ===" >> "$LOG_FILE"
+fi
 
 cd "$SCRIPT_DIR"
 
@@ -88,7 +108,14 @@ trap 'rm -rf "$LOCK_DIR"' EXIT
 date +%s > "$LOCK_DIR/started_epoch"
 echo "$$" > "$LOCK_DIR/pid"
 ps -o comm= -p $$ > "$LOCK_DIR/comm" 2>/dev/null || true
-echo "scraper" > "$LOCK_DIR/job"
+# Nightly keeps the original "scraper" job label unchanged; only midday gets a
+# distinguishing suffix, so the nightly run's on-disk lock stays byte-for-byte
+# identical to before this feature.
+if [ "$MODE_LABEL" = "midday" ]; then
+  echo "scraper-midday" > "$LOCK_DIR/job"
+else
+  echo "scraper" > "$LOCK_DIR/job"
+fi
 
 NODE_BIN="$(command -v node || true)"
 if [ -z "$NODE_BIN" ]; then
@@ -174,27 +201,34 @@ set -e
 
 echo "=== Scraper finished at $(date) with exit code $EXIT_CODE ===" >> "$LOG_FILE"
 
-# --- Evidence capture (post-scrape) ----------------------------------------
+# --- Evidence capture (post-scrape, NIGHTLY ONLY) ---------------------------
 # Fetch the URLs the assistant queued in config/evidence-requests.json and push
 # the rendered HTML to the disposable `evidence-inbox` branch. Runs AFTER the
 # scrape + email so it never delays lead generation, and is fully guarded with
 # `|| true`: a capture/push failure must never fail the night's run or change
 # its exit code. Idempotent (already-captured URLs are skipped), ~8 requests, so
 # holding the run lock for it is fine.
-echo "=== Evidence capture starting at $(date) ===" >> "$LOG_FILE"
-# The evidence step fetches URLs and pushes to a branch WHILE STILL HOLDING the
-# run lock, so a stalled fetch/push must not be allowed to hang forever (it would
-# wedge every subsequent night). Bound it with the same portable perl-alarm
-# timeout the self-update block uses (macOS ships no `timeout` binary), and set
-# GIT_TERMINAL_PROMPT=0 (scoped to this step) so a misconfigured remote fails
-# fast under launchd's no-TTY session instead of blocking on a credential prompt.
-# Still fully `|| true`: a timeout or failure here must never fail the night's
-# run or change its exit code.
-export GIT_TERMINAL_PROMPT=0
-perl -e 'alarm shift; exec @ARGV' 600 \
-    "$NODE_BIN" scripts/process-evidence-requests.js >> "$LOG_FILE" 2>&1 || true
-unset GIT_TERMINAL_PROMPT
-echo "=== Evidence capture finished at $(date) ===" >> "$LOG_FILE"
+#
+# Skipped entirely on a midday run (SCRAPER_MIDDAY=1) — it's a light scrape+
+# intake sweep, and evidence capture stays a nightly-only step.
+if [ "${SCRAPER_MIDDAY:-}" = "1" ]; then
+  echo "=== Evidence capture skipped (midday run) ===" >> "$LOG_FILE"
+else
+  echo "=== Evidence capture starting at $(date) ===" >> "$LOG_FILE"
+  # The evidence step fetches URLs and pushes to a branch WHILE STILL HOLDING the
+  # run lock, so a stalled fetch/push must not be allowed to hang forever (it would
+  # wedge every subsequent night). Bound it with the same portable perl-alarm
+  # timeout the self-update block uses (macOS ships no `timeout` binary), and set
+  # GIT_TERMINAL_PROMPT=0 (scoped to this step) so a misconfigured remote fails
+  # fast under launchd's no-TTY session instead of blocking on a credential prompt.
+  # Still fully `|| true`: a timeout or failure here must never fail the night's
+  # run or change its exit code.
+  export GIT_TERMINAL_PROMPT=0
+  perl -e 'alarm shift; exec @ARGV' 600 \
+      "$NODE_BIN" scripts/process-evidence-requests.js >> "$LOG_FILE" 2>&1 || true
+  unset GIT_TERMINAL_PROMPT
+  echo "=== Evidence capture finished at $(date) ===" >> "$LOG_FILE"
+fi
 # ---------------------------------------------------------------------------
 
 # Clean up old logs and evidence files

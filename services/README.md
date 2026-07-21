@@ -128,3 +128,40 @@ daily emails, older jobs are still installed on the Mac. Remove them:
 GitHub also emails "Run failed" notifications when the nightly dry-run
 workflow fails — those stop when the workflow is healthy, and can be tuned
 in GitHub notification settings, not on this machine.
+
+## 6. Optional: a midday sweep for same-day listings
+
+The 2:00 AM run is the full pipeline (scrape + price check + intake +
+review + evidence capture, one email). `com.ccl.land-scraper.midday.plist`
+adds a **second, lighter** run at 12:30 PM so same-day listings surface
+within hours instead of waiting for the next 2 AM — the scraper's
+incremental early-stop and dedup make re-sweeping cheap.
+
+The midday run does **scrape + listing intake only**: price check, lead
+review, and evidence capture stay nightly-only (set via `SCRAPER_MIDDAY=1`
+in the plist, read by both `scripts/run-scraper.sh` and `index.js`). It also
+sends **no email at all** when nothing noteworthy happened (no new leads, no
+write errors, no site newly bot-blocked/abandoned, no crashed site) — routine
+"found nothing new" runs stay silent. When it does send, the subject is
+prefixed `[Midday]` so it's never confused with the nightly report. It runs
+the exact same `scripts/run-scraper.sh` and shares the same run lock as the
+nightly job, so the two can never overlap.
+
+Install it with one paste, from the scraper folder on the production Mac:
+
+```bash
+mkdir -p ~/Library/LaunchAgents
+cp services/com.ccl.land-scraper.midday.plist ~/Library/LaunchAgents/
+launchctl unload ~/Library/LaunchAgents/com.ccl.land-scraper.midday.plist 2>/dev/null || true
+launchctl load ~/Library/LaunchAgents/com.ccl.land-scraper.midday.plist
+```
+
+Verify it loaded:
+
+```bash
+launchctl list | grep com.ccl.land-scraper.midday
+```
+
+Its logs land next to the nightly ones in `services/land-scraper/logs/`, as
+`scrape-YYYY-MM-DD-midday.log` (and `launchd-scraper-midday*.log`), so a
+same-day nightly/midday pair never interleaves into one file.
