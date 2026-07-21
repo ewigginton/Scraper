@@ -38,8 +38,16 @@ test('extractDetailCoordinates: real LANDFLIP detail fixture carries no coordina
   assert.equal(makeParser().extractDetailCoordinates(html), null);
 });
 
-test('extractDetailCoordinates: real LANDFLIP evidence capture (160KB) carries no coordinates → null', () => {
-  const html = fs.readFileSync(path.join(EVIDENCE, 'www.landflip.com-land-420517-10628af3.html'), 'utf8');
+test('extractDetailCoordinates: real LANDFLIP evidence capture (160KB) carries no coordinates → null', (t) => {
+  // data/evidence is gitignored — the full capture exists only on machines
+  // that ran the evidence pipeline (the trimmed committed fixture above
+  // covers the same assertion everywhere, including CI's fresh checkout).
+  const capturePath = path.join(EVIDENCE, 'www.landflip.com-land-420517-10628af3.html');
+  if (!fs.existsSync(capturePath)) {
+    t.skip('full evidence capture not present in this checkout');
+    return;
+  }
+  const html = fs.readFileSync(capturePath, 'utf8');
   assert.equal(makeParser().extractDetailCoordinates(html), null);
 });
 
