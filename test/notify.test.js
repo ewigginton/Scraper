@@ -270,6 +270,52 @@ test('kitchen sink: every section renders its key line, in order, with no undefi
   assert.ok(!body.includes('NaN'), 'no "NaN" in the rendered body');
 });
 
+// Regression coverage for the "TuttLand: 0 checked -> may be blocked or down"
+// false alarm: a run whose target counties fall entirely outside a source's
+// coverage (searchUrlsPlanned === 0) must be reported as skipped, not as a
+// site issue — while a genuinely-zero-results site (urls WERE planned and
+// fetched) must keep alarming exactly as before.
+test('a zero-planned site is reported as skipped, not as a site issue; a genuinely-zero-results site still alarms', () => {
+  const { buildScraperBody, buildScraperSubject } = require('../lib/notify');
+  const scraperReport = {
+    dryRun: true,
+    sites: {
+      TuttLand: {
+        status: 'ok', parsed: 0, passed: 0, wouldWrite: 0, duplicates: 0, checked: 0,
+        searchUrlsPlanned: 0,
+      },
+      WhitetailProperties: {
+        status: 'ok', parsed: 0, passed: 0, wouldWrite: 0, duplicates: 0, checked: 5,
+        searchUrlsPlanned: 12,
+      },
+    },
+    totals: { checked: 5, parsed: 0, passed: 0, duplicates: 0, rejected: 0, written: 0, wouldWrite: 0, errors: 0 },
+    duplicateDetails: [],
+    writeErrors: [],
+    sourceIssues: [],
+    warnings: [],
+    elapsedMinutes: 5,
+  };
+
+  const body = buildScraperBody(scraperReport, null, 'Monday');
+
+  // TuttLand: skip line, not the misleading "0 checked -> 0 passed -> 0 new".
+  assert.match(body, /TuttLand: no target counties in this source's coverage this run — skipped/);
+  assert.ok(!/TuttLand: 0 checked/.test(body), 'zero-planned site must not render the "0 checked" scan line');
+
+  // SITE ISSUES: only the genuinely-blocked site appears, TuttLand is excluded.
+  assert.match(body, /⚠️ SITE ISSUES/);
+  assert.match(body, /WhitetailProperties: Zero results — may be blocked or down/);
+  assert.ok(
+    !/TuttLand: Zero results — may be blocked or down/.test(body),
+    'zero-planned site must not appear in SITE ISSUES'
+  );
+
+  // Subject/counts are unaffected by the zero-planned site.
+  const subject = buildScraperSubject(scraperReport);
+  assert.doesNotMatch(subject, /⚠️/);
+});
+
 test('standouts appear in the consolidated subject', () => {
   const { buildScraperSubject } = require('../lib/notify');
   const scraperReport = {
