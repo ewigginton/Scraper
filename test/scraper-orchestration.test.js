@@ -634,6 +634,62 @@ test('incremental early-stop: processScrapedListings surfaces earlyStoppedSeries
   assert.equal(siteReport.earlyStoppedSeries, 4, 'the site report carries the early-stop count for the email');
 });
 
+// --- searchUrlsPlanned (zero-coverage false-alarm fix) ----------------------
+// Regression coverage for the "TuttLand: 0 checked -> may be blocked or down"
+// false alarm when a run's target counties fall entirely outside a source's
+// coverage (buildSearchUrls() legitimately returns []).
+
+test('searchUrlsPlanned: scrapeAll records 0 when buildSearchUrls returns no urls', async () => {
+  const parser = new IncrementalTestParser({ sorted: true, pages: [] });
+
+  const listings = await parser.scrapeAll([{ county: 'Texas', state: 'MO', maxCPA: 4000 }]);
+
+  assert.equal(parser.stats.searchUrlsPlanned, 0);
+  assert.equal(parser.fetchedPages.length, 0, 'a parser with no planned urls fetches nothing');
+  assert.equal(listings.length, 0);
+});
+
+test('searchUrlsPlanned: scrapeAll records the planned count when buildSearchUrls returns urls', async () => {
+  const parser = new IncrementalTestParser({
+    sorted: true,
+    pages: [
+      ['https://test.example/l/1'],
+      ['https://test.example/l/2'],
+    ],
+  });
+
+  await parser.scrapeAll([{ county: 'Taney', state: 'MO', maxCPA: 4000 }]);
+
+  assert.equal(parser.stats.searchUrlsPlanned, 2);
+  assert.equal(parser.fetchedPages.length, 2);
+});
+
+test('searchUrlsPlanned: a retry pass (prepareForRetry) reflects its own coverage, not the first pass', async () => {
+  const parser = new IncrementalTestParser({
+    sorted: true,
+    pages: [['https://test.example/l/1'], ['https://test.example/l/2']],
+  });
+  await parser.scrapeAll([{ county: 'Taney', state: 'MO', maxCPA: 4000 }]);
+  assert.equal(parser.stats.searchUrlsPlanned, 2);
+
+  parser.prepareForRetry();
+  parser._pages = [];
+  await parser.scrapeAll([{ county: 'Taney', state: 'MO', maxCPA: 4000 }]);
+
+  assert.equal(parser.stats.searchUrlsPlanned, 0, 'reassigned fresh each scrapeAll call, not accumulated');
+});
+
+test('searchUrlsPlanned: processScrapedListings carries the field onto the site report', async () => {
+  initFilter(new Map([['taney|MO', 4000]]));
+  const parser = new IncrementalTestParser({ sorted: true, pages: [] });
+  await parser.scrapeAll([{ county: 'Taney', state: 'MO', maxCPA: 4000 }]);
+  const { ctx } = makeCtx();
+
+  const siteReport = await processScrapedListings(parser, [], ctx);
+
+  assert.equal(siteReport.searchUrlsPlanned, 0);
+});
+
 test('incremental early-stop: consolidated email renders the incremental line', () => {
   const report = {
     dryRun: true,

@@ -179,3 +179,33 @@ test('SITE DIAGNOSIS section is absent when no site has a diagnosis', () => {
   const body = buildScraperBody(scraperReport, null, 'Monday');
   assert.ok(!body.includes('SITE DIAGNOSIS'), 'no diagnoses means no section');
 });
+
+// --- searchUrlsPlanned (zero-coverage false-alarm fix) ----------------------
+// A run whose target counties fall entirely outside a source's coverage
+// (e.g. TuttLand, AL/GA/MS/TN/FL only, against a Missouri-only dry run)
+// plans zero search urls and records zero issues — nothing to diagnose.
+
+test('zero searchUrlsPlanned with zero recorded issues produces no diagnosis', () => {
+  const siteReport = { status: 'ok', checked: 0, parsed: 0, errors: 0, searchUrlsPlanned: 0 };
+  assert.equal(diagnoseSite('TuttLand', siteReport, []), null, 'never asked to fetch anything this run — not noteworthy');
+});
+
+test('searchUrlsPlanned undefined (older/replayed report) still diagnoses zero-parsed as "may be blocked or down"', () => {
+  // Backward compat: a queued/replayed report from before this field existed
+  // must behave exactly as before — undefined must never suppress a real alarm.
+  const siteReport = { status: 'ok', checked: 3, parsed: 0, errors: 0 };
+  const diagnosis = diagnoseSite('TestSite', siteReport, []);
+
+  assert.ok(diagnosis);
+  assert.equal(diagnosis.severity, 'transient');
+  assert.match(diagnosis.headline, /may be blocked or down/);
+});
+
+test('searchUrlsPlanned > 0 with zero parsed is still diagnosed as "may be blocked or down" (a genuine block, not a coverage gap)', () => {
+  const siteReport = { status: 'ok', checked: 3, parsed: 0, errors: 0, searchUrlsPlanned: 12 };
+  const diagnosis = diagnoseSite('WhitetailProperties', siteReport, []);
+
+  assert.ok(diagnosis, 'urls WERE planned and fetched, so zero parsed must still alarm');
+  assert.equal(diagnosis.severity, 'transient');
+  assert.match(diagnosis.headline, /may be blocked or down/);
+});
