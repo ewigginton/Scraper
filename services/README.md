@@ -165,3 +165,54 @@ launchctl list | grep com.ccl.land-scraper.midday
 Its logs land next to the nightly ones in `services/land-scraper/logs/`, as
 `scrape-YYYY-MM-DD-midday.log` (and `launchd-scraper-midday*.log`), so a
 same-day nightly/midday pair never interleaves into one file.
+
+## 7. Daily health-check service (9:00 AM)
+
+A read-only monitor that reviews the most recent nightly run and emails a
+per-source health report. It is the daily "did every scraper actually work?"
+check — separate from, and in addition to, the 2 AM run's own email (this is
+a deliberate second email: a health monitor, not another run).
+
+Every night `index.js` appends a per-site summary of the run to
+`data/run-history/history.jsonl` (`lib/run-history.js`). At 9:00 AM,
+`scripts/run-health-check.sh` runs `node scripts/health-check.js --email`,
+which classifies each enabled source against the previous seven successful
+runs (Successful / Successful-but-anomalous / Failed / Access restricted /
+Needs human review) and emails the report to `EMAIL_TO`. It never scrapes or
+writes to Airtable, so it needs no run lock and cannot disturb a run.
+
+The full daily review-and-repair procedure (what to do when a source is
+Failed or anomalous) and the safety stop conditions are in
+`docs/health-check-runbook.md`.
+
+```bash
+cp services/com.ccl.land-scraper.health-check.plist ~/Library/LaunchAgents/
+launchctl unload ~/Library/LaunchAgents/com.ccl.land-scraper.health-check.plist 2>/dev/null || true
+launchctl load ~/Library/LaunchAgents/com.ccl.land-scraper.health-check.plist
+```
+
+Verify it loaded:
+
+```bash
+launchctl list | grep com.ccl.land-scraper.health-check
+```
+
+`StartCalendarInterval` uses the Mac's **local** clock, so 9:00 AM here is
+9 AM Central year-round — daylight-saving is handled automatically, no UTC
+offset to maintain. The 1:55 AM wake (section 1) covers the nightly run; the
+Mac is normally awake and in use by 9 AM, but if it is routinely asleep then,
+add a second wake so the check is not skipped:
+
+```bash
+sudo pmset repeat wakeorpoweron MTWRFSU 08:55:00
+```
+
+Logs land in `services/land-scraper/logs/` as `health-check-YYYY-MM-DD.log`
+(and `launchd-health-check*.log`).
+
+To preview the report without email (any machine that has run the scraper):
+
+```bash
+npm run health-check           # printed report + exit code
+npm run health-check -- --json # machine-readable
+```

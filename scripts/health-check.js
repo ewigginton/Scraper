@@ -14,6 +14,8 @@ require('dotenv').config();
 //   node scripts/health-check.js            # human-readable report
 //   node scripts/health-check.js --json     # machine-readable JSON (for the
 //                                            # 9 AM automation to parse)
+//   node scripts/health-check.js --email    # also email the report to EMAIL_TO
+//                                            # (the 9 AM launchd service uses this)
 //
 // Exit code: 0 when every source is Successful (including a legitimately quiet
 // zero-result run); 1 when only soft anomalies exist; 2 when a source is
@@ -23,6 +25,7 @@ require('dotenv').config();
 const fs = require('fs');
 const { loadRunHistory } = require('../lib/run-history');
 const { analyzeLatestRun, CATEGORIES, needsAttention } = require('../lib/health-check');
+const { sendMail } = require('../lib/notify');
 
 function loadEnabledSites() {
   try {
@@ -36,15 +39,36 @@ function loadEnabledSites() {
   }
 }
 
-function main() {
+async function main() {
   const asJson = process.argv.includes('--json');
+  const asEmail = process.argv.includes('--email');
   const history = loadRunHistory();
   const analysis = analyzeLatestRun(history, { sites: loadEnabledSites() });
+  const report = renderReport(analysis);
 
   if (asJson) {
     process.stdout.write(`${JSON.stringify(analysis, null, 2)}\n`);
   } else {
-    process.stdout.write(`${renderReport(analysis)}\n`);
+    process.stdout.write(`${report}\n`);
+  }
+
+  // Email the report when asked (the 9 AM launchd service runs with --email so
+  // Emma gets the daily health check whether or not anything is wrong). Never
+  // let a mail failure change the exit code — the printed report already ran.
+  if (asEmail) {
+    const to = process.env.EMAIL_TO;
+    if (!to) {
+      console.warn('[HealthCheck] --email set but EMAIL_TO is not configured — skipping email.');
+    } else {
+      const subject = analysis.runDate === null
+        ? 'CCL Scraper Health Check — no run data yet'
+        : `CCL Scraper Health Check — ${analysis.overall} (${analysis.runDate})`;
+      try {
+        await sendMail(to, subject, report);
+      } catch (err) {
+        console.warn(`[HealthCheck] Could not send health-check email: ${err.message}`);
+      }
+    }
   }
 
   if (analysis.runDate === null) {
@@ -154,4 +178,7 @@ function mark(category) {
   }
 }
 
-main();
+main().catch(err => {
+  console.error(`[HealthCheck] Unexpected error: ${err.message}`);
+  process.exit(1);
+});
