@@ -1,6 +1,15 @@
 #!/usr/bin/env node
 'use strict';
 
+// Load .env FIRST so SCRAPER_BROWSER_* tuning applies to the capture. This
+// script is a standalone process invoked by run-scraper.sh, which does not
+// export these vars and does not source .env — without this, the browser
+// fallback here always ran headless, so headless-detected CoStar walls
+// (LandWatch's Imperva) hard-403'd every night and never captured, while
+// unprotected sites captured fine. SCRAPER_BROWSER_HEADED=true in the Mac's
+// .env now actually reaches the capture.
+require('dotenv').config();
+
 /**
  * Nightly evidence capture — closes the parser-evidence loop without a human.
  *

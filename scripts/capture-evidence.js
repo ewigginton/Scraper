@@ -1,6 +1,10 @@
 #!/usr/bin/env node
 'use strict';
 
+// Load .env first so SCRAPER_BROWSER_HEADED (and the other SCRAPER_BROWSER_*
+// knobs this script's comment promises) actually reach the browser fallback.
+require('dotenv').config();
+
 // Capture rendered HTML evidence for parser work. Fetches each URL through
 // the same browser fallback the scraper uses (headed Chrome when
 // SCRAPER_BROWSER_HEADED=true), so what lands on disk is what the scraper
