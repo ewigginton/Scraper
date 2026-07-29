@@ -191,6 +191,21 @@ fi
 [ -n "$UPDATE_WARNING" ] && echo "WARNING: $UPDATE_WARNING" >> "$LOG_FILE"
 export SCRAPER_UPDATE_WARNING="$UPDATE_WARNING"
 export SCRAPER_GIT_COMMIT="$(git -C "$SCRIPT_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+
+# Run a real (headed) Chrome for the browser fallback. This LaunchAgent runs in
+# the logged-in GUI session of the always-on production Mac, so a visible window
+# is fine — and headed is the single strongest counter to the headless-detection
+# that CoStar's Imperva wall (LandWatch/Land.com/LandAndFarm) uses. Headless was
+# hard-403'ing those sites for both the live scrape and the nightly evidence
+# capture. Set here so it covers index.js AND process-evidence-requests.js.
+#
+# Default-assign (:=) so it only defaults to headed when nothing has set it:
+# to force headless on this machine, add SCRAPER_BROWSER_HEADED=false to the
+# LaunchAgent plist's <EnvironmentVariables>, which launchd exports into this
+# script before it runs — that pre-set value is respected here, and dotenv
+# (which does not override an already-set var) leaves it alone too.
+: "${SCRAPER_BROWSER_HEADED:=true}"
+export SCRAPER_BROWSER_HEADED
 # ---------------------------------------------------------------------------
 
 # Run the scraper, capturing all output. Keep logging even if Node fails.
