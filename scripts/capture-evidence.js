@@ -36,7 +36,9 @@ async function main() {
     process.exit(1);
   }
   if (!browserFetch.isEnabled()) {
-    console.error(`Browser fetch unavailable: ${browserFetch.reasonUnavailable()}`);
+    // reasonUnavailable() is null when playwright is installed but the
+    // fallback is switched off by env — name the switch instead of "null".
+    console.error(`Browser fetch unavailable: ${browserFetch.reasonUnavailable() || 'browser fallback disabled (SCRAPER_BROWSER_FALLBACK=false)'}`);
     process.exit(1);
   }
 
