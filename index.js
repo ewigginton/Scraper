@@ -10,6 +10,7 @@ const { runReview } = require('./lib/review');
 const { processIntakeQueue } = require('./lib/intake');
 const { closeBrowser } = require('./lib/browser-fetch');
 const { sendScraperEmail, pingHealthcheck } = require('./lib/notify');
+const { recordRun } = require('./lib/run-history');
 
 /**
  * Main entry point — runs on Classic's iMac at 2:00 AM via launchd.
@@ -186,6 +187,18 @@ async function main() {
       dryRun,
       elapsedMinutes: 0,
     };
+  }
+
+  // Step 4.6: Record this run's per-site health summary for the daily health
+  // check (scripts/health-check.js compares against the previous runs). Only
+  // for real scrapes — price-check-only runs have no site data. recordRun
+  // never throws, but guard anyway so nothing here can affect the email.
+  if (scraperReport && !priceCheckOnly && scraperReport.sites) {
+    try {
+      recordRun(scraperReport, { midday });
+    } catch (err) {
+      console.warn(`[Main] Could not record run history: ${err.message}`);
+    }
   }
 
   // Step 5: Send the single consolidated email (always, even on failure).

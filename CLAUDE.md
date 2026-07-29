@@ -83,6 +83,7 @@ See `.env.example` for the full list.
 - Price check only: `node index.js --price-check-only`
 - Scrape without price check: `node index.js --skip-price-check`
 - Scrape without review: `node index.js --skip-review`
+- Daily health check (read-only; reviews the most recent recorded run and classifies each enabled source): `npm run health-check` (add `--json` for machine output). See `docs/health-check-runbook.md` for the full daily review/repair procedure and safety stop conditions.
 
 ## GitHub Actions
 
@@ -147,3 +148,4 @@ in `lib/airtable.js` — never hardcode field names elsewhere:
   single consolidated email (no separate scheduled review job/email)
 - Launch scripts use a local run lock so scraper/review jobs do not overlap
 - Parser fetch/parse failures, bot-block detections, and markup-drift suspicions are saved locally under `data/source-health/` (HTML evidence in `data/source-health/snapshots/`) and summarized in reports
+- Every scrape appends a per-site health summary to `data/run-history/history.jsonl` (`lib/run-history.js`); `lib/health-check.js` classifies the latest run against the previous 7 successful runs (Successful / Successful-but-anomalous / Failed / Access restricted / Needs human review). Both `data/` paths are machine-local, so the 7-run baseline only exists where the scrape actually runs (the production Mac)
