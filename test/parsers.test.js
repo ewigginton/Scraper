@@ -2,6 +2,8 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('fs');
+const path = require('path');
 
 const LandWatchParser = require('../lib/parsers/landwatch');
 const LandComParser = require('../lib/parsers/landcom');
@@ -67,31 +69,104 @@ test('all parsers generate both pass-1 and pass-2 (large tract) URLs', () => {
   }
 });
 
+test('LandWatch is browser-rendered — a CoStar/Imperva client-rendered SPA', () => {
+  // A plain fetch is 403'd and returns only an empty JS skeleton, so scrapeAll
+  // must route this source through the real browser rather than mis-diagnosing
+  // a zero-card fetch as markup drift.
+  assert.equal(new LandWatchParser().requiresBrowserRender, true);
+});
+
 test('parser returns no listings on malformed cards without throwing', () => {
   const parser = new LandWatchParser();
-  const badHtml = '<div data-testid="listing-card"><div class="price">not a price</div></div>';
+  // A detail-link anchor with no parseable price/acres in its ancestry must be
+  // dropped, not emitted.
+  const badHtml = '<div><a href="/pid/12345">View</a><div>not a price</div></div>';
   const listings = parser.parseSearchPage(badHtml, 'Taney', 'MO');
   assert.deepEqual(listings, [], 'malformed card should be dropped, not emitted');
 });
 
-test('LandWatch extracts a listing from realistic card markup', () => {
+test('LandWatch extracts a listing from class-agnostic /pid/ card markup', () => {
+  // Class-name agnostic: the engine keys off the "/pid/{digits}" detail href
+  // and the price+acreage text in the card, NOT hand-picked CSS classes — so a
+  // cosmetic reskin no longer zeroes the parser.
   const parser = new LandWatchParser();
   const html = `
     <html><body>
-      <div data-testid="listing-card">
-        <h2 class="listing-title">160 Acres in Taney County</h2>
-        <div class="price">$480,000</div>
-        <div class="acres">160 acres</div>
-        <p class="description">Beautiful rolling pasture with creek frontage.</p>
-        <a href="/land/pid/12345">View</a>
+      <div class="whatever-they-reskin-to">
+        <a href="/taney-county-missouri-land-for-sale/pid/12345">160 Acres in Taney County</a>
+        <span>Taney County, MO</span>
+        <span>160 acres</span>
+        <span>$480,000</span>
       </div>
     </body></html>`;
   const listings = parser.parseSearchPage(html, 'Taney', 'MO');
   assert.equal(listings.length, 1);
   assert.equal(listings[0].price, 480000);
   assert.equal(listings[0].acres, 160);
-  assert.equal(listings[0].url, 'https://www.landwatch.com/land/pid/12345');
+  assert.equal(listings[0].url, 'https://www.landwatch.com/taney-county-missouri-land-for-sale/pid/12345');
   assert.equal(listings[0].county, 'Taney');
+  assert.match(listings[0].name, /160 Acres in Taney County/);
+});
+
+test('LandWatch extracts a bare /pid/ detail link and takes total price over $/acre', () => {
+  const parser = new LandWatchParser();
+  const html = `
+    <html><body>
+      <div>
+        <a href="/pid/98765">Rolling Pasture Tract</a>
+        <span>Taney County, MO</span> <span>200 acres</span>
+        <span>$3,000/acre — $600,000</span>
+      </div>
+    </body></html>`;
+  const listings = parser.parseSearchPage(html, 'Taney', 'MO');
+  assert.equal(listings.length, 1);
+  assert.equal(listings[0].price, 600000, 'must take the total, not the per-acre figure');
+  assert.equal(listings[0].url, 'https://www.landwatch.com/pid/98765');
+});
+
+test('LandWatch drops a nearby-county card when the page mixes inventory', () => {
+  const parser = new LandWatchParser();
+  const html = `
+    <html><body>
+      <div>
+        <a href="/pid/111">Target Tract</a>
+        <span>Taney County, MO</span> <span>120 acres</span> <span>$300,000</span>
+      </div>
+      <div>
+        <a href="/pid/222">Neighbor Tract</a>
+        <span>Christian County, MO</span> <span>150 acres</span> <span>$400,000</span>
+      </div>
+    </body></html>`;
+  const listings = parser.parseSearchPage(html, 'Taney', 'MO');
+  assert.equal(listings.length, 1);
+  assert.match(listings[0].name, /Target Tract/);
+});
+
+// Real-capture regression: activates once a live LandWatch search page is
+// captured from the production Mac (through the browser fallback that clears
+// Imperva) and dropped in as this fixture. Until then it skips — the datacenter
+// CI/cloud IP cannot fetch LandWatch, so there is nothing to assert against.
+// Capture: SCRAPER_BROWSER_HEADED=true node scripts/capture-landwatch-fixture.js
+test('LandWatch extracts real listings from a captured search page (when present)', (t) => {
+  const fixture = path.join(__dirname, 'fixtures', 'landwatch-search.html');
+  if (!fs.existsSync(fixture)) {
+    t.skip('no captured LandWatch fixture — run scripts/capture-landwatch-fixture.js on the production Mac');
+    return;
+  }
+  const parser = new LandWatchParser();
+  const html = fs.readFileSync(fixture, 'utf8');
+  // The capture script records the county/state it fetched in a leading
+  // "<!-- landwatch-fixture county=Wayne state=KY -->" comment.
+  const meta = html.match(/landwatch-fixture county=([^\s]+) state=([A-Z]{2})/);
+  const county = meta ? meta[1].replace(/_/g, ' ') : 'Wayne';
+  const state = meta ? meta[2] : 'KY';
+  const listings = parser.parseSearchPage(html, county, state);
+  assert.ok(listings.length > 0, 'captured page should yield at least one listing');
+  for (const l of listings) {
+    assert.match(l.url, /\/pid\/\d+/, `listing url should be a /pid/ detail link: ${l.url}`);
+    assert.ok(l.price > 0, `listing should have a positive price: ${JSON.stringify(l)}`);
+    assert.ok(l.acres > 0, `listing should have positive acreage: ${JSON.stringify(l)}`);
+  }
 });
 
 test('county slugs strip punctuation so URLs do not 404', () => {
@@ -129,7 +204,9 @@ test('scrapeAll records a blocked source issue instead of silent zero', async ()
   process.env.SCRAPER_REQUEST_DELAY_MS = '1';
   process.env.SCRAPER_MAX_PAGE = '1';
 
-  const parser = new LandWatchParser();
+  // Generic scrapeAll behavior — uses a plain-fetch parser as the vehicle.
+  // (LandWatch is now requiresBrowserRender, so it no longer uses fetchPage.)
+  const parser = new LandAndFarmParser();
   parser.fetchPage = async () => '<html><head><title>Access Denied</title></head><body></body></html>';
 
   try {
@@ -160,7 +237,8 @@ test('zero listings on page 1 without a no-results marker records markup drift',
   process.env.SCRAPER_REQUEST_DELAY_MS = '1';
   process.env.SCRAPER_MAX_PAGE = '1';
 
-  const parser = new LandWatchParser();
+  // Generic scrapeAll drift detection — plain-fetch vehicle (see note above).
+  const parser = new LandAndFarmParser();
   // A live-looking page whose cards no longer match our selectors
   parser.fetchPage = async () => '<html><body><div class="totally-new-card-class">stuff</div></body></html>';
 
@@ -240,7 +318,8 @@ test('a genuine "no results" page does not raise a drift issue', async () => {
   process.env.SCRAPER_REQUEST_DELAY_MS = '1';
   process.env.SCRAPER_MAX_PAGE = '1';
 
-  const parser = new LandWatchParser();
+  // Generic scrapeAll no-results handling — plain-fetch vehicle (see note above).
+  const parser = new LandAndFarmParser();
   parser.fetchPage = async () => '<html><body><p>No results found for your search. Try adjusting your filters.</p></body></html>';
 
   try {
@@ -271,7 +350,8 @@ test('multi-state counties produce correct slugs for each state', () => {
 });
 
 test('SCRAPER_MAX_PAGE limits validation runs to early pages', async () => {
-  const parser = new LandWatchParser();
+  // Generic SCRAPER_MAX_PAGE cap — plain-fetch vehicle (see note above).
+  const parser = new LandAndFarmParser();
   const originalFetchPage = parser.fetchPage;
   const originalMaxPage = process.env.SCRAPER_MAX_PAGE;
   const originalDelay = process.env.SCRAPER_REQUEST_DELAY_MS;
