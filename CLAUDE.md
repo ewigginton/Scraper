@@ -120,7 +120,7 @@ in `lib/airtable.js` — never hardcode field names elsewhere:
 
 ## Architecture
 
-- Site parsers in `lib/parsers/` (LandWatch, Land.com, LandAndFarm, LivingTheDream, WhitetailProperties, MossyOakProperties; LandsOfAmerica exists but is disabled — it redirects to Land.com)
+- Site parsers in `lib/parsers/` — 11 registered; `config/settings.json` `sites` is the source of truth for which are enabled. Currently enabled: LivingTheDream, WhitetailProperties, MossyOakProperties, MidwestLandGroup, LANDFLIP, NationalLandRealty, TuttLand. Disabled: the four CoStar-network sites (LandWatch, Land.com, LandAndFarm, LandsOfAmerica) pending a selector rebuild
 - Bot-blocked pages (403s and HTTP-200 challenge pages) are retried through a
   real Chrome via `lib/browser-fetch.js` (playwright-core, optionalDependency;
   disable with `SCRAPER_BROWSER_FALLBACK=false` — the CI workflow does);
@@ -141,6 +141,7 @@ in `lib/airtable.js` — never hardcode field names elsewhere:
 - County targets loaded dynamically from Airtable `County` table using `CPA Target`
 - Filtering: accepts listings within 20% of CPA target, watches 20-30% over, rejects >30%
 - Deduplication: URL match + property fingerprint (county/state/acres/price hash) + location/price-tolerance match; the dedup index includes `Not Interested` records so rejected leads are not re-created
+- Cross-site/source merging: a URL- or fingerprint-duplicate is not discarded — its source+link is merged into the existing record as a `Source — url` line in the multiline `Source` field (`Listing ` keeps the first-seen URL). Applies to scraped dups (same night or vs existing records), failed-write replays, and intake submissions; the dedup index parses URLs back out of `Source` so merges are idempotent across nights. Merges write ONLY `Source`, always refetch the record first (never trust a snapshot), and never run in dry runs. See `mergeSourceIntoRecord` in `lib/airtable.js`
 - Results written to the Airtable `Land` table
 - Failed Airtable writes are queued in `data/failed-writes/` and replayed automatically at the start of the next scrape (processed files move to `data/failed-writes/done/`)
 - The 2 AM nightly job runs scrape → price check → lead review and sends a

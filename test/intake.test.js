@@ -25,21 +25,32 @@ const LISTING_HTML = `<html><head>
   <p>1,118 acres of recreational and hunting property in Pittsburg County, Oklahoma.</p>
 </body></html>`;
 
-function stubAirtable(t, { queue, dedupIndex, counties }) {
+function stubAirtable(t, { queue, dedupIndex, counties, checkDuplicate, mergeSourceIntoRecord }) {
   const original = {
     getIntakeQueue: airtable.getIntakeQueue,
     loadDedupIndex: airtable.loadDedupIndex,
     updateIntakeRecord: airtable.updateIntakeRecord,
     createLeadRecord: airtable.createLeadRecord,
     listAllCounties: airtable.listAllCounties,
+    checkDuplicate: airtable.checkDuplicate,
+    mergeSourceIntoRecord: airtable.mergeSourceIntoRecord,
   };
-  const calls = { intakeUpdates: [], createdLeads: [] };
+  const calls = { intakeUpdates: [], createdLeads: [], mergeCalls: [] };
   airtable.getIntakeQueue = async () => queue;
   airtable.loadDedupIndex = async () => dedupIndex
     || { urlSet: new Set(), fingerprintSet: new Set(), locationMap: new Map(), records: [] };
   airtable.updateIntakeRecord = async (id, fields) => { calls.intakeUpdates.push({ id, fields }); };
   airtable.createLeadRecord = async listing => { calls.createdLeads.push(listing); return 'recCreatedLand01X'; };
   airtable.listAllCounties = () => counties || [{ county: 'Pittsburg', state: 'OK' }, { county: 'Wayne', state: 'KY' }];
+  // Only stubbed when the test supplies an override — most tests exercise the
+  // real (sibling-lane-owned) checkDuplicate/mergeSourceIntoRecord.
+  if (checkDuplicate) airtable.checkDuplicate = checkDuplicate;
+  if (mergeSourceIntoRecord) {
+    airtable.mergeSourceIntoRecord = async (existingRecord, listing) => {
+      calls.mergeCalls.push({ existingRecord, listing });
+      return mergeSourceIntoRecord(existingRecord, listing);
+    };
+  }
   t.after(() => Object.assign(airtable, original));
   return calls;
 }
@@ -314,6 +325,139 @@ test('intake: duplicate URLs are marked Duplicate, not re-created', { timeout: 6
   assert.equal(report.duplicates, 1);
   assert.equal(calls.createdLeads.length, 0);
   assert.equal(calls.intakeUpdates[0].fields.Status, 'Duplicate');
+});
+
+test('intake: a duplicate resolving to an existing record merges the source and links the existing record', { timeout: 60000 }, async (t) => {
+  const server = http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/html' });
+    res.end(LISTING_HTML);
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => server.close());
+  const url = `http://127.0.0.1:${server.address().port}/pittsburg-listing`;
+  const existingRecord = { id: 'recExisting0001X', fields: { Source: 'LandWatch' } };
+
+  const calls = stubAirtable(t, {
+    queue: [{ id: 'recIntakeMerge001X', fields: { URL: url, 'Submitted By': 'Emma' } }],
+    checkDuplicate: () => ({
+      isDuplicate: true,
+      reason: 'Property fingerprint match (cross-site duplicate)',
+      matchType: 'fingerprint',
+      existingRecord,
+    }),
+    mergeSourceIntoRecord: () => ({ merged: true }),
+  });
+
+  const report = await processIntakeQueue({ dryRun: false });
+  assert.equal(report.duplicates, 1);
+  assert.equal(report.sourceMerges, 1);
+  assert.equal(calls.createdLeads.length, 0, 'a merged duplicate never creates a new lead');
+  assert.equal(calls.mergeCalls.length, 1);
+  assert.equal(calls.mergeCalls[0].existingRecord, existingRecord, 'mergeSourceIntoRecord is called with the resolved existing record');
+  assert.equal(calls.mergeCalls[0].listing.url, url);
+  assert.match(calls.mergeCalls[0].listing.source, /^Intake: 127\.0\.0\.1 \(Emma\)$/, 'source name keeps the Intake: host (submitter) format');
+
+  const update = calls.intakeUpdates[0];
+  assert.equal(update.fields.Status, 'Duplicate');
+  assert.match(update.fields.Result, /additional source/i);
+  assert.deepEqual(update.fields['Created Land Record'], ['recExisting0001X']);
+  assert.deepEqual(report.mergedDetails, [{ url, submitter: 'Emma', reason: 'Property fingerprint match (cross-site duplicate)' }]);
+});
+
+test('intake: a merge failure falls back to the plain Duplicate result with the error noted', { timeout: 60000 }, async (t) => {
+  const server = http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/html' });
+    res.end(LISTING_HTML);
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => server.close());
+  const url = `http://127.0.0.1:${server.address().port}/pittsburg-listing`;
+  const existingRecord = { id: 'recExisting0002X', fields: { Source: 'LandWatch' } };
+
+  const calls = stubAirtable(t, {
+    queue: [{ id: 'recIntakeMergeFail01X', fields: { URL: url, 'Submitted By': 'Emma' } }],
+    checkDuplicate: () => ({
+      isDuplicate: true,
+      reason: 'Property fingerprint match (cross-site duplicate)',
+      matchType: 'fingerprint',
+      existingRecord,
+    }),
+    mergeSourceIntoRecord: () => { throw new Error('Airtable update failed: 500'); },
+  });
+
+  const report = await processIntakeQueue({ dryRun: false });
+  assert.equal(report.duplicates, 1, 'a merge throw still counts as a plain duplicate');
+  assert.equal(report.sourceMerges, 0, 'a failed merge is never counted as a merge');
+  assert.equal(report.mergedDetails.length, 0);
+  assert.equal(calls.createdLeads.length, 0);
+
+  const update = calls.intakeUpdates[0];
+  assert.equal(update.fields.Status, 'Duplicate');
+  assert.match(update.fields.Result, /Airtable update failed: 500/, 'the merge error is noted in the Result text');
+  assert.equal(update.fields['Created Land Record'], undefined, 'no land-record link on a failed merge');
+});
+
+test('intake: a merge reporting merged:false (already recorded) falls back to the plain Duplicate result', { timeout: 60000 }, async (t) => {
+  const server = http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/html' });
+    res.end(LISTING_HTML);
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => server.close());
+  const url = `http://127.0.0.1:${server.address().port}/pittsburg-listing`;
+  const existingRecord = { id: 'recExisting0003X', fields: { Source: 'LandWatch' } };
+
+  const calls = stubAirtable(t, {
+    queue: [{ id: 'recIntakeMergeNoop01X', fields: { URL: url, 'Submitted By': 'Emma' } }],
+    checkDuplicate: () => ({
+      isDuplicate: true,
+      reason: 'URL already exists',
+      matchType: 'url',
+      existingRecord,
+    }),
+    mergeSourceIntoRecord: () => ({ merged: false, reason: 'URL already recorded' }),
+  });
+
+  const report = await processIntakeQueue({ dryRun: false });
+  assert.equal(report.duplicates, 1);
+  assert.equal(report.sourceMerges, 0);
+  assert.equal(report.mergedDetails.length, 0);
+  assert.equal(calls.mergeCalls.length, 1, 'mergeSourceIntoRecord is still called to check for a no-op');
+
+  const update = calls.intakeUpdates[0];
+  assert.equal(update.fields.Status, 'Duplicate');
+  assert.equal(update.fields.Result, 'Already in the Land table — URL already exists', 'plain duplicate result, no additional-source language');
+  assert.equal(update.fields['Created Land Record'], undefined);
+});
+
+test('intake: a duplicate with no resolvable existingRecord keeps today\'s plain Duplicate behavior', { timeout: 60000 }, async (t) => {
+  const server = http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/html' });
+    res.end(LISTING_HTML);
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => server.close());
+  const url = `http://127.0.0.1:${server.address().port}/pittsburg-listing`;
+
+  const calls = stubAirtable(t, {
+    queue: [{ id: 'recIntakeMergeNoRec01X', fields: { URL: url, 'Submitted By': 'Emma' } }],
+    checkDuplicate: () => ({
+      isDuplicate: true,
+      reason: 'Property fingerprint match (cross-site duplicate)',
+      matchType: 'fingerprint',
+      existingRecord: null,
+    }),
+  });
+
+  const report = await processIntakeQueue({ dryRun: false });
+  assert.equal(report.duplicates, 1);
+  assert.equal(report.sourceMerges, 0);
+  assert.equal(calls.mergeCalls.length, 0, 'mergeSourceIntoRecord is never called with no existingRecord');
+
+  const update = calls.intakeUpdates[0];
+  assert.equal(update.fields.Status, 'Duplicate');
+  assert.equal(update.fields.Result, 'Already in the Land table — Property fingerprint match (cross-site duplicate)');
+  assert.equal(update.fields['Created Land Record'], undefined);
 });
 
 test('intake: rows failed by the legacy poller are reclaimed and retried', { timeout: 60000 }, async (t) => {

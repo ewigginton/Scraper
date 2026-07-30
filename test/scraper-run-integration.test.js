@@ -18,6 +18,9 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 
 const parsersModule = require('../lib/parsers');
 let FAKE_PARSERS = [];
@@ -124,7 +127,11 @@ function stubAirtable(captured) {
   });
   airtable.writeListings = async (listings) => {
     captured.push(...listings);
-    return { created: listings.length, errors: [] };
+    return {
+      created: listings.length,
+      errors: [],
+      records: listings.map((l, i) => ({ id: `rec${captured.length}_${i}`, url: l.url })),
+    };
   };
   return () => Object.assign(airtable, original);
 }
@@ -143,6 +150,73 @@ function withEnv(overrides, fn) {
     }
   });
 }
+
+// (d) Two sites listing the SAME property tonight. The second one's source+link
+// must land on the record the first one created instead of being discarded.
+class CrossSiteParser extends BaseParser {
+  constructor(name, url) {
+    super(name);
+    this._url = url;
+  }
+  sleep() { return Promise.resolve(); }
+  buildSearchUrls() {
+    return [{ url: `https://${this.name}.example/search`, county: 'Taney', state: 'MO', page: 1 }];
+  }
+  async fetchPageSmart() { return '<html><body>search</body></html>'; }
+  parseSearchPage() {
+    this._lastCardCount = 1;
+    // Prices/acres within fingerprint tolerance of each other → same property.
+    return [{ name: `Shared Tract (${this.name})`, price: 301000, acres: 151, county: 'Taney', state: 'MO', url: this._url }];
+  }
+}
+
+test('runScraper: the same property on two sites becomes ONE record carrying both sources', async () => {
+  const first = new CrossSiteParser('SiteOne', 'https://one.example/l/1');
+  const second = new CrossSiteParser('SiteTwo', 'https://two.example/l/1');
+  FAKE_PARSERS = [first, second];
+
+  const captured = [];
+  const restoreAirtable = stubAirtable(captured);
+  const originalMerge = airtable.mergeSourceIntoRecord;
+  const merges = [];
+  airtable.mergeSourceIntoRecord = async (record, listing) => {
+    merges.push({ record, listing });
+    return { merged: true };
+  };
+
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'scraper-run-merge-'));
+
+  let report;
+  try {
+    await withEnv({
+      GITHUB_ACTIONS: undefined,
+      SCRAPER_BROWSER_FALLBACK: 'false',
+      SCRAPER_DETAIL_ENRICHMENT: 'false',
+      SCRAPER_BOTWALL_COOLDOWN_MINUTES: '0',
+      SCRAPER_DATA_DIR: dataDir, // hermetic: no repo data/ reads or writes
+    }, async () => {
+      report = await runScraper({ dryRun: false });
+    });
+  } finally {
+    airtable.mergeSourceIntoRecord = originalMerge;
+    restoreAirtable();
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+
+  assert.equal(captured.length, 1, 'only the first site created a record');
+  assert.equal(captured[0].url, 'https://one.example/l/1');
+  assert.equal(merges.length, 1, "the second site's source was merged into that record");
+  assert.equal(merges[0].listing.url, 'https://two.example/l/1');
+
+  assert.equal(report.totals.written, 1);
+  assert.equal(report.totals.duplicates, 1, 'a merged dup is still a caught dup');
+  assert.equal(report.totals.sourceMerges, 1);
+  assert.equal(report.sites.SiteTwo.sourceMerges, 1);
+  assert.equal(report.mergeDetails.length, 1);
+  assert.equal(report.mergeDetails[0].source, 'SiteTwo');
+  assert.equal(report.mergeDetails[0].matchType, 'session-fingerprint');
+  assert.equal(report.mergeDetails[0].dryRun, false);
+});
 
 test('runScraper: one real run composes rotation + bot-wall retry + sparse-enrichment into a consistent report', async () => {
   const rotating = new RotatingParser();

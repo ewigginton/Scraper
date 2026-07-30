@@ -316,6 +316,114 @@ test('a zero-planned site is reported as skipped, not as a site issue; a genuine
   assert.doesNotMatch(subject, /⚠️/);
 });
 
+test('CROSS-SITE SOURCES MERGED renders and excludes merged entries from CROSS-SITE DUPLICATES CAUGHT', () => {
+  const { buildScraperBody } = require('../lib/notify');
+  const scraperReport = {
+    dryRun: false,
+    sites: {},
+    totals: { written: 2, wouldWrite: 0, duplicates: 2, rejected: 0, errors: 0, sourceMerges: 1 },
+    duplicateDetails: [
+      { source: 'LandAndFarm', name: 'Twin Creek Tract', url: 'https://landandfarm.example/twin-creek', reason: 'same fingerprint as LandWatch: Twin Creek', matchType: 'fingerprint' },
+      { source: 'MossyOakProperties', name: 'Cedar Hollow', url: 'https://mossy.example/cedar-hollow', reason: 'same fingerprint as LandWatch: Cedar Hollow', matchType: 'fingerprint' },
+    ],
+    mergeDetails: [
+      { source: 'LandAndFarm', name: 'Twin Creek Tract', url: 'https://landandfarm.example/twin-creek', matchType: 'fingerprint', target: 'existing-record', mergedInto: { recordId: 'recAbc123', source: 'LandWatch' }, dryRun: false },
+    ],
+    writeErrors: [], sourceIssues: [], warnings: [], elapsedMinutes: 1,
+  };
+
+  const body = buildScraperBody(scraperReport, null, 'Monday');
+  assert.match(body, /CROSS-SITE SOURCES MERGED/);
+  assert.match(body, /LandAndFarm: Twin Creek Tract — source\+link added to existing LandWatch lead/);
+
+  // The merged entry is excluded from the old dupes section...
+  const dupesSectionStart = body.indexOf('CROSS-SITE DUPLICATES CAUGHT');
+  const dupesSection = body.slice(dupesSectionStart, body.indexOf('\n\n', dupesSectionStart));
+  assert.ok(!dupesSection.includes('Twin Creek Tract'), 'merged entry must not also appear in CROSS-SITE DUPLICATES CAUGHT');
+  // ...but the non-merged one still does.
+  assert.match(dupesSection, /Cedar Hollow/);
+
+  // Totals line mentions the merge.
+  assert.match(body, /TOTALS: 2 written, 2 dupes, 0 rejected \(1 source merged\)/);
+});
+
+test('CROSS-SITE SOURCES MERGED uses "would merge" wording on a dry run', () => {
+  const { buildScraperBody } = require('../lib/notify');
+  const scraperReport = {
+    dryRun: true,
+    sites: {},
+    totals: { written: 0, wouldWrite: 2, duplicates: 1, rejected: 0, errors: 0, sourceMerges: 1 },
+    duplicateDetails: [
+      { source: 'LandAndFarm', name: 'Twin Creek Tract', url: 'https://landandfarm.example/twin-creek', reason: 'same fingerprint as LandWatch: Twin Creek', matchType: 'fingerprint' },
+    ],
+    mergeDetails: [
+      { source: 'LandAndFarm', name: 'Twin Creek Tract', url: 'https://landandfarm.example/twin-creek', matchType: 'fingerprint', target: 'existing-record', mergedInto: { recordId: 'recAbc123', source: 'LandWatch' }, dryRun: true },
+    ],
+    writeErrors: [], sourceIssues: [], warnings: [], elapsedMinutes: 1,
+  };
+
+  const body = buildScraperBody(scraperReport, null, 'Monday');
+  assert.match(body, /LandAndFarm: Twin Creek Tract — source\+link would merge into existing LandWatch lead/);
+  assert.match(body, /TOTALS: 2 would write, 1 dupes, 0 rejected \(1 source would merge\)/);
+});
+
+test('CROSS-SITE SOURCES MERGED tolerates a legacy report shape (no mergeDetails/sourceMerges)', () => {
+  const { buildScraperBody } = require('../lib/notify');
+  const scraperReport = {
+    dryRun: false,
+    sites: {},
+    totals: { written: 1, wouldWrite: 0, duplicates: 1, rejected: 0, errors: 0 },
+    duplicateDetails: [
+      { source: 'LandAndFarm', name: 'Twin Creek Tract', url: 'https://landandfarm.example/twin-creek', reason: 'same fingerprint as LandWatch: Twin Creek', matchType: 'fingerprint' },
+    ],
+    // No mergeDetails field at all — a report shape from before source merging.
+    writeErrors: [], sourceIssues: [], warnings: [], elapsedMinutes: 1,
+  };
+
+  const body = buildScraperBody(scraperReport, null, 'Monday');
+  assert.ok(!body.includes('CROSS-SITE SOURCES MERGED'), 'section is omitted when there is nothing to merge-report');
+  assert.match(body, /CROSS-SITE DUPLICATES CAUGHT/);
+  assert.match(body, /Twin Creek Tract/, 'unmerged dupe still renders in the old section');
+  assert.ok(!body.includes('undefined'));
+  assert.ok(!body.includes('NaN'));
+});
+
+test('LISTING INTAKE section mentions the merged-into-existing count', () => {
+  const { buildScraperBody } = require('../lib/notify');
+  const scraperReport = {
+    dryRun: false,
+    sites: {},
+    totals: { written: 0, wouldWrite: 0, duplicates: 0, rejected: 0, errors: 0 },
+    duplicateDetails: [], writeErrors: [], sourceIssues: [], warnings: [], elapsedMinutes: 1,
+  };
+  const intakeReport = {
+    processed: 3, created: 1, duplicates: 2, sourceMerges: 2,
+    mergedDetails: [
+      { url: 'https://a.example/1', submitter: 'Emma', reason: 'Property fingerprint match (cross-site duplicate)' },
+      { url: 'https://a.example/2', submitter: 'Lori', reason: 'URL already exists' },
+    ],
+    added: [], failures: [],
+  };
+  const body = buildScraperBody(scraperReport, null, 'Monday', null, intakeReport);
+  assert.match(body, /LISTING INTAKE/);
+  assert.match(body, /2 duplicates merged into an existing lead as an additional source/);
+});
+
+test('LISTING INTAKE section tolerates a legacy intake report shape (no sourceMerges)', () => {
+  const { buildScraperBody } = require('../lib/notify');
+  const scraperReport = {
+    dryRun: false,
+    sites: {},
+    totals: { written: 0, wouldWrite: 0, duplicates: 0, rejected: 0, errors: 0 },
+    duplicateDetails: [], writeErrors: [], sourceIssues: [], warnings: [], elapsedMinutes: 1,
+  };
+  const intakeReport = { processed: 1, created: 0, duplicates: 1, added: [], failures: [] };
+  const body = buildScraperBody(scraperReport, null, 'Monday', null, intakeReport);
+  assert.match(body, /LISTING INTAKE/);
+  assert.ok(!/merged into an existing lead/.test(body));
+  assert.ok(!body.includes('undefined'));
+});
+
 test('standouts appear in the consolidated subject', () => {
   const { buildScraperSubject } = require('../lib/notify');
   const scraperReport = {

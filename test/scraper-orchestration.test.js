@@ -380,6 +380,375 @@ test('bot-wall retry: consolidated email surfaces the retried-after-cooldown out
   assert.match(body, /retried after 58 min cooldown — succeeded/);
 });
 
+// --- Cross-site source merging ------------------------------------------------
+// A duplicate is no longer just dropped: its source+link is preserved on the
+// lead it duplicates, so one Airtable record carries every site it appears on.
+
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const { replayFailedWrites } = require('../lib/scraper');
+const { FIELDS } = airtable;
+
+// The same property, priced/sized within fingerprint tolerance on two sites.
+const LANDWATCH_LISTING = {
+  name: 'Taney Tract (LandWatch)', price: 301000, acres: 151, county: 'Taney', state: 'MO',
+  url: 'https://landwatch.com/p/1', source: 'LandWatch',
+};
+const LANDANDFARM_LISTING = {
+  name: 'Taney Tract (LandAndFarm)', price: 299000, acres: 149, county: 'Taney', state: 'MO',
+  url: 'https://laf.com/p/1', source: 'LandAndFarm',
+};
+
+function fakeParser(name) {
+  return { name, stats: { checked: 1, errors: 0 }, sourceIssues: [] };
+}
+
+/** A report shaped exactly like runScraper's literal. */
+function makeMergeCtx({ dryRun = false, dedupIndex } = {}) {
+  const report = {
+    sites: {},
+    totals: { checked: 0, parsed: 0, passed: 0, duplicates: 0, rejected: 0, written: 0, wouldWrite: 0, errors: 0, sourceMerges: 0 },
+    duplicateDetails: [], mergeDetails: [], filterRejects: [], writeErrors: [], sourceIssues: [], warnings: [],
+    dryRun,
+  };
+  const ctx = {
+    dedupIndex: dedupIndex || { urlSet: new Set(), fingerprintSet: new Set(), locationMap: new Map() },
+    sessionFingerprints: new Map(),
+    report,
+    dryRun,
+  };
+  return { report, ctx };
+}
+
+/** Dedup index holding one existing LandWatch record for the shared property. */
+function indexWithExistingLandWatchRecord() {
+  return airtable.buildDedupIndex([{
+    id: 'recExisting1',
+    fields: {
+      [FIELDS.url]: LANDWATCH_LISTING.url,
+      [FIELDS.source]: 'LandWatch',
+      [FIELDS.fingerprint]: generateFingerprint(LANDWATCH_LISTING),
+      [FIELDS.nameFormula]: 'Taney Tract',
+    },
+  }]);
+}
+
+function stubAirtableMerge(t, { merge, write } = {}) {
+  const originals = {
+    mergeSourceIntoRecord: airtable.mergeSourceIntoRecord,
+    writeListings: airtable.writeListings,
+  };
+  const calls = { merges: [], writes: [] };
+  airtable.mergeSourceIntoRecord = async (record, listing) => {
+    calls.merges.push({ record, listing });
+    if (merge) return merge(record, listing);
+    return { merged: true };
+  };
+  airtable.writeListings = async (listings) => {
+    calls.writes.push(listings);
+    if (write) return write(listings);
+    return {
+      created: listings.length,
+      errors: [],
+      records: listings.map((l, i) => ({ id: `recNew${calls.writes.length}_${i}`, url: l.url })),
+    };
+  };
+  t.after(() => Object.assign(airtable, originals));
+  return calls;
+}
+
+// Detail enrichment must stay off: these tests never fetch a live page.
+function withMergeEnv(fn) {
+  return withEnv({ SCRAPER_DETAIL_ENRICHMENT: 'false', GITHUB_ACTIONS: undefined }, fn);
+}
+
+test('merge: a fingerprint duplicate of an existing record has its source+link merged in (live)', async (t) => {
+  initFilter(new Map([['taney|MO', 4000]]));
+  const calls = stubAirtableMerge(t);
+  const { report, ctx } = makeMergeCtx({ dedupIndex: indexWithExistingLandWatchRecord() });
+
+  const siteReport = await withMergeEnv(() =>
+    processScrapedListings(fakeParser('LandAndFarm'), [{ ...LANDANDFARM_LISTING }], ctx));
+
+  assert.equal(calls.merges.length, 1, 'the duplicate merged into the existing record');
+  assert.equal(calls.merges[0].record.id, 'recExisting1');
+  assert.equal(calls.merges[0].listing.url, LANDANDFARM_LISTING.url);
+  assert.equal(calls.writes.length, 0, 'a merged duplicate is never written as a new record');
+
+  // Still counted as a caught duplicate — totals and subject lines keep meaning.
+  assert.equal(report.totals.duplicates, 1);
+  assert.equal(siteReport.duplicates, 1);
+  assert.equal(report.totals.sourceMerges, 1);
+  assert.equal(siteReport.sourceMerges, 1);
+  assert.match(report.duplicateDetails[0].reason, /source\+link merged into the existing lead/);
+  assert.equal(report.duplicateDetails[0].merged, true);
+
+  assert.deepEqual(report.mergeDetails, [{
+    source: 'LandAndFarm',
+    name: LANDANDFARM_LISTING.name,
+    url: LANDANDFARM_LISTING.url,
+    matchType: 'fingerprint',
+    target: 'existing-record',
+    mergedInto: {
+      recordId: 'recExisting1',
+      url: LANDWATCH_LISTING.url,
+      source: 'LandWatch',
+      name: 'Taney Tract',
+    },
+    dryRun: false,
+  }]);
+
+  // A second identical card tonight now dedups on the URL instead of re-merging.
+  assert.equal(ctx.dedupIndex.urlSet.has(LANDANDFARM_LISTING.url), true);
+  await withMergeEnv(() => processScrapedListings(fakeParser('LandAndFarm'), [{ ...LANDANDFARM_LISTING }], ctx));
+  assert.equal(calls.merges.length, 1, 'the same link is not merged twice');
+  assert.equal(report.totals.duplicates, 2, 'it is still counted as a duplicate');
+});
+
+/**
+ * The tests around this one stub airtable.mergeSourceIntoRecord wholesale, so
+ * nothing exercises the real append. This one drives the REAL helper (only the
+ * Airtable boundaries are stubbed, against a simulated record store) with two
+ * sites merging into the SAME record — the shape that silently lost the first
+ * site's link, because the dedup index hands every caller one shared snapshot.
+ */
+const WHITETAIL_LISTING = {
+  name: 'Taney Tract (Whitetail)', price: 300500, acres: 150, county: 'Taney', state: 'MO',
+  url: 'https://whitetail.com/p/1', source: 'WhitetailProperties',
+};
+
+function stubAirtableRecordStore(t, records) {
+  const originals = {
+    getRecordById: airtable.getRecordById,
+    updateRecord: airtable.updateRecord,
+    writeListings: airtable.writeListings,
+  };
+  const store = new Map(records.map(record => [record.id, { ...record.fields }]));
+  airtable.getRecordById = async (recordId) => ({ id: recordId, fields: { ...(store.get(recordId) || {}) } });
+  airtable.updateRecord = async (recordId, fields) => {
+    store.set(recordId, { ...(store.get(recordId) || {}), ...fields });
+    return { updated: true };
+  };
+  airtable.writeListings = async () => { throw new Error('a merged duplicate must never be written as a new record'); };
+  t.after(() => Object.assign(airtable, originals));
+  return store;
+}
+
+test('merge (real helper): two sites merging into one record keep BOTH source lines', async (t) => {
+  initFilter(new Map([['taney|MO', 4000]]));
+  const dedupIndex = indexWithExistingLandWatchRecord();
+  const store = stubAirtableRecordStore(t, [{
+    id: 'recExisting1',
+    fields: { [FIELDS.url]: LANDWATCH_LISTING.url, [FIELDS.source]: 'LandWatch' },
+  }]);
+  const { report, ctx } = makeMergeCtx({ dedupIndex });
+
+  await withMergeEnv(() =>
+    processScrapedListings(fakeParser('LandAndFarm'), [{ ...LANDANDFARM_LISTING }], ctx));
+  await withMergeEnv(() =>
+    processScrapedListings(fakeParser('WhitetailProperties'), [{ ...WHITETAIL_LISTING }], ctx));
+
+  assert.equal(report.totals.sourceMerges, 2, 'both merges reported');
+  assert.deepEqual(store.get('recExisting1')[FIELDS.source].split('\n'), [
+    'LandWatch',
+    `LandAndFarm — ${LANDANDFARM_LISTING.url}`,
+    `WhitetailProperties — ${WHITETAIL_LISTING.url}`,
+  ], 'the second merge appends instead of rebuilding from the stale shared snapshot');
+
+  // Night 2: rebuilding the index from the written Source finds both links.
+  const nightTwo = airtable.buildDedupIndex([{ id: 'recExisting1', fields: store.get('recExisting1') }]);
+  assert.equal(nightTwo.urlSet.has(LANDANDFARM_LISTING.url), true);
+  assert.equal(nightTwo.urlSet.has(WHITETAIL_LISTING.url), true);
+});
+
+test('merge: a dry run makes ZERO Airtable writes and reports what would be merged', async (t) => {
+  initFilter(new Map([['taney|MO', 4000]]));
+  const calls = stubAirtableMerge(t, {
+    merge: () => { throw new Error('dry run must not merge'); },
+    write: () => { throw new Error('dry run must not write'); },
+  });
+  const { report, ctx } = makeMergeCtx({ dryRun: true, dedupIndex: indexWithExistingLandWatchRecord() });
+
+  await withMergeEnv(() =>
+    processScrapedListings(fakeParser('LandAndFarm'), [{ ...LANDANDFARM_LISTING }], ctx));
+
+  assert.equal(calls.merges.length, 0, 'no merge write in a dry run');
+  assert.equal(calls.writes.length, 0, 'no record write in a dry run');
+  assert.equal(report.totals.sourceMerges, 1, 'the would-be merge is still reported');
+  assert.equal(report.mergeDetails[0].dryRun, true);
+  assert.match(report.duplicateDetails[0].reason, /would be merged/);
+});
+
+test('merge: a legacy report shell (no mergeDetails/sourceMerges) survives a merge', async (t) => {
+  initFilter(new Map([['taney|MO', 4000]]));
+  stubAirtableMerge(t);
+  // makeCtx builds the pre-merge report shape, like index.js's fallback shells.
+  const { report, ctx } = makeCtx();
+  ctx.dedupIndex = indexWithExistingLandWatchRecord();
+
+  await withMergeEnv(() =>
+    processScrapedListings(fakeParser('LandAndFarm'), [{ ...LANDANDFARM_LISTING }], ctx));
+
+  assert.equal(report.totals.sourceMerges, 1, 'the counter is created on demand');
+  assert.equal(report.mergeDetails.length, 1, 'the detail array is created on demand');
+});
+
+test('merge: a failed merge write is non-fatal — warned, counted as a plain duplicate', async (t) => {
+  initFilter(new Map([['taney|MO', 4000]]));
+  const calls = stubAirtableMerge(t, {
+    merge: () => { throw new Error('Airtable 503'); },
+  });
+  const { report, ctx } = makeMergeCtx({ dedupIndex: indexWithExistingLandWatchRecord() });
+
+  const siteReport = await withMergeEnv(() =>
+    processScrapedListings(fakeParser('LandAndFarm'), [{ ...LANDANDFARM_LISTING }], ctx));
+
+  assert.equal(calls.merges.length, 1);
+  assert.equal(siteReport.status, 'ok', 'the site pass survives the merge failure');
+  assert.equal(report.totals.duplicates, 1, 'still counted as a duplicate');
+  assert.equal(report.totals.sourceMerges, 0, 'never counted as a merge that did not happen');
+  assert.equal(report.mergeDetails.length, 0);
+  assert.equal(report.duplicateDetails[0].merged, false);
+  assert.ok(
+    report.warnings.some(w => /Could not merge LandAndFarm source into existing lead recExisting1: Airtable 503/.test(w)),
+    `expected a merge-failure warning, got: ${report.warnings.join(' | ')}`
+  );
+});
+
+test('merge: an exact URL match is skipped as before — nothing new to preserve', async (t) => {
+  initFilter(new Map([['taney|MO', 4000]]));
+  const calls = stubAirtableMerge(t);
+  const { report, ctx } = makeMergeCtx({ dedupIndex: indexWithExistingLandWatchRecord() });
+
+  await withMergeEnv(() =>
+    processScrapedListings(fakeParser('LandWatch'), [{ ...LANDWATCH_LISTING }], ctx));
+
+  assert.equal(calls.merges.length, 0, 'the link is already recorded — no write');
+  assert.equal(report.totals.duplicates, 1);
+  assert.equal(report.totals.sourceMerges, 0);
+  assert.equal(report.duplicateDetails[0].matchType, 'url');
+});
+
+test('merge: a session duplicate of a not-yet-written lead rides along on the record being created', async (t) => {
+  initFilter(new Map([['taney|MO', 4000]]));
+  const calls = stubAirtableMerge(t);
+  const { report, ctx } = makeMergeCtx();
+
+  // Same site pass, same fingerprint, two different links.
+  const first = { ...LANDWATCH_LISTING };
+  const second = { ...LANDANDFARM_LISTING, source: 'LandWatch' };
+  await withMergeEnv(() => processScrapedListings(fakeParser('LandWatch'), [first, second], ctx));
+
+  assert.equal(calls.merges.length, 0, 'nothing is in Airtable yet — no update call');
+  assert.deepEqual(first.additionalSources, [{ source: 'LandWatch', url: LANDANDFARM_LISTING.url }]);
+  assert.deepEqual(calls.writes[0], [first], 'only the first listing is written');
+  assert.equal(report.totals.sourceMerges, 1);
+  assert.equal(report.mergeDetails[0].target, 'session-listing');
+  assert.equal(report.mergeDetails[0].matchType, 'session-fingerprint');
+  assert.equal(ctx.dedupIndex.urlSet.has(LANDANDFARM_LISTING.url), true);
+
+  // The rendered Airtable fields carry both sources on one record.
+  assert.deepEqual(airtable.listingToFields(first)[FIELDS.source].split('\n'), [
+    'LandWatch',
+    `LandWatch — ${LANDANDFARM_LISTING.url}`,
+  ]);
+});
+
+test('merge: a session duplicate of a lead written in an EARLIER site batch merges by record id', async (t) => {
+  initFilter(new Map([['taney|MO', 4000]]));
+  const calls = stubAirtableMerge(t);
+  const { report, ctx } = makeMergeCtx();
+
+  const first = { ...LANDWATCH_LISTING };
+  await withMergeEnv(() => processScrapedListings(fakeParser('LandWatch'), [first], ctx));
+  assert.equal(calls.writes.length, 1);
+
+  const second = { ...LANDANDFARM_LISTING };
+  await withMergeEnv(() => processScrapedListings(fakeParser('LandAndFarm'), [second], ctx));
+
+  assert.equal(calls.merges.length, 1, 'the already-written lead is updated in Airtable');
+  assert.deepEqual(calls.merges[0].record, { id: 'recNew1_0', fields: {} },
+    'only the id is known — the merge helper reads the record before appending');
+  assert.equal(calls.merges[0].listing.url, LANDANDFARM_LISTING.url);
+  assert.equal(first.additionalSources, undefined, 'an already-written listing is never mutated');
+  assert.equal(calls.writes.length, 1, 'the duplicate is not written as its own record');
+  assert.equal(report.totals.sourceMerges, 1);
+  assert.equal(report.mergeDetails[0].target, 'existing-record');
+  assert.equal(report.mergeDetails[0].matchType, 'session-fingerprint');
+  assert.equal(report.mergeDetails[0].mergedInto.recordId, 'recNew1_0');
+});
+
+test('merge: a session duplicate whose first listing failed to write is an honest plain duplicate', async (t) => {
+  initFilter(new Map([['taney|MO', 4000]]));
+  const calls = stubAirtableMerge(t, {
+    write: () => ({ created: 0, errors: [{ batch: 0, error: 'Airtable 503' }], records: [] }),
+  });
+  const { report, ctx } = makeMergeCtx();
+
+  const first = { ...LANDWATCH_LISTING };
+  await withMergeEnv(() => processScrapedListings(fakeParser('LandWatch'), [first], ctx));
+  await withMergeEnv(() => processScrapedListings(fakeParser('LandAndFarm'), [{ ...LANDANDFARM_LISTING }], ctx));
+
+  assert.equal(calls.merges.length, 0, 'there is no record to merge into');
+  assert.equal(first.additionalSources, undefined, 'the queued listing is not silently mutated');
+  assert.equal(report.totals.sourceMerges, 0, 'no merge is claimed that did not happen');
+  assert.equal(report.totals.duplicates, 1);
+});
+
+test('merge: replayed queued leads that now duplicate an existing record merge their source in', async (t) => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'scraper-replay-'));
+  const queueDir = path.join(dataDir, 'failed-writes');
+  fs.mkdirSync(queueDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(queueDir, '2026-07-29.jsonl'),
+    `${JSON.stringify({ savedAt: '2026-07-29T00:00:00Z', context: {}, listing: { ...LANDANDFARM_LISTING } })}\n`,
+    'utf8'
+  );
+
+  const calls = stubAirtableMerge(t);
+  const { report, ctx } = makeMergeCtx({ dedupIndex: indexWithExistingLandWatchRecord() });
+  t.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));
+
+  await withEnv({ SCRAPER_DATA_DIR: dataDir }, () =>
+    replayFailedWrites(ctx.dedupIndex, false, report));
+
+  assert.equal(calls.writes.length, 0, 'the queued lead is a duplicate — never re-created');
+  assert.equal(calls.merges.length, 1, 'its source+link is preserved on the record that won');
+  assert.equal(calls.merges[0].record.id, 'recExisting1');
+  assert.equal(report.totals.sourceMerges, 1);
+  assert.equal(report.mergeDetails[0].source, 'replay');
+  assert.equal(report.mergeDetails[0].target, 'existing-record');
+  // archiveFailedWrites timestamps the archived name, so match on the suffix.
+  assert.ok(
+    fs.readdirSync(path.join(queueDir, 'done')).some(f => f.endsWith('2026-07-29.jsonl')),
+    'the queue file is archived'
+  );
+});
+
+test('merge: a dry run replay makes no merge writes at all', async (t) => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'scraper-replay-dry-'));
+  const queueDir = path.join(dataDir, 'failed-writes');
+  fs.mkdirSync(queueDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(queueDir, '2026-07-29.jsonl'),
+    `${JSON.stringify({ savedAt: '2026-07-29T00:00:00Z', context: {}, listing: { ...LANDANDFARM_LISTING } })}\n`,
+    'utf8'
+  );
+
+  const calls = stubAirtableMerge(t, {
+    merge: () => { throw new Error('dry run must not merge'); },
+  });
+  const { report, ctx } = makeMergeCtx({ dryRun: true, dedupIndex: indexWithExistingLandWatchRecord() });
+  t.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));
+
+  await withEnv({ SCRAPER_DATA_DIR: dataDir }, () =>
+    replayFailedWrites(ctx.dedupIndex, true, report));
+
+  assert.equal(calls.merges.length, 0);
+  assert.equal(report.totals.sourceMerges, 0);
+});
+
 // --- Per-site county rotation -------------------------------------------------
 
 // A spread of real-looking county targets so hash buckets aren't trivially even.
