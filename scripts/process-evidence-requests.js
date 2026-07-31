@@ -79,6 +79,17 @@ function gitPushEvidence(capturedFileNames) {
     timeout: 120000,
   });
 
+  // Clear out worktree registrations whose directories are already gone. The
+  // run-request poller (scripts/poll-run-requests.sh) commits to this same
+  // branch from its own throwaway worktree under a perl-alarm timeout, so a
+  // hard-killed poller can leave a registration behind — and `worktree add -B`
+  // then refuses with "cannot force update the branch ... used by worktree",
+  // which would cost the whole night's evidence push. Best-effort on its own:
+  // a prune failure must not stop the push that follows.
+  try {
+    git(['worktree', 'prune']);
+  } catch (_) { /* best-effort — the add below is what matters */ }
+
   let worktreeAdded = false;
   try {
     // Branch reset from local main into an isolated worktree.
