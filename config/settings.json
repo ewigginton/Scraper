@@ -30,10 +30,10 @@
     "domNegotiationDays": 180
   },
   "sites": {
-    "landwatch": { "enabled": false, "countyRotation": 3 },
-    "landcom": { "enabled": false, "countyRotation": 3 },
-    "landfarm": { "enabled": false, "countyRotation": 3 },
-    "landsofamerica": { "enabled": false },
+    "landwatch": { "enabled": false, "countyRotation": 3, "botWallSensitive": true },
+    "landcom": { "enabled": false, "countyRotation": 3, "botWallSensitive": true },
+    "landfarm": { "enabled": false, "countyRotation": 3, "botWallSensitive": true },
+    "landsofamerica": { "enabled": false, "botWallSensitive": true },
     "livingthedream": { "enabled": true },
     "whitetail": { "enabled": true, "countyRotation": 3 },
     "mossyoak": { "enabled": true },

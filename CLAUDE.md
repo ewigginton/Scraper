@@ -120,7 +120,7 @@ in `lib/airtable.js` — never hardcode field names elsewhere:
 
 ## Architecture
 
-- Site parsers in `lib/parsers/` — 11 registered; `config/settings.json` `sites` is the source of truth for which are enabled. Currently enabled: LivingTheDream, WhitetailProperties, MossyOakProperties, MidwestLandGroup, LANDFLIP, NationalLandRealty, TuttLand. Disabled: the four CoStar-network sites (LandWatch, Land.com, LandAndFarm, LandsOfAmerica) pending a selector rebuild
+- Site parsers in `lib/parsers/` — 11 registered; `config/settings.json` `sites` is the source of truth for which are enabled. Currently enabled: LivingTheDream, WhitetailProperties, MossyOakProperties, MidwestLandGroup, LANDFLIP, NationalLandRealty, TuttLand. Disabled: the four CoStar-network sites (LandWatch, Land.com, LandAndFarm, LandsOfAmerica) pending a selector rebuild — these four carry `"botWallSensitive": true` in `config/settings.json`, a maximum-caution profile that (when they are re-enabled) abandons the site after a SINGLE blocked page, doubles the per-request delay, and skips the same-night post-cooldown retry, all to protect the production Mac's residential IP reputation
 - Bot-blocked pages (403s and HTTP-200 challenge pages) are retried through a
   real Chrome via `lib/browser-fetch.js` (playwright-core, optionalDependency;
   disable with `SCRAPER_BROWSER_FALLBACK=false` — the CI workflow does);
