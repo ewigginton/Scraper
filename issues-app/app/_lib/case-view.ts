@@ -1,0 +1,222 @@
+/**
+ * app/_lib/case-view.ts — read-side aggregation for the case view screen
+ * (spec §7 handoff header, DESIGN.md §8 `/issues/[id]`). issues-repo.getById
+ * already returns the issue + its directly-linked people/holds/tasks; this
+ * module adds the joins/reads no repository currently exposes for this
+ * screen (property, phase history, bids/vendor jobs/change orders,
+ * cost/payment activity, evidence, notices, checklist items, and a combined
+ * audit+phase history feed). Documented gap: several of these belong in
+ * lib/repositories/ long-term; that directory is outside this lane's
+ * assigned paths.
+ */
+
+import { and, asc, desc, eq, inArray, or } from 'drizzle-orm';
+import type { DbHandle } from '../../lib/repositories/db-handle.ts';
+import * as auditRepo from '../../lib/repositories/audit-repo.ts';
+import * as configRepo from '../../lib/repositories/config-repo.ts';
+import * as paymentsRepo from '../../lib/repositories/payments-repo.ts';
+import {
+  auditEvents,
+  bids,
+  changeOrders,
+  checklistItems,
+  costEntries,
+  evidenceFiles,
+  notices,
+  phaseInstances,
+  propertyRefs,
+  vendorJobs,
+  type AuditEvent,
+  type Bid,
+  type ChangeOrder,
+  type ChecklistItem,
+  type CostEntry,
+  type EvidenceFile,
+  type Hold,
+  type IssuePerson,
+  type Issue,
+  type Notice,
+  type PaymentRequest,
+  type PhaseInstance,
+  type PropertyRef,
+  type Task,
+  type VendorJob,
+} from '../../lib/db/schema.ts';
+import type { TransitionDefinition } from '../../lib/services/transition-engine.ts';
+import * as issuesRepo from '../../lib/repositories/issues-repo.ts';
+
+export interface CaseData {
+  issue: Issue;
+  property: PropertyRef | undefined;
+  people: IssuePerson[];
+  holds: Hold[];
+  tasks: Task[];
+  currentPhase: PhaseInstance | undefined;
+  phaseHistory: PhaseInstance[];
+  allowedNextPhases: TransitionDefinition[];
+  bids: Bid[];
+  vendorJobs: VendorJob[];
+  changeOrders: ChangeOrder[];
+  costEntries: CostEntry[];
+  paymentRequests: PaymentRequest[];
+  evidenceFiles: EvidenceFile[];
+  notices: Notice[];
+  checklistItems: ChecklistItem[];
+  history: HistoryEntry[];
+}
+
+export type HistoryCategory =
+  | 'business_event'
+  | 'workflow_transition'
+  | 'tasks'
+  | 'holds_releases'
+  | 'vendor_cost'
+  | 'field_edit';
+
+export const HISTORY_CATEGORY_LABELS: Record<HistoryCategory, string> = {
+  business_event: 'Business events',
+  workflow_transition: 'Workflow transitions',
+  tasks: 'Tasks',
+  holds_releases: 'Holds / releases',
+  vendor_cost: 'Vendor / cost activity',
+  field_edit: 'Other / field edits',
+};
+
+export interface HistoryEntry {
+  id: string;
+  occurredAt: Date;
+  category: HistoryCategory;
+  action: string;
+  actorRole: string | null;
+  reason: string | null;
+  detail: string;
+}
+
+const ACTION_CATEGORY: Record<string, HistoryCategory> = {
+  issue_created: 'business_event',
+  issue_reopened_new_cycle: 'business_event',
+  stale_case_acknowledged: 'business_event',
+  reinstatement_effective_applied: 'business_event',
+  phase_transitioned: 'workflow_transition',
+  task_completed: 'tasks',
+  task_rescheduled: 'tasks',
+  task_follow_up_created: 'tasks',
+  hold_applied: 'holds_releases',
+  hold_released: 'holds_releases',
+  payment_request_submitted: 'vendor_cost',
+  payment_request_approved: 'vendor_cost',
+  payment_request_duplicate_blocked: 'vendor_cost',
+};
+
+function categorize(action: string): HistoryCategory {
+  return ACTION_CATEGORY[action] ?? 'field_edit';
+}
+
+function auditToHistory(row: AuditEvent): HistoryEntry {
+  return {
+    id: `audit:${row.id}`,
+    occurredAt: row.occurredAt,
+    category: categorize(row.action),
+    action: row.action,
+    actorRole: row.actorRole,
+    reason: row.reason,
+    detail: `${row.objectTable} ${row.objectId.slice(0, 8)}`,
+  };
+}
+
+function phaseToHistory(row: PhaseInstance): HistoryEntry {
+  return {
+    id: `phase:${row.id}`,
+    occurredAt: row.startedAt ?? row.createdAt,
+    category: 'workflow_transition',
+    action: row.status === 'open' || row.status === 'in_progress' ? 'phase_opened' : `phase_${row.status}`,
+    actorRole: row.ownerId,
+    reason: row.entryReason ?? row.exitOutcome ?? null,
+    detail: row.phaseKey,
+  };
+}
+
+/** Load everything the case view needs for one issue. Returns undefined if the issue doesn't exist. */
+export async function loadCaseData(db: DbHandle, issueId: string): Promise<CaseData | undefined> {
+  const base = await issuesRepo.getById(db, issueId);
+  if (!base) return undefined;
+
+  const [property] = await db.select().from(propertyRefs).where(eq(propertyRefs.id, base.propertyRefId));
+
+  const [phaseHistory, issueBids, issueVendorJobs, issueCostEntries, issuePaymentRequests, issueEvidence, issueNotices, auditRows] =
+    await Promise.all([
+      db.select().from(phaseInstances).where(eq(phaseInstances.issueId, issueId)).orderBy(asc(phaseInstances.startedAt)),
+      db.select().from(bids).where(eq(bids.issueId, issueId)),
+      db.select().from(vendorJobs).where(eq(vendorJobs.issueId, issueId)),
+      db.select().from(costEntries).where(eq(costEntries.issueId, issueId)),
+      paymentsRepo.listForIssue(db, issueId),
+      db.select().from(evidenceFiles).where(eq(evidenceFiles.issueId, issueId)),
+      db.select().from(notices).where(eq(notices.issueId, issueId)),
+      auditRepo.listForObject(db, 'issues', issueId),
+    ]);
+
+  const vendorJobIds = issueVendorJobs.map((j) => j.id);
+  const issueChangeOrders = vendorJobIds.length > 0 ? await db.select().from(changeOrders).where(inArray(changeOrders.vendorJobId, vendorJobIds)) : [];
+
+  const phaseInstanceIds = phaseHistory.map((p) => p.id);
+  const issueChecklistItems =
+    phaseInstanceIds.length > 0 ? await db.select().from(checklistItems).where(inArray(checklistItems.phaseInstanceId, phaseInstanceIds)) : [];
+
+  // Aggregate audit_events across every object this case touches (holds,
+  // tasks, bids, vendor jobs, cost entries, payment requests) in addition to
+  // the issue's own rows, so History is a real cross-object timeline
+  // (spec §31.4), not just issues-table edits.
+  const objectPairs: Array<[string, string]> = [
+    ...base.holds.map((h): [string, string] => ['holds', h.id]),
+    ...base.tasks.map((t): [string, string] => ['tasks', t.id]),
+    ...issuePaymentRequests.map((p): [string, string] => ['payment_requests', p.id]),
+  ];
+  const extraAuditRows =
+    objectPairs.length > 0
+      ? await db
+          .select()
+          .from(auditEvents)
+          .where(or(...objectPairs.map(([table, id]) => and(eq(auditEvents.objectTable, table), eq(auditEvents.objectId, id)))))
+          .orderBy(desc(auditEvents.occurredAt))
+      : [];
+
+  const allAudit = [...auditRows, ...extraAuditRows];
+  const history: HistoryEntry[] = [...allAudit.map(auditToHistory), ...phaseHistory.map(phaseToHistory)].sort(
+    (a, b) => b.occurredAt.getTime() - a.occurredAt.getTime(),
+  );
+
+  const currentPhase = base.currentPhaseInstanceId ? phaseHistory.find((p) => p.id === base.currentPhaseInstanceId) : undefined;
+  const allowedNextPhases = currentPhase ? await computeAllowedNextPhases(db, base.issueType, currentPhase.phaseKey) : [];
+
+  return {
+    issue: base,
+    property,
+    people: base.people,
+    holds: base.holds,
+    tasks: base.tasks,
+    currentPhase,
+    phaseHistory,
+    allowedNextPhases,
+    bids: issueBids,
+    vendorJobs: issueVendorJobs,
+    changeOrders: issueChangeOrders,
+    costEntries: issueCostEntries,
+    paymentRequests: issuePaymentRequests,
+    evidenceFiles: issueEvidence,
+    notices: issueNotices,
+    checklistItems: issueChecklistItems,
+    history,
+  };
+}
+
+/**
+ * Mirrors transition-engine.ts's internal `loadTransitionDefinitions` +
+ * from-phase filter (those helpers aren't exported) using the same
+ * config-repo source of truth, so the case view can render the same allowed
+ * destinations transitionPhase() will actually accept.
+ */
+export async function computeAllowedNextPhases(db: DbHandle, issueType: string, currentPhaseKey: string): Promise<TransitionDefinition[]> {
+  const allTransitions = await configRepo.get<Record<string, TransitionDefinition[]>>(db, 'phase_1_defaults', 'transitions');
+  const defs = allTransitions?.[issueType] ?? [];
+  return defs.filter((def) => def.from_phase === currentPhaseKey);
+}

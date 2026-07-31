@@ -1,0 +1,28 @@
+{
+  "name": "issues-app",
+  "private": true,
+  "scripts": {
+    "dev": "next dev -p 4182",
+    "build": "next build",
+    "start": "next start -p 4182",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "validate": "npm run typecheck && npm run test && npm run build"
+  },
+  "dependencies": {
+    "next": "^15",
+    "react": "^19",
+    "react-dom": "^19",
+    "drizzle-orm": "latest",
+    "postgres": "latest"
+  },
+  "devDependencies": {
+    "typescript": "^6",
+    "@types/node": "latest",
+    "@types/react": "latest",
+    "@types/react-dom": "latest",
+    "vitest": "latest",
+    "@electric-sql/pglite": "latest",
+    "drizzle-kit": "latest"
+  }
+}
