@@ -18,18 +18,30 @@ require('dotenv').config();
 const http = require('http');
 const fetch = require('node-fetch');
 const browserFetch = require('../lib/browser-fetch');
+const { isBlockedHtml } = require('../lib/block-markers');
+const { parsers } = require('../lib/parsers');
 
-const LIVE_URLS = [
-  'https://www.landwatch.com/kentucky/johnson-county/land-for-sale?minAcreage=40&sortBy=date_desc&page=1',
-  'https://www.land.com/Kentucky/johnson-county/land-over-40-acres/all-land/date-posted/page-1',
-  'https://www.landandfarm.com/search/kentucky/johnson-county/land-for-sale?minAcres=40&sort=newest&page=1',
-];
+// One Kentucky county, page 1 of each site's 40-acre pass — built by the
+// PARSERS themselves, never hand-written here. A probe that fetches a URL the
+// nightly scrape would not fetch cannot certify anything: the hand-written
+// list had already drifted (LandWatch `sortBy=` vs the parser's `sort=`), and
+// a hardcoded shape would silently outlive any parser URL rebuild.
+const PROBE_COUNTY = { county: 'Johnson', state: 'KY' };
+const PROBE_SITE_KEYS = ['landwatch', 'landcom', 'landfarm'];
 
-const BLOCK_RE = /just a moment|incapsula|access denied|px-captcha|verify you are a human|attention required|enable javascript and cookies/i;
+function buildLiveProbeUrls() {
+  return PROBE_SITE_KEYS.map(key => parsers[key]().buildSearchUrls([PROBE_COUNTY])[0].url);
+}
+
+const LIVE_URLS = buildLiveProbeUrls();
 
 function verdict(html, status) {
   if (status && status >= 400) return `❌ HTTP ${status}`;
-  if (BLOCK_RE.test((html || '').slice(0, 20000))) return '🚫 challenge page';
+  // Block detection is the shared chokepoint in lib/block-markers.js — the
+  // same function the parsers and the browser fallback use. This script is
+  // Emma's go/no-go for re-enabling the CoStar sites; a private marker list
+  // here could call a refusing site healthy.
+  if (isBlockedHtml(html)) return '🚫 challenge page';
   const detailLinks = ((html || '').match(/\/pid\/|\/property\/|land-for-sale\/|\/farms-ranches\//g) || []).length;
   return `✅ real page (${(html || '').length.toLocaleString()} bytes, ~${detailLinks} listing-ish links)`;
 }
@@ -115,7 +127,13 @@ async function main() {
   await browserFetch.closeBrowser();
 }
 
-main().catch(err => {
-  console.error(`Fatal: ${err.message}`);
-  process.exit(1);
-});
+// Required as a module (test/browser-fallback-probe.test.js) this file must do
+// nothing but export — probing the real sites is a production-Mac-only action.
+if (require.main === module) {
+  main().catch(err => {
+    console.error(`Fatal: ${err.message}`);
+    process.exit(1);
+  });
+}
+
+module.exports = { LIVE_URLS, buildLiveProbeUrls, verdict };
