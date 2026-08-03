@@ -152,7 +152,23 @@ if git -C "$SCRIPT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
           git -C "$SCRIPT_DIR" merge --ff-only origin/main >> "$LOG_FILE" 2>&1; then
         :
       else
-        UPDATE_WARNING="Self-update failed: $SCRIPT_DIR has local edits or diverged from GitHub — production is running OLD code. Run 'git status' there and reconcile."
+        # The most common cause is uncommitted edits to tracked files (a
+        # manual test or tweak left in the checkout), which pins production to
+        # OLD code on every subsequent night. Stash them (PRESERVED, never
+        # discarded — recover with 'git stash pop') and retry once. Only
+        # tracked-file modifications are stashed: untracked files never block
+        # a fast-forward and must stay on disk (data/ queues, logs). Genuine
+        # divergence (local commits) still fails below rather than
+        # auto-resetting: a human must decide what those commits mean.
+        if [ -n "$(git -C "$SCRIPT_DIR" status --porcelain --untracked-files=no 2>/dev/null)" ] \
+            && git -C "$SCRIPT_DIR" stash push \
+                -m "auto-stash by run-scraper.sh self-update $(date +%Y-%m-%dT%H:%M:%S)" >> "$LOG_FILE" 2>&1 \
+            && perl -e 'alarm shift; exec @ARGV' 120 \
+                git -C "$SCRIPT_DIR" merge --ff-only origin/main >> "$LOG_FILE" 2>&1; then
+          UPDATE_WARNING="Self-update found uncommitted local edits in $SCRIPT_DIR and stashed them to update (recover with 'git stash pop' there). The update itself succeeded."
+        else
+          UPDATE_WARNING="Self-update failed: $SCRIPT_DIR has local commits or diverged from GitHub — production is running OLD code. Run 'git status' there and reconcile."
+        fi
       fi
     else
       UPDATE_WARNING="Self-update failed: could not reach GitHub, or the fetch stalled and was killed after 120s — running possibly outdated code"

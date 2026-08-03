@@ -30,7 +30,7 @@
     "domNegotiationDays": 180
   },
   "sites": {
-    "landwatch": { "enabled": false, "countyRotation": 3 },
+    "landwatch": { "enabled": true, "countyRotation": 3 },
     "landcom": { "enabled": false, "countyRotation": 3 },
     "landfarm": { "enabled": false, "countyRotation": 3 },
     "landsofamerica": { "enabled": false },
