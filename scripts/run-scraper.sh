@@ -152,7 +152,23 @@ if git -C "$SCRIPT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
           git -C "$SCRIPT_DIR" merge --ff-only origin/main >> "$LOG_FILE" 2>&1; then
         :
       else
-        UPDATE_WARNING="Self-update failed: $SCRIPT_DIR has local edits or diverged from GitHub — production is running OLD code. Run 'git status' there and reconcile."
+        # The most common cause is uncommitted edits to tracked files (a
+        # manual test or tweak left in the checkout), which pins production to
+        # OLD code on every subsequent night. Stash them (PRESERVED, never
+        # discarded — recover with 'git stash pop') and retry once. Only
+        # tracked-file modifications are stashed: untracked files never block
+        # a fast-forward and must stay on disk (data/ queues, logs). Genuine
+        # divergence (local commits) still fails below rather than
+        # auto-resetting: a human must decide what those commits mean.
+        if [ -n "$(git -C "$SCRIPT_DIR" status --porcelain --untracked-files=no 2>/dev/null)" ] \
+            && git -C "$SCRIPT_DIR" stash push \
+                -m "auto-stash by run-scraper.sh self-update $(date +%Y-%m-%dT%H:%M:%S)" >> "$LOG_FILE" 2>&1 \
+            && perl -e 'alarm shift; exec @ARGV' 120 \
+                git -C "$SCRIPT_DIR" merge --ff-only origin/main >> "$LOG_FILE" 2>&1; then
+          UPDATE_WARNING="Self-update found uncommitted local edits in $SCRIPT_DIR and stashed them to update (recover with 'git stash pop' there). The update itself succeeded."
+        else
+          UPDATE_WARNING="Self-update failed: $SCRIPT_DIR has local commits or diverged from GitHub — production is running OLD code. Run 'git status' there and reconcile."
+        fi
       fi
     else
       UPDATE_WARNING="Self-update failed: could not reach GitHub, or the fetch stalled and was killed after 120s — running possibly outdated code"
@@ -191,6 +207,21 @@ fi
 [ -n "$UPDATE_WARNING" ] && echo "WARNING: $UPDATE_WARNING" >> "$LOG_FILE"
 export SCRAPER_UPDATE_WARNING="$UPDATE_WARNING"
 export SCRAPER_GIT_COMMIT="$(git -C "$SCRIPT_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+
+# Run a real (headed) Chrome for the browser fallback. This LaunchAgent runs in
+# the logged-in GUI session of the always-on production Mac, so a visible window
+# is fine — and headed is the single strongest counter to the headless-detection
+# that CoStar's Imperva wall (LandWatch/Land.com/LandAndFarm) uses. Headless was
+# hard-403'ing those sites for both the live scrape and the nightly evidence
+# capture. Set here so it covers index.js AND process-evidence-requests.js.
+#
+# Default-assign (:=) so it only defaults to headed when nothing has set it:
+# to force headless on this machine, add SCRAPER_BROWSER_HEADED=false to the
+# LaunchAgent plist's <EnvironmentVariables>, which launchd exports into this
+# script before it runs — that pre-set value is respected here, and dotenv
+# (which does not override an already-set var) leaves it alone too.
+: "${SCRAPER_BROWSER_HEADED:=true}"
+export SCRAPER_BROWSER_HEADED
 # ---------------------------------------------------------------------------
 
 # Run the scraper, capturing all output. Keep logging even if Node fails.

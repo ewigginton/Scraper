@@ -1,6 +1,10 @@
 #!/usr/bin/env node
 'use strict';
 
+// Load .env first so SCRAPER_BROWSER_HEADED (and the other SCRAPER_BROWSER_*
+// knobs this script's comment promises) actually reach the browser fallback.
+require('dotenv').config();
+
 // Capture rendered HTML evidence for parser work. Fetches each URL through
 // the same browser fallback the scraper uses (headed Chrome when
 // SCRAPER_BROWSER_HEADED=true), so what lands on disk is what the scraper
@@ -32,7 +36,9 @@ async function main() {
     process.exit(1);
   }
   if (!browserFetch.isEnabled()) {
-    console.error(`Browser fetch unavailable: ${browserFetch.reasonUnavailable()}`);
+    // reasonUnavailable() is null when playwright is installed but the
+    // fallback is switched off by env — name the switch instead of "null".
+    console.error(`Browser fetch unavailable: ${browserFetch.reasonUnavailable() || 'browser fallback disabled (SCRAPER_BROWSER_FALLBACK=false)'}`);
     process.exit(1);
   }
 
