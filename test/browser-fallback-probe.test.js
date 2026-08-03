@@ -92,6 +92,14 @@ test('every probe URL belongs to its own site and is page 1', () => {
   const hosts = ['www.landwatch.com', 'www.land.com', 'www.landandfarm.com'];
   probe.LIVE_URLS.forEach((url, i) => {
     assert.equal(new URL(url).host, hosts[i]);
-    assert.match(url, /page[-=]1(&|$)/, 'probes stay on page 1 — this is a diagnostic, not a scrape');
+    if (hosts[i] === 'www.landandfarm.com') {
+      // Capture-proven: page 1 is the bare canonical county URL — the capture
+      // never links a /page-1 segment anywhere, so a `page[-=]1` regex would
+      // fail on the one shape the site actually serves.
+      assert.ok(url.endsWith('-county-land-for-sale/') && !/page[-=]\d/.test(url),
+        'landfarm page 1 is the bare canonical URL, no page segment');
+    } else {
+      assert.match(url, /page[-=]1(&|$)/, 'probes stay on page 1 — this is a diagnostic, not a scrape');
+    }
   });
 });

@@ -364,6 +364,26 @@ test('no real-page fixture is classified as blocked (false-positive sweep)', () 
   }
 });
 
+test('title-tail markers tolerate a trailing space or a newline before </title>', () => {
+  // A real capture can render '<title>LandWatch / 400 </title>' (trailing
+  // space) or put a newline before the close; isBlockedHtml must still catch
+  // it, and '/ 500' must still never match (see the honesty note in
+  // lib/block-markers.js).
+  for (const code of ['400', '403', '404', '429', '503']) {
+    const trailingSpace = `<html><head><title>LandWatch / ${code} </title></head><body>ok</body></html>`;
+    assert.equal(isBlockedHtml(trailingSpace), true,
+      `a trailing space before </title> must still hit the / ${code} marker`);
+
+    const newlineBeforeClose = `<html><head><title>LandWatch / ${code}\n</title></head><body>ok</body></html>`;
+    assert.equal(isBlockedHtml(newlineBeforeClose), true,
+      `a newline before </title> must still hit the / ${code} marker`);
+  }
+
+  const serverError = '<html><head><title>LandWatch / 500 </title></head><body>ok</body></html>';
+  assert.equal(isBlockedHtml(serverError), false,
+    '/ 500 must stay unmatched even with the same trailing-space tolerance');
+});
+
 test('a bot-sensitive source served the captured interstitial abandons the site immediately', async (t) => {
   withBrowserDisabled(t);
   const html = fs.readFileSync(path.join(BLOCKED_FIXTURE_DIR, 'landwatch-challenge-400.html'), 'utf8');

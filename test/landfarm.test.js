@@ -61,7 +61,8 @@ async function scrapeOnePage(html) {
   const fetched = [];
   parser.fetchPage = async (url) => {
     fetched.push(url);
-    return url.endsWith('/page-1') ? html : EMPTY_RESULTS_HTML;
+    // Page 1 is the bare canonical county URL (no /page-N segment at all).
+    return url.endsWith('-county-land-for-sale/') ? html : EMPTY_RESULTS_HTML;
   };
 
   try {
@@ -83,10 +84,11 @@ test('buildSearchUrls uses the real path shape, three county pages plus five acr
 
   assert.deepEqual(urls.map(u => u.url), [
     // Path shape verified from the capture's own rel=canonical / rel=next:
-    // /search/kentucky/wayne-county-land-for-sale/ and .../page-2/.
-    'https://www.landandfarm.com/search/kentucky/wayne-county-land-for-sale/page-1',
-    'https://www.landandfarm.com/search/kentucky/wayne-county-land-for-sale/page-2',
-    'https://www.landandfarm.com/search/kentucky/wayne-county-land-for-sale/page-3',
+    // page 1 is the bare canonical URL, pages 2-3 carry /page-N/ WITH a
+    // trailing slash — the capture never links a slashless /page-N anywhere.
+    'https://www.landandfarm.com/search/kentucky/wayne-county-land-for-sale/',
+    'https://www.landandfarm.com/search/kentucky/wayne-county-land-for-sale/page-2/',
+    'https://www.landandfarm.com/search/kentucky/wayne-county-land-for-sale/page-3/',
     // The five extras: the site's own acreage-facet links, all wholly above the
     // 40-acre floor, so large tracts past page 3 of a 151-listing county are
     // still reachable.
@@ -107,20 +109,47 @@ test('buildSearchUrls uses the real path shape, three county pages plus five acr
 });
 
 test('every generated county series URL is one the capture itself links to', () => {
-  // The fixture links its sibling counties and its own facets; both prove the
-  // shape independently of the canonical tag.
+  // Pinned to the EXACT 8 URLs generated for Wayne County, so this cannot pass
+  // vacuously (a startsWith check would still pass a wrong page-1 shape). The
+  // capture's own rel=canonical (page 1, bare, trailing slash), rel=next
+  // (page 2, /page-2/) and in-page pagination (page 3, /page-3/) prove the
+  // series shape; the acreage-band hrefs prove the other five.
   const urls = new LandAndFarmParser()
-    .buildSearchUrls([{ county: 'Clinton', state: 'KY' }, { county: 'Pulaski', state: 'KY' }])
+    .buildSearchUrls([{ county: 'Wayne', state: 'KY' }])
     .map(u => u.url);
 
-  for (const county of ['clinton', 'pulaski']) {
-    assert.ok(FIXTURE.includes(`/search/kentucky/${county}-county-land-for-sale/`),
-      `the capture must link the ${county} county series`);
-    assert.ok(urls.some(u => u.startsWith(`https://www.landandfarm.com/search/kentucky/${county}-county-land-for-sale/`)));
-  }
+  assert.deepEqual(urls, [
+    'https://www.landandfarm.com/search/kentucky/wayne-county-land-for-sale/',
+    'https://www.landandfarm.com/search/kentucky/wayne-county-land-for-sale/page-2/',
+    'https://www.landandfarm.com/search/kentucky/wayne-county-land-for-sale/page-3/',
+    'https://www.landandfarm.com/search/kentucky/wayne-county-land-for-sale/acres-51-100/',
+    'https://www.landandfarm.com/search/kentucky/wayne-county-land-for-sale/acres-101-200/',
+    'https://www.landandfarm.com/search/kentucky/wayne-county-land-for-sale/acres-201-500/',
+    'https://www.landandfarm.com/search/kentucky/wayne-county-land-for-sale/acres-501-1000/',
+    'https://www.landandfarm.com/search/kentucky/wayne-county-land-for-sale/acres-over-1000/',
+  ]);
+
+  assert.match(FIXTURE, /rel="canonical" href="https:\/\/www\.landandfarm\.com\/search\/kentucky\/wayne-county-land-for-sale\/"/,
+    'page 1 must be the capture\'s own canonical URL');
+  assert.match(FIXTURE, /rel="next" href="https:\/\/www\.landandfarm\.com\/search\/kentucky\/wayne-county-land-for-sale\/page-2\/"/,
+    'page 2 must be the capture\'s own rel=next URL');
+  assert.ok(FIXTURE.includes('/search/kentucky/wayne-county-land-for-sale/page-3/'),
+    'page 3 must be a URL the capture itself links (in-page pagination)');
   for (const segment of ['acres-51-100', 'acres-101-200', 'acres-201-500', 'acres-501-1000', 'acres-over-1000']) {
     assert.ok(FIXTURE.includes(`/search/kentucky/wayne-county-land-for-sale/${segment}/`),
       `the capture must link the ${segment} facet`);
+  }
+
+  // Sibling counties confirm the same shape applies generically, not just to
+  // the one county under test.
+  const siblingUrls = new LandAndFarmParser()
+    .buildSearchUrls([{ county: 'Clinton', state: 'KY' }, { county: 'Pulaski', state: 'KY' }])
+    .map(u => u.url);
+  for (const county of ['clinton', 'pulaski']) {
+    assert.ok(FIXTURE.includes(`/search/kentucky/${county}-county-land-for-sale/`),
+      `the capture must link the ${county} county series`);
+    assert.ok(siblingUrls.includes(`https://www.landandfarm.com/search/kentucky/${county}-county-land-for-sale/`),
+      `page 1 for ${county} must be the exact bare canonical shape`);
   }
 });
 
@@ -132,9 +161,9 @@ test('county and state slugs match the site (Le Flore, DeKalb, St. Clair)', () =
   ]);
   const first = county => urls.find(u => u.county === county).url;
 
-  assert.equal(first('Le Flore'), 'https://www.landandfarm.com/search/oklahoma/le-flore-county-land-for-sale/page-1');
-  assert.equal(first('DeKalb'), 'https://www.landandfarm.com/search/alabama/dekalb-county-land-for-sale/page-1');
-  assert.equal(first('St. Clair'), 'https://www.landandfarm.com/search/missouri/st-clair-county-land-for-sale/page-1');
+  assert.equal(first('Le Flore'), 'https://www.landandfarm.com/search/oklahoma/le-flore-county-land-for-sale/');
+  assert.equal(first('DeKalb'), 'https://www.landandfarm.com/search/alabama/dekalb-county-land-for-sale/');
+  assert.equal(first('St. Clair'), 'https://www.landandfarm.com/search/missouri/st-clair-county-land-for-sale/');
   for (const entry of urls) {
     assert.ok(!new URL(entry.url).pathname.includes('.'), `slug still carries a dot: ${entry.url}`);
   }
@@ -165,6 +194,48 @@ test('the 7 Pending cards are counted but never emitted', () => {
     assert.ok(!listings.some(l => l.url.includes(slug)), `${slug} is Pending and must not be emitted`);
   }
   assert.equal(PENDING_SLUGS.length, 7);
+});
+
+test('a Pending badge merged with the VIDEO/MAP media chips (sibling-concat hazard) is still excluded', () => {
+  // Regression for the sibling-concat leak: cheerio .text() on
+  // id="placard-image" concatenates sibling elements with no separator, so a
+  // Pending badge next to the VIDEO/MAP media chips used to read as
+  // "PendingVIDEOMAP" — a letter-to-letter junction UNAVAILABLE_STATUS_RE's \b
+  // boundaries cannot match — which let a Pending listing through as a
+  // buyable New Lead. Real markup graft, not invented: the diamond card's own
+  // media-chip container, copied verbatim out of the fixture.
+  const mediaChipsMatch = /<div class="sOqLAV0aC s1RQDFRGp">.*?<\/div><\/div>/.exec(FIXTURE);
+  assert.ok(mediaChipsMatch, 'the fixture must contain a VIDEO/MAP media-chip container to copy');
+  const mediaChips = mediaChipsMatch[0];
+  assert.match(mediaChips, /aria-label="VIDEO"/);
+  assert.match(mediaChips, /aria-label="MAP"/);
+
+  const pendingBadgeMatch = /<div class="sOqLAV0aC sq9tgB8Yz">.*?Pending<\/span><\/div>/.exec(FIXTURE);
+  assert.ok(pendingBadgeMatch, 'the fixture must contain a Pending badge to graft against');
+  const pendingBadge = pendingBadgeMatch[0];
+
+  const { listings: pristine } = parseFixture();
+
+  // Append order: "...Pending</div>" + chips -> old .text() read
+  // "PendingVIDEOMAP" (no boundary between "Pending" and "VIDEO").
+  const appended = FIXTURE.replace(pendingBadge, pendingBadge + mediaChips);
+  assert.notEqual(appended, FIXTURE, 'the graft must actually modify the fixture');
+  const appendedListings = new LandAndFarmParser().parseSearchPage(appended, 'Wayne', 'KY');
+  assert.equal(appendedListings.length, 18, 'append-order graft must not change the emitted count');
+  assert.deepEqual(appendedListings, pristine, 'append-order graft must not change any emitted row');
+
+  // Prepend order: chips + "...Pending</div>" -> "VIDEOMAPPending" is a
+  // different junction, same hazard class.
+  const prepended = FIXTURE.replace(pendingBadge, mediaChips + pendingBadge);
+  assert.notEqual(prepended, FIXTURE, 'the graft must actually modify the fixture');
+  const prependedListings = new LandAndFarmParser().parseSearchPage(prepended, 'Wayne', 'KY');
+  assert.equal(prependedListings.length, 18, 'prepend-order graft must not change the emitted count');
+  assert.deepEqual(prependedListings, pristine, 'prepend-order graft must not change any emitted row');
+
+  for (const slug of PENDING_SLUGS) {
+    assert.ok(!appendedListings.some(l => l.url.includes(slug)), `${slug} must stay excluded (append order)`);
+    assert.ok(!prependedListings.some(l => l.url.includes(slug)), `${slug} must stay excluded (prepend order)`);
+  }
 });
 
 test('verified sample listings come out field-for-field correct', () => {
