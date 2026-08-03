@@ -87,6 +87,21 @@ function renamePlacardImageAt(html, position) {
 }
 
 /**
+ * Locate the `id="placard-image"` occurrence belonging to the card at
+ * `cardIndex` (0-based, document order) in `containerPositions`. Generalizes
+ * `placardImagePositionForSlug` for tests that target a card by position
+ * rather than by slug.
+ */
+function nthPlacardImagePosition(html, containerPositions, cardIndex) {
+  const imagePositions = [...html.matchAll(/id="placard-image"/g)].map(m => m.index);
+  const cardStart = containerPositions[cardIndex];
+  const cardEnd = cardIndex + 1 < containerPositions.length ? containerPositions[cardIndex + 1] : html.length;
+  const imagesInCard = imagePositions.filter(p => p >= cardStart && p < cardEnd);
+  assert.equal(imagesInCard.length, 1, `card ${cardIndex} must have exactly one placard-image`);
+  return imagesInCard[0];
+}
+
+/**
  * Run scrapeAll offline with evidence in a temp dir: `html` is served for page
  * 1 of the county series, an empty-results page for the five acreage bands.
  */
@@ -432,6 +447,51 @@ test('renaming ONLY placard-image (container intact) raises drift and leaks NO P
     'placard-image loss alone must surface through the real drift mechanism, not silently emit');
   for (const slug of PENDING_SLUGS) {
     assert.ok(!listings.some(l => l.url.includes(slug)), `${slug} must not leak in`);
+  }
+});
+
+test('renaming 5 containers AND 4 images among the survivors compounds past MIN_PLACARD_COVERAGE and raises drift', async () => {
+  // The finding this guards: before the fix, the container check (denominator
+  // items.length) and the image check (denominator matchedItems.length) each
+  // independently tolerated up to 20% loss, so 5 renamed containers
+  // (20/25 = 0.8, passes) followed by 4 renamed images among the 20
+  // survivors (16/20 = 0.8, passes) silently dropped 9 of 25 cards with ZERO
+  // drift signal — 36% loss while the comments claimed up to 5 tolerated.
+  // The fix shares one denominator (items.length) across both checks, so the
+  // same compound damage (16/25 = 0.64) now fires drift instead of emitting
+  // 16 unvetted rows.
+  const containerPositions = [...FIXTURE.matchAll(/id="placard-container"/g)].map(m => m.index);
+  assert.equal(containerPositions.length, 25);
+
+  let html = FIXTURE;
+  // Rename the first 5 containers. Fixed-offset surgery is safe here: both
+  // "placard" and "listing" are 7 characters, so every later position in
+  // `containerPositions` (captured from the ORIGINAL html) still points at
+  // the right byte after each replacement.
+  for (const position of containerPositions.slice(0, 5)) {
+    html = `${html.slice(0, position)}id="listing-container"${html.slice(position + 'id="placard-container"'.length)}`;
+  }
+  assert.equal([...html.matchAll(/id="placard-container"/g)].length, 20, 'exactly 5 containers must be renamed');
+
+  // Rename the placard-image of 4 of the 20 surviving cards (indices 5-8:
+  // the first four cards whose container was left untouched).
+  for (const cardIndex of [5, 6, 7, 8]) {
+    const imagePosition = nthPlacardImagePosition(html, containerPositions, cardIndex);
+    html = renamePlacardImageAt(html, imagePosition);
+  }
+  assert.equal([...html.matchAll(/id="placard-image"/g)].length, 21, 'exactly 4 images must be renamed');
+
+  const direct = new LandAndFarmParser();
+  const parsed = direct.parseSearchPage(html, 'Wayne', 'KY');
+  assert.deepEqual(parsed, [], 'compound loss must be reported as drift, not partial emission');
+  assert.equal(direct._lastCardCount, 0, 'compound loss must drop the count to 0, the signal base-parser watches');
+
+  const { parser, listings } = await scrapeOnePage(html);
+  assert.equal(listings.length, 0, 'no unvetted rows reach the pipeline');
+  assert.ok(parser.sourceIssues.some(i => i.type === 'markup_drift'),
+    'compound container+image loss must surface through the real drift mechanism');
+  for (const slug of PENDING_SLUGS) {
+    assert.ok(!listings.some(l => l.url.includes(slug)), `${slug} must not leak in (no Pending slug leaks)`);
   }
 });
 
