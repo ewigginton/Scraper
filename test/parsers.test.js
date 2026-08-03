@@ -54,10 +54,17 @@ test('LivingTheDream builds per-state /land-for-sale/{state}/ URLs, only for cov
   assert.equal(mo.url, 'https://www.livingthedreamland.com/land-for-sale/missouri/');
 });
 
-test('all parsers generate both pass-1 and pass-2 (large tract) URLs', () => {
+// LandAndFarm is deliberately absent: it has been rebuilt against real captured
+// markup (test/landfarm.test.js), and the site has no min-acres query parameter
+// at all — the "40"/"150" this loop looks for only ever existed in the invented
+// query string the rebuild deleted. Its URL shape is now pinned field-for-field
+// against the fixture instead. The three parsers left here are the CoStar sites
+// still awaiting the same rebuild, so the assertion stays exactly as strict for
+// them.
+test('the not-yet-rebuilt CoStar parsers generate both pass-1 and pass-2 (large tract) URLs', () => {
   const singleCounty = [{ county: 'Taney', state: 'MO', maxCPA: 4000 }];
 
-  for (const Parser of [LandWatchParser, LandComParser, LandAndFarmParser, LandsOfAmericaParser]) {
+  for (const Parser of [LandWatchParser, LandComParser, LandsOfAmericaParser]) {
     const parser = new Parser();
     const urls = parser.buildSearchUrls(singleCounty);
     const hasSmall = urls.some(u => u.url.includes('40'));

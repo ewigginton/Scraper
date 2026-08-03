@@ -8,9 +8,12 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('fs');
+const path = require('path');
 
 const browserFetch = require('../lib/browser-fetch');
 const BaseParser = require('../lib/parsers/base-parser');
+const { isBlockedHtml } = require('../lib/block-markers');
 const settings = require('../config/settings.json');
 const { getEnabledParsers } = require('../lib/parsers');
 const { initFilter } = require('../lib/filter');
@@ -318,4 +321,67 @@ test('an all-sensitive abort list never reaches the cooldown path', async () => 
   const siteWarnings = report.warnings.filter(w => w.startsWith('SensitiveSite:'));
   assert.equal(siteWarnings.length, 1, `expected one warning, got: ${siteWarnings.join(' | ')}`);
   assert.doesNotMatch(siteWarnings[0], /retried after/);
+});
+
+// --- 5. Real captured CoStar interstitial ---------------------------------
+//
+// test/fixtures/blocked/ holds captures that are NOT listings pages. The one
+// here is the real page the queued LandWatch URL returned: title
+// "LandWatch / 400". Emma later loaded that same URL in her own browser and got
+// a styled "Oops! We couldn't find this page", so this is most likely a BAD-URL
+// error page, NOT proof of an IP block — see the honesty note in
+// lib/block-markers.js. It is classified as blocked on purpose: it must never
+// count as a valid empty results page, and for a bot-wall-sensitive source,
+// abandoning the site on one is the conservative-safe reaction.
+//
+// The top level of test/fixtures/ stays real pages only — that is the premise
+// of the no-false-positive sweep in test/browser-fallback-probe.test.js — so
+// non-page captures live in this subdirectory.
+
+const REAL_PAGE_FIXTURE_DIR = path.join(__dirname, 'fixtures');
+const BLOCKED_FIXTURE_DIR = path.join(REAL_PAGE_FIXTURE_DIR, 'blocked');
+
+test('the captured "LandWatch / 400" interstitial is classified as not-a-listings-page', () => {
+  const html = fs.readFileSync(path.join(BLOCKED_FIXTURE_DIR, 'landwatch-challenge-400.html'), 'utf8');
+
+  assert.match(html, /<title>LandWatch \/ 400<\/title>/, 'the capture must still be the / 400 page');
+  assert.equal(isBlockedHtml(html), true,
+    'a CoStar error/challenge interstitial must never read as a valid empty results page');
+  // It carries none of the bot-vendor signatures — the title tail is the ONLY
+  // thing that catches it, which is exactly why that marker exists.
+  assert.ok(!/just a moment|incapsula|perimeterx|px-captcha/i.test(html.slice(0, 20000)));
+});
+
+test('no real-page fixture is classified as blocked (false-positive sweep)', () => {
+  // Broadening the marker list to HTTP-error title tails is only safe if it
+  // never fires on a real page: a false positive would abandon a healthy
+  // county series (and, for a sensitive source, the whole site) for the night.
+  const fixtures = fs.readdirSync(REAL_PAGE_FIXTURE_DIR).filter(f => f.endsWith('.html'));
+  assert.ok(fixtures.length >= 9, 'the sweep must cover every real-page fixture');
+  for (const file of fixtures) {
+    const html = fs.readFileSync(path.join(REAL_PAGE_FIXTURE_DIR, file), 'utf8');
+    assert.equal(isBlockedHtml(html), false, `${file} is a real captured page and must not be flagged`);
+  }
+});
+
+test('a bot-sensitive source served the captured interstitial abandons the site immediately', async (t) => {
+  withBrowserDisabled(t);
+  const html = fs.readFileSync(path.join(BLOCKED_FIXTURE_DIR, 'landwatch-challenge-400.html'), 'utf8');
+  const counties = ['Wayne', 'Pike', 'Shannon'];
+  const parser = makeMultiCountyParser(counties, { sensitive: true });
+  const fetched = [];
+  parser.fetchPage = async (url) => { fetched.push(url); return html; };
+
+  // Evidence (including the HTML snapshot) goes to a temp dir, not the repo.
+  const tmpDir = fs.mkdtempSync(path.join(require('os').tmpdir(), 'ccl-blocked-'));
+  t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
+  const listings = await withEnv({ SCRAPER_DATA_DIR: tmpDir }, () =>
+    parser.scrapeAll(counties.map(county => ({ county, state: 'KY' }))));
+
+  assert.equal(listings.length, 0);
+  assert.equal(fetched.length, 1, 'the 2nd county is never fetched');
+  assert.equal(parser.stats.blockedPages, 1, 'counted as blocked, not as an empty page');
+  assert.ok(parser.sourceIssues.some(i => i.type === 'blocked'), 'evidence is recorded');
+  assert.ok(!parser.sourceIssues.some(i => i.type === 'markup_drift'),
+    'an interstitial is not markup drift — the parser selectors are fine');
 });
