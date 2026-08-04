@@ -209,7 +209,7 @@ erDiagram
 
 ## Work / Evidence / Platform
 
-This diagram covers vendor management, bidding, cost tracking, evidence capture, communications, configuration, and platform infrastructure.
+This diagram covers vendor management, bidding, cost tracking, evidence capture, communications, contract references, saved views, configuration, and platform infrastructure.
 
 ```mermaid
 erDiagram
@@ -227,9 +227,11 @@ erDiagram
   PERSON_REFS ||--o{ CHECKLIST_ITEMS : "id → waived_by (SET NULL); id → verified_by (SET NULL)"
   PERSON_REFS ||--o{ AUDIT_EVENTS : "id → actor_id (SET NULL)"
   PERSON_REFS ||--o{ DOMAIN_EVENTS : "id → person_ref_id (SET NULL)"
+  PERSON_REFS ||--o{ CONTRACT_REFS : "id → buyer_person_ref_id (SET NULL)"
 
   PROPERTY_REFS ||--o{ EVIDENCE_FILES : "id → property_ref_id (SET NULL)"
   PROPERTY_REFS ||--o{ DOMAIN_EVENTS : "id → property_ref_id (SET NULL)"
+  PROPERTY_REFS ||--o{ CONTRACT_REFS : "id → property_ref_id (RESTRICT)"
 
   ISSUES ||--o{ BIDS : "id → issue_id"
   ISSUES ||--o{ VENDOR_JOBS : "id → issue_id"
@@ -270,6 +272,19 @@ erDiagram
   COMMUNICATION_EVENTS ||--o{ EVIDENCE_FILES : "id → evidence_file_id (SET NULL)"
 
   CONFIG_VERSIONS ||--o{ CONFIG_ENTRIES : "id → config_version_id"
+
+  CONTRACT_REFS {
+    uuid id PK
+    text source_system
+    text external_id
+    text contract_number
+    text status_cached
+    uuid property_ref_id FK
+    uuid buyer_person_ref_id FK
+    date executed_date
+    jsonb key_dates
+    timestamptz last_synced_at
+  }
 
   VENDORS {
     uuid id PK
@@ -413,6 +428,13 @@ erDiagram
     uuid waived_by FK
     uuid verified_by FK
     timestamptz verified_at
+  }
+
+  SAVED_VIEWS {
+    uuid id PK
+    text owner_external_id
+    text name
+    jsonb params
   }
 
   CONFIG_VERSIONS {

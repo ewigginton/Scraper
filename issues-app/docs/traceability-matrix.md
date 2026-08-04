@@ -2,7 +2,7 @@
 
 Source: DESIGN.md §2 (scope), spec §26 (developer deliverables and traceability).
 
-This matrix maps every spec section implemented in Phase 1 (per DESIGN.md §2 scope) to its implementation components (migration files, services, screens, tests). Deferred sections (DESIGN.md §2 deferrals) are listed separately with their schema seams.
+This matrix maps every spec section implemented in Phase 1 (per DESIGN.md §2 scope) to its implementation components (migration files, services, screens, tests). Deferred sections (DESIGN.md §2 deferrals) are listed separately with their schema seams. **Wave 2** (roadmap: `docs/roadmap-waves.md`) delivered additional work after Phase 1 closed out — see the "Wave 2 Sections" table below the Phase-1 table; §8.2 in particular moved from deferred to delivered (dashboard/exception queues shipped in Wave 2) but its row in the Deferred table has not been removed, only annotated, to preserve the original Phase-1-era record.
 
 ---
 
@@ -53,13 +53,32 @@ This matrix maps every spec section implemented in Phase 1 (per DESIGN.md §2 sc
 
 ---
 
+## Wave 2 Sections (Waves 1/2a/2b) → Components
+
+This matrix's header and the table above describe Phase 1 (DESIGN.md §2)
+scope only — Wave 2 (roadmap: `docs/roadmap-waves.md`) delivered
+substantial additional work afterward that was never folded back into the
+table above. Listed here rather than merged into it so the Phase-1 rows'
+provenance stays clear; a future pass can merge both into one table.
+
+| Spec Section | Topic | Migration Files | Database Tables | Repositories/Services | Screens | Tests | Notes |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| **§15 / §25** | All Issues database view: filters, sort, search, keyset pagination, saved views | `20260804100000_issues_scale_indexes_search_views.sql` | issues, property_refs, saved_views | issues-query-repo.ts, saved-views-repo.ts, saved-view-service.ts | `/issues` | issues-query-repo.test.ts, saved-views.test.ts | 300-case volume seed (scripts/demo-seed.ts). Grouped view + saved view create/list/delete server actions in app/actions.ts. |
+| **§29.11 / §29.2** | Issue timeline (chronological multi-source "story" view) | (reads existing tables; no new migration) | communication_events, communication_links, audit_events, phase_instances, notices, issue_people | timeline-repo.ts | `/issues/[id]/timeline` | comms-timeline.test.ts, issue-timeline-view.test.ts | Merges comms/audit/phase-open-close/notice/issue-link sources into one interleaved, keyset-paginated feed. |
+| **§9.1 / §29.11** | Person page: CRM communications + people, person timeline | (reads existing tables) | person_refs, communication_events, communication_links, issue_people | people-repo.ts | `/people`, `/people/[id]` | people-repo.test.ts, people-timeline-page.test.ts | Search by person/phone/email (§15). Person hover cards (contact_snapshot allowlist, app/_lib/reference-data.ts). |
+| **§13 / §8.2 / §14** | Manager dashboard + data-quality exception queues + admin activity metrics | (reads existing tables) | issues, tasks, holds, audit_events, phase_instances | dashboard-repo.ts, exceptions-repo.ts, audit-metrics-repo.ts | `/dashboard`, `/exceptions`, `/activity`, `/admin/activity` | dashboard-exceptions.test.ts, comms-timeline.test.ts (audit-metrics-repo block) | §8.2 ("Team and management dashboards") is listed as Deferred in the table below from the original Phase-1 matrix — that deferral is now stale; a real dashboard + exception-queue implementation shipped in Wave 2. |
+| **§9.1 / §30.2** | Case left-panel contract/transaction overview | `20260804120000_issues_contract_refs.sql` | contract_refs | contract-refs-repo.ts | `/issues/[id]` (left panel), `/contracts/[id]` | contract-refs.test.ts | Read-model cache, NOT canonical (Hub Sales/Transactions module owns the real Contract record). |
+| **§29.1** | Cross-matter communication tagging | (reads communication_links) | communication_links | comms-repo.ts, timeline-repo.ts | `/issues/[id]/timeline` | comms-timeline.test.ts | A communication linked to more than one issue surfaces a "cross-matter" flag on the non-primary issue's timeline. |
+
+---
+
 ## Deferred Sections (DESIGN.md §2 Deferrals) with Schema Seams
 
 Deferred items have placeholder tables or schema columns; no implementation in Phase 1. Listed with their implementation seams for Phase 2+.
 
 | Deferred Section | Topic | Schema Seam | Database Table(s) | Planned Phase 2+ Implementation |
 | --- | --- | --- | --- | --- |
-| **§8.2** | Team and management dashboards | Query layer placeholder. Basic query foundation in migrations. | issues, vendor_jobs, cost_entries (views/queries deferred) | Dashboard queries, filtering (MTD/month/QTD/YTD/custom), comparable-median variance, off-market aging, performance rankings. |
+| **§8.2** | Team and management dashboards | ~~Query layer placeholder.~~ **STALE — delivered in Wave 2, see the "Wave 2 Sections" table above.** Remaining Phase-1-scope gaps below (MTD/QTD/YTD custom ranges, comparable-median variance, performance rankings) are still open. | issues, vendor_jobs, cost_entries, tasks, holds, audit_events (dashboard-repo.ts, exceptions-repo.ts now query these) | Filtering (MTD/month/QTD/YTD/custom), comparable-median variance, off-market aging (delivered), performance rankings (still open). |
 | **§11** | AI copilot requirements | domain_events + communication_events schema ready. AI service seam in events.ts (consume/publish). | domain_events, communication_events, ai_summaries (deferred table) | Weekly AI summary generation (read communication_events, calls, transcripts, notes). Draft email/letter/notice/task. Drafts read-only; no send/state-change/release. Separate from user descriptions. Version retention. |
 | **§16** | Airtable migration from Airtable to Supabase | All tables include source_system, external_id for provenance. property_refs, person_refs are read-model aliases. | property_refs.external_id, person_refs.aliases (jsonb), all tables with source_system | Migration tooling: source inventory, field mapping, duplicate detection, attachment reconciliation, cutover runbook, business acceptance, reconciliation report. |
 | **§29.1** | Weekly AI living case summary | Same as §11. | domain_events, communication_events, ai_summaries | Scheduled weekly refresh of auto-generated living summary (refreshes on request after material event). Coverage time, source references, prior versions retained. Excludes irrelevant comms from other matters. |
@@ -158,8 +177,9 @@ Per spec §26, required Phase 1 implementation artifacts:
 
 | Coverage | Count | Details |
 | --- | --- | --- |
-| **In-scope spec sections** | 26 | §4, §5, §6.1–6.4, §7, §8.1–8.3, §10, §12, §20, §21, §23, §28.3–28.6, §29.2, §29.6–29.10, §30.2–30.4, §31.2–31.10 (selected) |
-| **Deferred spec sections** | 8 | §8.2, §11, §16, §29.1, §29.3–29.4, §29.12, §31.11–31.12 (with schema seams) |
+| **In-scope spec sections (Phase 1)** | 26 | §4, §5, §6.1–6.4, §7, §8.1–8.3, §10, §12, §20, §21, §23, §28.3–28.6, §29.2, §29.6–29.10, §30.2–30.4, §31.2–31.10 (selected) |
+| **Wave 2 sections (delivered after Phase 1)** | 6 rows / ~7 distinct sections | §13, §14, §15, §25, §29.1, §29.11, §9.1 (§8.2 also moves from deferred to delivered — see its annotated row below) |
+| **Deferred spec sections** | 7 (§8.2 moved to Wave 2 delivered, above) | §11, §16, §29.1 (Weekly AI summary sub-scope only — cross-matter tagging itself shipped, see Wave 2 table), §29.3–29.4, §29.12, §31.11–31.12 (with schema seams) |
 | **Acceptance scenarios tested** | 28+ | Examples A–D (§17), §28.8 (8 required), §29.13 (10 OPS-ADD), §30.10 (8 OPS-MV), §31.12 (10 OPS-SUP) |
 | **Test files** | 15+ | schema, transition, idempotent, rls/permission, intake, phase-specific (default-recovery, covenant, etc.), cleanup/vendor, compliance, possession, cost/payment, audit, communication, stale, history, delegation, vendor-metrics, default-to-availability |
 | **Implementation files** | 40+ | migrations, schema.ts, services (7), screens (3), tests (15+), supporting utilities |

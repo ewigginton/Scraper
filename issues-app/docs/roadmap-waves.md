@@ -5,10 +5,14 @@ flexible, scalable, editable — while every safety rule from the requirements
 doc stays server-enforced. This file is the durable scope record for the
 waves that follow docs/notion-redesign.md (Wave 1).
 
-## Wave 1 — database-view core (notion-redesign.md, in flight)
+## Wave 1 — database-view core (notion-redesign.md, DELIVERED)
 Sidebar shell · All Issues view (browse/open every issue, sort, filter,
 full-text search, column show/hide, group-by, saved views) · keyset
 pagination + composite indexes · 300-case volume seed · Notion visual idiom.
+All items shipped: `20260804100000_issues_scale_indexes_search_views.sql`
+(saved_views table + search/keyset indexes), `lib/repositories/
+issues-query-repo.ts` + `saved-views-repo.ts`, the `/issues` route, and
+`scripts/demo-seed.ts`'s 300-issue volume seed.
 
 ## Wave 2 — spec §15/§8.2/§13 completions
 - FIRST: issue-level change log upgrade (Emma priority) — the case page's

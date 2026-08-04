@@ -171,6 +171,12 @@ describe('saved-view-service', () => {
     expect(stillThere).toHaveLength(1);
   });
 
+  it('REGRESSION: deleteSavedView raises a typed saved_view_not_found for a non-uuid id (e.g. a tampered form field) rather than a raw driver error', async () => {
+    await expect(
+      handle.db.transaction((tx) => deleteSavedView(tx, { ownerExternalId: 'alice', id: 'not-a-uuid' })),
+    ).rejects.toMatchObject({ code: 'saved_view_not_found' });
+  });
+
   it('listSavedViews is scoped to the requested owner', async () => {
     await handle.db.transaction((tx) => createSavedView(tx, { ownerExternalId: 'alice', name: 'Alice View', params: {} }));
     await handle.db.transaction((tx) => createSavedView(tx, { ownerExternalId: 'bob', name: 'Bob View', params: {} }));

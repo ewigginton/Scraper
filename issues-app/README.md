@@ -24,6 +24,25 @@ cp .env.example .env.local   # set DATABASE_URL to your dev database
 npm run dev                  # http://localhost:4182
 ```
 
+### Even faster: zero-setup local demo
+
+No Postgres/Supabase install, no credentials, no `.env.local` needed:
+
+```bash
+npm install
+npm run demo                 # http://127.0.0.1:4182
+```
+
+Builds a persisted PGlite (Postgres-in-WASM) database at `.demo-db/` via
+`scripts/demo-seed.ts` (real service-layer writes — every row passes the
+same validation/auditing as production data) and starts the dev server
+against it with `ISSUES_DEMO=1`. Pass `npm run demo -- --fresh` to rebuild
+the demo data from scratch. Dev/demo only — never part of the Hub port (see
+`PORTING.md`) and never pointed at a real database. To also see fictional
+communications on case/person timelines, run
+`node --experimental-strip-types scripts/demo-seed-comms.ts` once the demo
+database exists.
+
 `DATABASE_URL` must authenticate as a role with `nosuperuser nobypassrls`
 (never the migration-owner/superuser role) — a superuser or BYPASSRLS
 connection silently disables every RLS policy in this schema. Migration

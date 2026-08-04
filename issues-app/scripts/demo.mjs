@@ -44,6 +44,12 @@ if (!existsSync(SEED_COMPLETE_SENTINEL)) {
 }
 
 console.log('Starting Issues demo at http://127.0.0.1:4182 (Ctrl+C to stop)');
+// PGlite has no cross-process file locking: running scripts/demo-seed-comms.ts
+// (or any other script that opens .demo-db/) while this server is up will
+// silently corrupt/lose writes from whichever process closes last, with no
+// error surfaced to either side. Stop this server (Ctrl+C) before running
+// any standalone script against .demo-db/.
+console.log('Note: stop this server before running scripts/demo-seed-comms.ts or any other script against .demo-db/ — PGlite has no cross-process locking.');
 const next = spawn(
   process.execPath,
   [join(ROOT, 'node_modules', 'next', 'dist', 'bin', 'next'), 'dev', '-p', '4182'],

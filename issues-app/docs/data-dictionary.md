@@ -84,6 +84,33 @@ These tables cache canonical data owned by other systems. Property Operations re
 
 ---
 
+### contract_refs
+
+**Purpose:** Read-model cache of the canonical Contract record (Wave 2b roadmap "Case left-panel contract/transaction overview + CRM links", spec §9.1/§30.2). Mirrors the property_refs/person_refs alias pattern exactly — Property Operations reads this to render a display-only snapshot and never writes to it as a side effect of case work.
+
+**Writer:** Hub Sales/Transactions module + Contract workflow (synced, not canonical here; no sync job ships in this lane — scripts/demo-seed.ts's append-only demo section is the only writer that exists today, fictional demo data)
+
+| Column | Type | Null | Default | Meaning |
+|--------|------|------|---------|---------|
+| id | uuid | no | gen_random_uuid() | Primary key |
+| created_at | timestamptz | no | now() | Row creation timestamp |
+| updated_at | timestamptz | no | now() | Last update timestamp |
+| source_system | text | no | | External system identifier |
+| external_id | text | no | | ID in the source system; unique with source_system |
+| contract_number | text | yes | | Cached contract number/identifier |
+| status_cached | text | yes | | Cached contract status (never authoritative) |
+| property_ref_id | uuid | no | | Foreign key to property_refs |
+| buyer_person_ref_id | uuid | yes | | Foreign key to person_refs (set null on delete) |
+| executed_date | date | yes | | Date the contract was executed; null for draft/unexecuted contracts |
+| key_dates | jsonb | no | {} | Free-form named milestone dates (e.g. `{"closing": "2026-09-01", "inspection_deadline": "2026-08-20"}`) — display-only, not a copy of the Contract workflow's own state machine |
+| last_synced_at | timestamptz | yes | | Timestamp of last sync from source system |
+
+**Indices:** property_ref_id, buyer_person_ref_id, last_synced_at  
+**Constraints:** Unique(source_system, external_id)  
+**RLS:** enabled + FORCEd; broad-internal SELECT only (`contract_refs_select_broad_internal`, same shape as property_refs/person_refs) — no insert/update policy, and `issues_app`'s default insert/update grant is explicitly revoked back to SELECT-only (see 20260804120000_issues_contract_refs.sql), since this table is read-only from the app's perspective.
+
+---
+
 ## Core Case Model
 
 The canonical Property Operations case, its lifecycle, phases, and work items.

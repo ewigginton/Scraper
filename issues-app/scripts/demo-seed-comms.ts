@@ -6,6 +6,15 @@
  * on top). Run standalone: `node --experimental-strip-types
  * scripts/demo-seed-comms.ts`.
  *
+ * STOP THE DEMO SERVER FIRST. PGlite has no cross-process file locking —
+ * two independent PGlite instances opened on the same .demo-db/ directory
+ * (e.g. a running `npm run demo` dev server plus this script) each keep
+ * their own in-memory snapshot; whichever process closes last silently
+ * overwrites the other's writes with no error surfaced to either side.
+ * Run `npm run demo`'s server, stop it (Ctrl-C), THEN run this script —
+ * never both at once.
+ *
+
  * Wave 2 roadmap: "Demo seed gains fictional communication_events
  * (calls/texts/emails per person) so timelines are visible at demo time."
  *

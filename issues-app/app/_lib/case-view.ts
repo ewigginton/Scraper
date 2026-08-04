@@ -93,6 +93,22 @@ export interface CaseData {
  */
 const HISTORY_FETCH_CAP = 500;
 
+/**
+ * Defensive LIMIT for loadCaseData's per-issue child-collection reads
+ * (bids, vendor_jobs, cost_entries, evidence_files, notices, the linked
+ * person_refs join, change_orders, checklist_items) — this app's own
+ * house style is "every list query bounded" even for sources that are
+ * normally low-cardinality (see contract-refs-repo.ts's FOR_PROPERTY_LIMIT
+ * and timeline-repo.ts's PHASE_NOTICE_LIMIT, both of which apply the same
+ * kind of defensive cap to a source they also describe as naturally
+ * small). A case that ages unusually long (default_recovery/legal cases
+ * especially) accumulating more than this many rows in one collection
+ * would previously render ALL of them with no ceiling at all — same value
+ * as HISTORY_FETCH_CAP/PHASE_NOTICE_LIMIT for consistency, not a
+ * rigorously-derived number.
+ */
+const CASE_CHILD_LIMIT = 500;
+
 const RESTRICTED_EVIDENCE_ROLES = new Set(['manager', 'admin']);
 const RESTRICTED_CLASSIFICATIONS = new Set(['restricted_legal', 'restricted_financial']);
 
@@ -215,29 +231,32 @@ export async function loadCaseData(db: DbHandle, issueId: string, roles: string[
 
   const [phaseHistory, issueBids, issueVendorJobs, issueCostEntries, issuePaymentRequests, issueEvidence, issueNotices, auditRows] =
     await Promise.all([
-      db.select().from(phaseInstances).where(eq(phaseInstances.issueId, issueId)).orderBy(asc(phaseInstances.startedAt)),
-      db.select().from(bids).where(eq(bids.issueId, issueId)),
-      db.select().from(vendorJobs).where(eq(vendorJobs.issueId, issueId)),
-      db.select().from(costEntries).where(eq(costEntries.issueId, issueId)),
+      db.select().from(phaseInstances).where(eq(phaseInstances.issueId, issueId)).orderBy(asc(phaseInstances.startedAt)).limit(CASE_CHILD_LIMIT),
+      db.select().from(bids).where(eq(bids.issueId, issueId)).limit(CASE_CHILD_LIMIT),
+      db.select().from(vendorJobs).where(eq(vendorJobs.issueId, issueId)).limit(CASE_CHILD_LIMIT),
+      db.select().from(costEntries).where(eq(costEntries.issueId, issueId)).limit(CASE_CHILD_LIMIT),
       paymentsRepo.listForIssue(db, issueId),
-      db.select().from(evidenceFiles).where(eq(evidenceFiles.issueId, issueId)),
-      db.select().from(notices).where(eq(notices.issueId, issueId)),
+      db.select().from(evidenceFiles).where(eq(evidenceFiles.issueId, issueId)).limit(CASE_CHILD_LIMIT),
+      db.select().from(notices).where(eq(notices.issueId, issueId)).limit(CASE_CHILD_LIMIT),
       auditRepo.listForObject(db, 'issues', issueId, { limit: HISTORY_FETCH_CAP }),
     ]);
 
   const personRefIds = sanitizeUuidArray(base.people.map((p) => p.personRefId));
   const [peopleRefRows, contracts] = await Promise.all([
-    personRefIds.length > 0 ? db.select().from(personRefs).where(inArray(personRefs.id, personRefIds)) : Promise.resolve([]),
+    personRefIds.length > 0 ? db.select().from(personRefs).where(inArray(personRefs.id, personRefIds)).limit(CASE_CHILD_LIMIT) : Promise.resolve([]),
     contractRefsRepo.getForProperty(db, base.propertyRefId),
   ]);
   const peopleRefsById = new Map(peopleRefRows.map((p) => [p.id, p]));
 
   const vendorJobIds = issueVendorJobs.map((j) => j.id);
-  const issueChangeOrders = vendorJobIds.length > 0 ? await db.select().from(changeOrders).where(inArray(changeOrders.vendorJobId, vendorJobIds)) : [];
+  const issueChangeOrders =
+    vendorJobIds.length > 0 ? await db.select().from(changeOrders).where(inArray(changeOrders.vendorJobId, vendorJobIds)).limit(CASE_CHILD_LIMIT) : [];
 
   const phaseInstanceIds = phaseHistory.map((p) => p.id);
   const issueChecklistItems =
-    phaseInstanceIds.length > 0 ? await db.select().from(checklistItems).where(inArray(checklistItems.phaseInstanceId, phaseInstanceIds)) : [];
+    phaseInstanceIds.length > 0
+      ? await db.select().from(checklistItems).where(inArray(checklistItems.phaseInstanceId, phaseInstanceIds)).limit(CASE_CHILD_LIMIT)
+      : [];
 
   // Aggregate audit_events across every object this case touches (holds,
   // tasks, bids, vendor jobs, cost entries, payment requests) in addition to
