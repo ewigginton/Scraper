@@ -41,6 +41,13 @@ before/after/why/when for every command, including denials. The UX layer:
   rendered from audit_events before/after jsonb. Paginated.
 - Global Activity feed page: recent changes across all records, filterable
   by case / person / action category, bounded queries.
+- Admin activity metrics (Emma, Aug 2026): admin-role-gated view showing the
+  number of activities by user (audit_events grouped by actor), filterable
+  by date range and action category, with drill-down into that user's feed.
+  Aligns with spec §8.2 coordinator-performance reporting and §14 baseline
+  metrics. Honest caveat surfaced in the UI: actor identity is the dev-user
+  stub until the Hub's shared staff identity is wired in at porting — the
+  view ships now, the numbers become meaningful then.
 - Inline edits (Wave 3) must produce field-level audit rows by construction
   (service-layer routing guarantees this; verifier checks it).
 - No new tables needed — this is a projection over audit_events; if per-field
