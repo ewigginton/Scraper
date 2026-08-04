@@ -18,10 +18,10 @@
  * No business rules here (DESIGN.md §6) — reads only.
  */
 
-import { and, desc, eq, gte, inArray, lte, sql, type SQL } from 'drizzle-orm';
+import { and, desc, eq, getTableColumns, gte, inArray, lte, sql, type SQL } from 'drizzle-orm';
 import type { DbHandle } from './db-handle.ts';
 import { auditEvents, type AuditEvent } from '../db/schema.ts';
-import { clampLimit, decodeCursor, encodeCursor } from './keyset-cursor.ts';
+import { clampLimit, cursorTimestampExpr, decodeCursor, encodeCursor } from './keyset-cursor.ts';
 import { isUuid, sanitizeText } from './id-guard.ts';
 
 /**
@@ -176,7 +176,7 @@ export async function recentActivity(db: DbHandle, params: RecentActivityParams 
   const where = conditions.length > 0 ? and(...conditions) : undefined;
 
   const rows = await db
-    .select()
+    .select({ ...getTableColumns(auditEvents), cursorAt: cursorTimestampExpr(auditEvents.occurredAt) })
     .from(auditEvents)
     .where(where)
     .orderBy(desc(auditEvents.occurredAt), desc(auditEvents.id))
@@ -185,7 +185,14 @@ export async function recentActivity(db: DbHandle, params: RecentActivityParams 
   const hasMore = rows.length > limit;
   const page = hasMore ? rows.slice(0, limit) : rows;
   const last = page[page.length - 1];
-  const nextCursor = hasMore && last ? encodeCursor(last.occurredAt.toISOString(), last.id) : null;
+  // P1 FIX (round 3): cursorAt is Postgres's own microsecond-precision
+  // rendering of occurred_at (keyset-cursor.cursorTimestampExpr) — NOT
+  // `last.occurredAt.toISOString()`, which truncates to millisecond
+  // resolution. audit_events rows written by one command share `now()`
+  // (the transaction timestamp), so this is the routine case, not an edge
+  // case: multiple audit rows per createIssue/transition commonly share an
+  // identical sub-millisecond-precision occurred_at.
+  const nextCursor = hasMore && last ? encodeCursor(last.cursorAt, last.id) : null;
 
   return { rows: page, nextCursor };
 }

@@ -17,7 +17,7 @@ import * as timelineRepo from '../lib/repositories/timeline-repo.ts';
 import * as auditMetricsRepo from '../lib/repositories/audit-metrics-repo.ts';
 import { createIssue } from '../lib/services/issue-service.ts';
 import { applyHold } from '../lib/services/hold-service.ts';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import {
   auditEvents,
   communicationEvents,
@@ -84,6 +84,29 @@ function daysAgo(n: number): Date {
   const d = new Date();
   d.setUTCDate(d.getUTCDate() - n);
   return d;
+}
+
+/**
+ * Inserts one audit_events row with occurred_at set to an exact,
+ * microsecond-precision literal — a value no JS Date (millisecond
+ * resolution) can represent, so this can only be done via a raw SQL
+ * literal in the INSERT itself. Used by the P1 regression tests below.
+ * audit_events is append-only (supabase/migrations/...
+ * audit_events_block_mutation trigger) — insert-then-UPDATE is rejected,
+ * so the literal must be supplied at insert time.
+ */
+async function insertAuditEventAt(
+  db: TestDb,
+  opts: { objectTable: string; objectId: string; action: string },
+  occurredAtLiteral: string,
+): Promise<string> {
+  const result = await db.execute(
+    sql`insert into audit_events (object_table, object_id, action, occurred_at) values (${opts.objectTable}, ${opts.objectId}::uuid, ${opts.action}, ${occurredAtLiteral}::timestamptz) returning id`,
+  );
+  const rows = (result as unknown as { rows?: Array<{ id: string }> }).rows ?? (result as unknown as Array<{ id: string }>);
+  const id = rows[0]?.id;
+  if (!id) throw new Error('insertAuditEventAt: insert returned no row');
+  return id;
 }
 
 describe('comms-repo', () => {
@@ -187,6 +210,53 @@ describe('comms-repo', () => {
         if (!cursor) break;
       }
       expect(paged.map((r) => r.id)).toEqual(full.rows.map((r) => r.id));
+    });
+
+    // -----------------------------------------------------------------
+    // P1 regression (round 3): every keyset cursor in this package used to
+    // be minted from `.toISOString()` (millisecond resolution) while
+    // occurred_at is `timestamptz` (microsecond resolution) — a boundary
+    // row whose timestamp carried a non-zero sub-millisecond component was
+    // silently truncated out of the cursor, so the strict "<"/"=" predicate
+    // excluded every remaining row sharing that microsecond value AND
+    // nextCursor came back null (feed reports itself complete while rows
+    // are still missing). The existing "keyset pagination is stable" test
+    // above uses whole-day-apart timestamps and therefore cannot catch
+    // this — this test forces several rows onto the SAME
+    // microsecond-precision occurred_at, the routine production case
+    // (`now()` is the transaction timestamp, so rows one transaction
+    // writes share one identical value).
+    // -----------------------------------------------------------------
+    it('P1 regression: rows sharing one microsecond-precision occurred_at are ALL returned across pages, not silently dropped at the page boundary', async () => {
+      const person = await makePerson(handle.db);
+      const ids: string[] = [];
+      for (let i = 0; i < 5; i++) {
+        const row = await insertComm(handle.db, { fromPersonRefId: person.id, occurredAt: new Date(), providerEventId: `micro-${i}` });
+        ids.push(row.id);
+      }
+      // Force every row onto one shared, sub-millisecond-precision instant
+      // — the exact case a JS Date (millisecond resolution) cannot
+      // represent, so this can ONLY be set via a raw SQL literal.
+      await handle.db.execute(
+        sql`update communication_events set occurred_at = '2026-08-04T12:00:00.123456Z'::timestamptz where id in (${sql.join(
+          ids.map((id) => sql`${id}::uuid`),
+          sql`, `,
+        )})`,
+      );
+
+      const full = await commsRepo.listForPerson(handle.db, { personRefId: person.id, limit: 100 });
+      expect(full.rows).toHaveLength(5);
+
+      let cursor: string | null = null;
+      const paged: typeof full.rows = [];
+      for (let guard = 0; guard < 20; guard++) {
+        const page = await commsRepo.listForPerson(handle.db, { personRefId: person.id, limit: 2, cursor });
+        paged.push(...page.rows);
+        cursor = page.nextCursor;
+        if (!cursor) break;
+      }
+      expect(paged.map((r) => r.id).sort()).toEqual(full.rows.map((r) => r.id).sort());
+      expect(paged).toHaveLength(5);
     });
   });
 
@@ -579,6 +649,40 @@ describe('timeline-repo', () => {
         expect(paged.map(key)).toEqual(full.entries.map(key));
       }
     });
+
+    // P1 regression (round 3) — see comms-repo's identically-named test
+    // above for the full mechanism. This exercises timeline-repo's own
+    // per-source audit cursor (fetchIssueObjectGraphAuditBatch), which
+    // shares the exact `now()`-is-the-transaction-timestamp production
+    // trigger the finding describes for audit_events.
+    it('P1 regression: audit entries sharing one microsecond-precision occurred_at are ALL returned across pages, not silently dropped at the page boundary', async () => {
+      const owner = await makePerson(handle.db);
+      const { issue } = await makeIssueWithPeople(handle.db, [{ personRefId: owner.id, role: 'owner' }]);
+
+      for (let i = 0; i < 5; i++) {
+        await insertAuditEventAt(handle.db, { objectTable: 'issues', objectId: issue.id, action: 'micro_test' }, '2026-08-04T12:00:00.123456Z');
+      }
+
+      // TimelineEntry.sourceId for an 'audit' entry is the audited OBJECT's
+      // id (here: the issue, shared by all 5 rows), not the audit_events
+      // row's own primary key — so these 5 rows are only distinguishable by
+      // count/title, not by a per-row id.
+      type TimelineEntry = Awaited<ReturnType<typeof timelineRepo.issueTimeline>>['entries'][number];
+      const isMicroEntry = (e: TimelineEntry) => e.sourceTable === 'issues' && e.sourceId === issue.id && e.title === 'Issue micro_test';
+
+      const full = await timelineRepo.issueTimeline(handle.db, { issueId: issue.id, filters: { kinds: ['audit'] }, limit: 1000 });
+      expect(full.entries.filter(isMicroEntry)).toHaveLength(5);
+
+      let cursor: string | null = null;
+      const paged: typeof full.entries = [];
+      for (let guard = 0; guard < 20; guard++) {
+        const page = await timelineRepo.issueTimeline(handle.db, { issueId: issue.id, filters: { kinds: ['audit'] }, limit: 2, cursor });
+        paged.push(...page.entries);
+        cursor = page.nextCursor;
+        if (!cursor) break;
+      }
+      expect(paged.filter(isMicroEntry)).toHaveLength(5);
+    });
   });
 
   describe('personTimeline', () => {
@@ -756,6 +860,40 @@ describe('audit-metrics-repo', () => {
       }
       expect(paged.map((r) => r.id)).toEqual(full.rows.map((r) => r.id));
     });
+
+    // P1 regression (round 3) — see comms-repo's identically-named test
+    // above for the full mechanism. audit_events is the case the finding
+    // calls out as routine in production: `occurred_at` defaults `now()`,
+    // the TRANSACTION timestamp, so every audit row one command writes
+    // (writeAudit is called several times per createIssue/transition)
+    // shares one identical microsecond value.
+    it('P1 regression: audit_events rows sharing one microsecond-precision occurred_at are ALL returned across pages, not silently dropped at the page boundary', async () => {
+      const owner = await makePerson(handle.db);
+      const { issue } = await makeIssueWithPeople(handle.db, [{ personRefId: owner.id, role: 'owner' }]);
+      const ids: string[] = [];
+      for (let i = 0; i < 5; i++) {
+        // 'issues' (unlike 'person_refs') is in audit-metrics-repo's
+        // VALID_OBJECT_TABLES allowlist, so the objectTables filter below
+        // actually narrows to these rows rather than silently matching
+        // nothing (requested-but-invalid -> match nothing, per this
+        // module's own "never silently 'all'" contract).
+        ids.push(await insertAuditEventAt(handle.db, { objectTable: 'issues', objectId: issue.id, action: 'micro_test' }, '2026-08-04T12:00:00.123456Z'));
+      }
+
+      const full = await auditMetricsRepo.recentActivity(handle.db, { filters: { objectTables: ['issues'] }, limit: 1000 });
+      expect(full.rows.filter((r) => ids.includes(r.id))).toHaveLength(5);
+
+      let cursor: string | null = null;
+      const paged: typeof full.rows = [];
+      for (let guard = 0; guard < 20; guard++) {
+        const page = await auditMetricsRepo.recentActivity(handle.db, { filters: { objectTables: ['issues'] }, limit: 2, cursor });
+        paged.push(...page.rows);
+        cursor = page.nextCursor;
+        if (!cursor) break;
+      }
+      expect(paged.filter((r) => ids.includes(r.id))).toHaveLength(5);
+      expect(paged.map((r) => r.id).sort()).toEqual(full.rows.map((r) => r.id).sort());
+    });
   });
 });
 
@@ -837,16 +975,24 @@ describe('NUL byte (U+0000) in free-text filters never reaches the driver', () =
 
 
 // -----------------------------------------------------------------------
-// PARSE-COMPATIBILITY FUZZ (round 2): Date.parse() accepts far more string
-// formats than Postgres's timestamptz parser. A cursor carrying a
-// JS-parseable-but-Postgres-unparseable `at` value used to pass
-// decodeCursor's `Number.isNaN(Date.parse(at))` guard and then throw a raw
-// driver error (SQLSTATE 22007) at the `::timestamptz` cast, instead of the
-// documented "malformed cursor -> page 1" contract. Fix: canonicalize `at`
-// to `new Date(Date.parse(at)).toISOString()` inside the decoder -- a
-// canonical ISO string always parses in Postgres, and this never changes a
-// legitimate cursor's value (encodeCursor always mints from `.toISOString()`
-// in the first place).
+// PARSE-COMPATIBILITY FUZZ (round 2, superseded by round 3): Date.parse()
+// accepts far more string formats than Postgres's timestamptz parser. A
+// cursor carrying a JS-parseable-but-Postgres-unparseable `at` value used
+// to pass decodeCursor's `Number.isNaN(Date.parse(at))` guard and then
+// throw a raw driver error (SQLSTATE 22007) at the `::timestamptz` cast,
+// instead of the documented "malformed cursor -> page 1" contract.
+//
+// The round-2 fix ("canonicalize `at` to
+// `new Date(Date.parse(at)).toISOString()` inside the decoder") turned out
+// to be its own bypassable hole (round-3 P2 finding): that canonicalization
+// is a no-op for ISO 8601 extended-year/year-0000 strings, which round-trip
+// unchanged and still blow up at the `::timestamptz` cast. The round-3 fix
+// replaces canonicalization with strict validation against the EXACT shape
+// this package's own cursorTimestampExpr always produces (see
+// keyset-cursor.isValidCursorTimestamp) — anything else, including this
+// block's "weird but JS-parseable" fixture, is rejected outright (decodes
+// to null -> page 1) rather than being reshaped into something Postgres
+// will accept.
 // -----------------------------------------------------------------------
 describe('PARSE-COMPATIBILITY FUZZ (round 2): a Date.parse-but-not-Postgres-parseable cursor timestamp never reaches the driver', () => {
   // Date.parse() accepts this (JS's permissive toString()-echo format);
@@ -867,12 +1013,10 @@ describe('PARSE-COMPATIBILITY FUZZ (round 2): a Date.parse-but-not-Postgres-pars
     expect(Number.isNaN(Date.parse(WEIRD_BUT_JS_PARSEABLE_AT))).toBe(false);
   });
 
-  it('keyset-cursor.decodeCursor canonicalizes the weird `at` to a real ISO string rather than passing it through verbatim', async () => {
+  it('keyset-cursor.decodeCursor rejects the weird `at` outright (round 3: strict format match, not canonicalization) rather than passing it through verbatim', async () => {
     const { decodeCursor, encodeCursor } = await import('../lib/repositories/keyset-cursor.ts');
     const poisoned = encodeCursor(WEIRD_BUT_JS_PARSEABLE_AT, '00000000-0000-0000-0000-000000000000');
-    const decoded = decodeCursor(poisoned);
-    expect(decoded).not.toBeNull();
-    expect(decoded!.at).toBe(new Date(Date.parse(WEIRD_BUT_JS_PARSEABLE_AT)).toISOString());
+    expect(decodeCursor(poisoned)).toBeNull();
   });
 
   it('issues-query-repo.decodeCursor + validCursorForSort: listIssues does not throw a raw driver error on the weird cursor', async () => {
@@ -903,5 +1047,87 @@ describe('PARSE-COMPATIBILITY FUZZ (round 2): a Date.parse-but-not-Postgres-pars
     const { encodeCursor } = await import('../lib/repositories/keyset-cursor.ts');
     const poisoned = encodeCursor(WEIRD_BUT_JS_PARSEABLE_AT, '00000000-0000-0000-0000-000000000000');
     await expect(auditMetricsRepo.recentActivity(handle.db, { cursor: poisoned, limit: 10 })).resolves.not.toThrow();
+  });
+});
+
+// -----------------------------------------------------------------------
+// P2 regression (round 3): the round-2 fix canonicalized a cursor's
+// timestamp via `new Date(Date.parse(x)).toISOString()`, which is a NO-OP
+// for ISO 8601 extended-year (`+010000-01-01T...`) and year-0000
+// (`0000-01-01T...`) strings — both parse fine in JS and round-trip
+// byte-for-byte through `toISOString()`, then blow up as a raw
+// `date/time field value out of range`/`time zone displacement out of
+// range` driver error at the `::timestamptz` cast, exactly the crash the
+// "malformed cursor -> page 1" contract was supposed to prevent. The
+// round-3 fix validates the EXACT canonical shape instead of
+// canonicalizing, so these payloads are rejected outright (decode to
+// null -> page 1) rather than reshaped into something that still reaches
+// the cast.
+// -----------------------------------------------------------------------
+describe('P2 regression (round 3): extended-year and year-0000 cursor timestamps never reach the ::timestamptz cast', () => {
+  // The exact payloads from the finding.
+  const YEAR_0000 = '0000-01-01T00:00:00.000Z';
+  const EXTENDED_YEAR_MIN = '+010000-01-01T00:00:00.000Z';
+  const EXTENDED_YEAR_MAX = '+275760-09-13T00:00:00.000Z';
+  // The same attack, expressed in THIS package's own canonical
+  // 6-digit-microsecond shape (cursorTimestampExpr's output format) rather
+  // than the 3-digit toISOString() shape the finding's payloads use —
+  // proves the calendar-correctness guard itself rejects a year-0000/
+  // calendar-overflow value, not merely a digit-count mismatch.
+  const YEAR_0000_CANONICAL = '0000-01-01T00:00:00.123456Z';
+  const MONTH_13_CANONICAL = '2026-13-01T00:00:00.123456Z';
+  const FEB_30_CANONICAL = '2026-02-30T00:00:00.123456Z';
+  const HOUR_24_CANONICAL = '2026-08-04T24:00:00.123456Z';
+
+  const BAD_TIMESTAMPS = [YEAR_0000, EXTENDED_YEAR_MIN, EXTENDED_YEAR_MAX, YEAR_0000_CANONICAL, MONTH_13_CANONICAL, FEB_30_CANONICAL, HOUR_24_CANONICAL];
+
+  let handle: TestDbHandle;
+
+  beforeEach(async () => {
+    handle = await createTestDb();
+  });
+
+  afterEach(async () => {
+    await closeTestDb(handle);
+  });
+
+  it('sanity check: the extended-year/year-0000 payloads are Date.parse-able (this is what made the round-2 canonicalization a no-op)', () => {
+    for (const at of [YEAR_0000, EXTENDED_YEAR_MIN, EXTENDED_YEAR_MAX]) {
+      expect(Number.isNaN(Date.parse(at))).toBe(false);
+    }
+  });
+
+  it('keyset-cursor.decodeCursor rejects every payload outright (null) rather than canonicalizing it into something that would still reach the ::timestamptz cast', async () => {
+    const { decodeCursor, encodeCursor } = await import('../lib/repositories/keyset-cursor.ts');
+    for (const at of BAD_TIMESTAMPS) {
+      const poisoned = encodeCursor(at, '00000000-0000-0000-0000-000000000000');
+      expect(decodeCursor(poisoned)).toBeNull();
+    }
+  });
+
+  it('issues-query-repo: cursors carrying the same payloads never reach the driver (listIssues resolves, does not throw)', async () => {
+    const { listIssues, encodeCursor: encodeIssuesCursor } = await import('../lib/repositories/issues-query-repo.ts');
+    for (const at of BAD_TIMESTAMPS) {
+      const poisoned = encodeIssuesCursor(at, '11111111-1111-1111-1111-111111111111');
+      await expect(listIssues(handle.db, { cursor: poisoned, sort: { key: 'updated_at', direction: 'desc' } })).resolves.not.toThrow();
+    }
+  });
+
+  it('comms-repo.listForPerson never throws on any of these payloads', async () => {
+    const { encodeCursor } = await import('../lib/repositories/keyset-cursor.ts');
+    const person = await makePerson(handle.db);
+    await insertComm(handle.db, { fromPersonRefId: person.id, occurredAt: daysAgo(1), providerEventId: 'p2-regress-1' });
+    for (const at of BAD_TIMESTAMPS) {
+      const poisoned = encodeCursor(at, '00000000-0000-0000-0000-000000000000');
+      await expect(commsRepo.listForPerson(handle.db, { personRefId: person.id, cursor: poisoned, limit: 10 })).resolves.not.toThrow();
+    }
+  });
+
+  it('audit-metrics-repo.recentActivity never throws on any of these payloads', async () => {
+    const { encodeCursor } = await import('../lib/repositories/keyset-cursor.ts');
+    for (const at of BAD_TIMESTAMPS) {
+      const poisoned = encodeCursor(at, '00000000-0000-0000-0000-000000000000');
+      await expect(auditMetricsRepo.recentActivity(handle.db, { cursor: poisoned, limit: 10 })).resolves.not.toThrow();
+    }
   });
 });

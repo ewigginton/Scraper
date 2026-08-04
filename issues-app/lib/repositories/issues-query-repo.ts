@@ -17,6 +17,7 @@ import { and, asc, count, desc, eq, inArray, or, sql, type SQL } from 'drizzle-o
 import type { DbHandle } from './db-handle.ts';
 import { businessTodayIso } from '../date/business-today.ts';
 import { containsNulByte, sanitizeText } from './id-guard.ts';
+import { cursorTimestampExpr, isValidCursorTimestamp } from './keyset-cursor.ts';
 import {
   issues,
   propertyRefs,
@@ -313,19 +314,22 @@ export function decodeCursor(raw: string | null | undefined): DecodedCursor | nu
 function validCursorForSort(cursor: DecodedCursor | null, spec: SortColumnSpec): DecodedCursor | null {
   if (!cursor) return null;
   if (spec.valueType === 'timestamp') {
-    // ROUND-2 FIX (P2): Date.parse() accepts strings Postgres's timestamptz
-    // parser rejects (e.g. RFC-2822-with-trailing-zone-name strings), so a
-    // crafted `after=` cursor could pass this guard and then throw a raw
-    // driver error at the `${value}::timestamptz` cast in castParam/
-    // keysetPredicate below, instead of the safe "malformed cursor -> page
-    // 1" fallback this function promises. Canonicalize to a real ISO string
-    // rather than merely checking parseability: every legitimate cursor was
-    // minted by extractSortValue's `.toISOString()` above, so re-deriving
-    // the canonical ISO string never changes a valid cursor's value, and a
-    // canonical ISO string always parses in Postgres.
-    const ms = Date.parse(cursor.sortValue);
-    if (Number.isNaN(ms)) return null;
-    return { ...cursor, sortValue: new Date(ms).toISOString() };
+    // ROUND-3 FIX (P2): the round-2 fix canonicalized via
+    // `new Date(Date.parse(x)).toISOString()`, which is a NO-OP for ISO
+    // 8601 extended-year (`+010000-01-01T...`) and year-0000
+    // (`0000-01-01T...`) strings — both parse fine in JS and round-trip
+    // byte-for-byte through `toISOString()`, then blow up as a raw
+    // `date/time field value out of range`/`time zone displacement out of
+    // range` driver error at the `${value}::timestamptz` cast in
+    // castParam/keysetPredicate below, exactly the crash the "malformed
+    // cursor -> page 1" contract was supposed to prevent. Validate against
+    // the EXACT shape extractSortValue's cursorValue expression always
+    // produces instead (see keyset-cursor.isValidCursorTimestamp's doc
+    // comment) — this also means the value is NEVER round-tripped through
+    // a JS Date, so the microsecond precision a real cursor carries (P1 fix
+    // below) survives unchanged.
+    if (!isValidCursorTimestamp(cursor.sortValue)) return null;
+    return cursor;
   }
   return cursor;
 }
@@ -344,21 +348,29 @@ function keysetPredicate(spec: SortColumnSpec, direction: SortDirection, cursor:
   return sql`((${orderExpr} > ${value}) OR (${orderExpr} = ${value} AND ${issues.id} > ${cursor.id}::uuid))`;
 }
 
-function extractSortValue(key: SortKey, row: IssueListRow): string {
-  switch (key) {
-    case 'updated_at':
-      return row.issue.updatedAt.toISOString();
-    case 'created_at':
-      return row.issue.createdAt.toISOString();
-    case 'priority':
-      return row.issue.priority;
-    case 'issue_type':
-      return row.issue.issueType;
-    case 'lifecycle_status':
-      return row.issue.lifecycleStatus;
-    case 'property_display_name':
-      return row.property.displayName ?? '';
-  }
+/**
+ * The SQL expression that produces the cursor's opaque `sortValue` for the
+ * currently resolved sort column.
+ *
+ * P1 FIX (round 3): previously this was computed in JS from the already-
+ * fetched row (`row.issue.updatedAt.toISOString()` for the timestamp
+ * sorts), which truncates to millisecond resolution while the column it's
+ * compared against is `timestamptz` (microsecond resolution) — a boundary
+ * row whose timestamp carried a non-zero sub-millisecond component (the
+ * routine case: `created_at`/`updated_at` both default `now()`, the
+ * TRANSACTION timestamp, so any bulk import/seed/backfill produces ties)
+ * had its cursor silently truncated downward, excluding every remaining
+ * row in that microsecond group and reporting the feed complete. Selecting
+ * Postgres's own text rendering of the boundary column instead (via
+ * `cursorTimestampExpr`, same fix as comms-repo.ts/audit-metrics-repo.ts/
+ * timeline-repo.ts) means no JS Date is ever involved, so no precision is
+ * lost. For non-timestamp sorts this is unaffected (plain text/enum
+ * columns have no sub-value precision to lose) — cast through the same
+ * nullable-coalescing `orderExprFor` the ORDER BY itself uses, so the
+ * cursor value always matches what determined this row's position.
+ */
+function cursorValueExprFor(spec: SortColumnSpec): SQL<string> {
+  return spec.valueType === 'timestamp' ? cursorTimestampExpr(spec.expr) : sql<string>`(${orderExprFor(spec)})::text`;
 }
 
 // ---------------------------------------------------------------------
@@ -422,7 +434,7 @@ export async function listIssues(db: DbHandle, params: ListIssuesParams = {}): P
   // Fetch one extra row to know whether a next page exists without a
   // separate COUNT — the +1 row is trimmed below and never returned.
   const rows = await db
-    .select({ issue: issues, property: propertyRefs })
+    .select({ issue: issues, property: propertyRefs, cursorValue: cursorValueExprFor(spec) })
     .from(issues)
     .innerJoin(propertyRefs, eq(issues.propertyRefId, propertyRefs.id))
     .where(where)
@@ -432,7 +444,7 @@ export async function listIssues(db: DbHandle, params: ListIssuesParams = {}): P
   const hasMore = rows.length > limit;
   const pageRows = hasMore ? rows.slice(0, limit) : rows;
   const lastRow = pageRows[pageRows.length - 1];
-  const nextCursor = hasMore && lastRow ? encodeCursor(extractSortValue(sort.key, lastRow), lastRow.issue.id) : null;
+  const nextCursor = hasMore && lastRow ? encodeCursor(lastRow.cursorValue, lastRow.issue.id) : null;
 
   return { rows: pageRows, nextCursor, sort };
 }

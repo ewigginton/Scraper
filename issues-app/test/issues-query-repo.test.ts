@@ -6,6 +6,7 @@
  * matching listIssues' true total.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { sql } from 'drizzle-orm';
 import {
   countIssues,
   DEFAULT_SORT,
@@ -328,6 +329,50 @@ describe('issues-query-repo', () => {
       ]);
     });
 
+    // -----------------------------------------------------------------
+    // P1 regression (round 3): keyset cursors used to be minted from
+    // `row.issue.createdAt.toISOString()` (millisecond resolution) while
+    // created_at is `timestamptz` (microsecond resolution) — a boundary
+    // row whose timestamp carried a non-zero sub-millisecond component was
+    // silently truncated out of the cursor, excluding every remaining row
+    // sharing that microsecond value AND reporting the feed complete
+    // (nextCursor null). The two tests above use whole-day-apart
+    // timestamps and therefore cannot catch this — this test forces
+    // several issues onto the SAME microsecond-precision created_at, the
+    // routine production case (`created_at` defaults `now()`, the
+    // transaction timestamp, so any bulk import/seed/backfill produces
+    // ties).
+    // -----------------------------------------------------------------
+    it('P1 regression: rows sharing one microsecond-precision created_at are ALL returned across pages, not silently dropped at the page boundary', async () => {
+      const created: Issue[] = [];
+      for (let i = 0; i < 5; i += 1) {
+        created.push(await makeIssue(handle.db));
+      }
+      // Force every row onto one shared, sub-millisecond-precision instant
+      // — the exact case a JS Date (millisecond resolution) cannot
+      // represent, so this can only be set via a raw SQL literal.
+      await handle.db.execute(
+        sql`update issues set created_at = '2026-08-04T12:00:00.123456Z'::timestamptz where id in (${sql.join(
+          created.map((c) => sql`${c.id}::uuid`),
+          sql`, `,
+        )})`,
+      );
+
+      const full = await listIssues(handle.db, { sort: { key: 'created_at', direction: 'desc' }, limit: 100 });
+      expect(full.rows).toHaveLength(5);
+
+      let cursor: string | null = null;
+      const paged: typeof full.rows = [];
+      for (let guard = 0; guard < 20; guard++) {
+        const page = await listIssues(handle.db, { sort: { key: 'created_at', direction: 'desc' }, limit: 2, cursor });
+        paged.push(...page.rows);
+        cursor = page.nextCursor;
+        if (!cursor) break;
+      }
+      expect(paged.map((r) => r.issue.id).sort()).toEqual(full.rows.map((r) => r.issue.id).sort());
+      expect(paged).toHaveLength(5);
+    });
+
     it('a malformed cursor (garbage base64/JSON) falls back to the first page rather than throwing', async () => {
       const a = await makeIssue(handle.db, { updatedAt: new Date('2026-01-02T00:00:00Z') });
       const b = await makeIssue(handle.db, { updatedAt: new Date('2026-01-01T00:00:00Z') });
@@ -346,6 +391,32 @@ describe('issues-query-repo', () => {
         'base64url',
       );
       await expect(listIssues(handle.db, { cursor: bogusTimestampCursor })).resolves.toBeDefined();
+    });
+
+    // P2 regression (round 3): the round-2 fix canonicalized a timestamp
+    // sortValue via `new Date(Date.parse(x)).toISOString()`, a no-op for ISO
+    // 8601 extended-year / year-0000 strings — both parse fine in JS and
+    // round-trip byte-for-byte, then blow up as a raw driver error at the
+    // `${value}::timestamptz` cast in castParam/keysetPredicate, instead of
+    // the "malformed cursor -> page 1" contract this was supposed to
+    // guarantee. Round-3 validates the exact canonical shape instead of
+    // canonicalizing, so these never reach the cast.
+    it('a cursor sortValue carrying an ISO extended-year or year-0000 timestamp falls back to the first page rather than throwing', async () => {
+      await makeIssue(handle.db);
+      const badTimestamps = [
+        '0000-01-01T00:00:00.000Z',
+        '+010000-01-01T00:00:00.000Z',
+        '+275760-09-13T00:00:00.000Z',
+        '2026-13-01T00:00:00.123456Z',
+        '2026-02-30T00:00:00.123456Z',
+      ];
+      for (const at of badTimestamps) {
+        const poisoned = Buffer.from(JSON.stringify([at, '11111111-1111-1111-1111-111111111111'])).toString('base64url');
+        await expect(
+          listIssues(handle.db, { cursor: poisoned, sort: { key: 'updated_at', direction: 'desc' } }),
+          `expected no throw for sortValue=${at}`,
+        ).resolves.toBeDefined();
+      }
     });
 
     it('limit is clamped to a sane bound and a non-numeric limit falls back to the default', async () => {

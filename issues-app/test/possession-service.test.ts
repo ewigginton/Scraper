@@ -11,7 +11,7 @@ import { eq } from 'drizzle-orm';
 import { recordPossession, PossessionServiceError } from '../lib/services/possession-service.ts';
 import { createIssue } from '../lib/services/issue-service.ts';
 import { IssueAuthorizationError } from '../lib/services/issue-authz.ts';
-import { auditEvents, domainEvents, holds, possessionRecords } from '../lib/db/schema.ts';
+import { auditEvents, domainEvents, holds, possessionRecords, tasks } from '../lib/db/schema.ts';
 import { closeTestDb, createTestDb, type TestDbHandle } from './helpers/pglite.ts';
 import { futureDate, makePerson, makeProperty } from './helpers/fixtures.ts';
 
@@ -230,5 +230,37 @@ describe('possession-service: recordPossession', () => {
     const activeHolds = await handle.db.select().from(holds).where(eq(holds.propertyRefId, property.id));
     const occupancyHold = activeHolds.find((h) => h.holdType === 'occupancy' && h.issueId === issueA.id);
     expect(occupancyHold?.releasedAt).toBeNull();
+  });
+
+  it('ROUND-2 REGRESSION (P2): the "Verify possession/vacancy before release" follow-up due date uses the business-local calendar day of observedAt, not the UTC calendar day', async () => {
+    const { BUSINESS_TZ, businessTodayIso } = await import('../lib/date/business-today.ts');
+    if (BUSINESS_TZ !== 'America/Chicago') return; // this repro is pinned to the default business timezone
+
+    const { issue } = await baseIssue();
+
+    // 2026-08-05T02:00:00Z is 2026-08-04 21:00 in America/Chicago (UTC-5,
+    // daylight time in August) — the UTC calendar day has already rolled to
+    // Aug 5th, but the business-local calendar day is still Aug 4th.
+    const observedAt = new Date('2026-08-05T02:00:00.000Z');
+    // Sanity check: prove this instant really does straddle the UTC
+    // boundary, i.e. the pre-fix `.toISOString().slice(0, 10)` pattern
+    // would have derived the WRONG (one day late) due date.
+    expect(observedAt.toISOString().slice(0, 10)).toBe('2026-08-05');
+    expect(businessTodayIso(observedAt)).toBe('2026-08-04');
+
+    await recordPossession(handle.db, {
+      issueId: issue.id,
+      possessionStatus: 'occupied_or_suspected',
+      observedAt,
+      actorExternalId: 'coordinator-a',
+      actorRoles: ['coordinator'],
+    });
+
+    const followUps = await handle.db.select().from(tasks).where(eq(tasks.issueId, issue.id));
+    const verifyTask = followUps.find((t) => t.title === 'Verify possession/vacancy before release');
+    expect(verifyTask).toBeDefined();
+    // OCCUPANCY_REVIEW_DAYS is 3: business-local Aug 4 + 3 days = Aug 7.
+    // BEFORE the fix, the UTC-derived Aug 5 + 3 days = Aug 8 (one day late).
+    expect(verifyTask?.dueDate).toBe('2026-08-07');
   });
 });

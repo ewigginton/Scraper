@@ -25,6 +25,7 @@ import { applyHold, releaseHold } from './hold-service.ts';
 import { createFollowUp } from './task-service.ts';
 import * as holdsRepo from '../repositories/holds-repo.ts';
 import { assertIssueAuthorized, RELEASE_GATE_FACT_ROLES } from './issue-authz.ts';
+import { businessTodayIso } from '../date/business-today.ts';
 
 /**
  * Possession statuses that satisfy the "vacancy/possession resolved"
@@ -197,7 +198,17 @@ export async function recordPossession(tx: DbHandle, input: RecordPossessionInpu
         title: 'Verify possession/vacancy before release',
         description: `Possession observation recorded as "${input.possessionStatus.replace(/_/g, ' ')}"; verify and clear before this property can release (spec §29.6).`,
         priority: 'urgent',
-        dueDate: addDaysIso(observedAt.toISOString().slice(0, 10), OCCUPANCY_REVIEW_DAYS),
+        // ROUND-2 FIX (P2): this used to derive the due date from
+        // `observedAt.toISOString().slice(0, 10)` — the UTC calendar day —
+        // which is exactly the pattern lib/date/business-today.ts's own
+        // header names as the bug it exists to eliminate. For roughly a
+        // quarter of every day (US timezones, evening observations), the
+        // UTC day is already tomorrow relative to the business's local
+        // calendar day, silently misdating this urgent release-gating
+        // verification task a day late. businessTodayIso(observedAt)
+        // resolves the correct business-local calendar day for this
+        // observation's instant, matching every other due-date call site.
+        dueDate: addDaysIso(businessTodayIso(observedAt), OCCUPANCY_REVIEW_DAYS),
         actorId: input.actorId ?? null,
         actorExternalId: input.actorExternalId ?? null,
         actorRole: input.actorRole ?? null,

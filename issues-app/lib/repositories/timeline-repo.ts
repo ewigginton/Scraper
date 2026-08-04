@@ -45,11 +45,11 @@
  *    re-trim the same batch next time — is the correct fix.
  */
 
-import { and, desc, eq, gte, inArray, lte, or, sql, type SQL } from 'drizzle-orm';
+import { and, desc, eq, getTableColumns, gte, inArray, lte, or, sql, type SQL } from 'drizzle-orm';
 import type { DbHandle } from './db-handle.ts';
 import { auditEvents, holds, issuePeople, notices, phaseInstances, tasks } from '../db/schema.ts';
 import * as commsRepo from './comms-repo.ts';
-import { clampLimit, decodeCursor as decodeSimpleCursor, encodeCursor as encodeSimpleCursor } from './keyset-cursor.ts';
+import { clampLimit, cursorTimestampExpr, decodeCursor as decodeSimpleCursor, encodeCursor as encodeSimpleCursor } from './keyset-cursor.ts';
 import { isUuid, sanitizeText, sanitizeUuidArray } from './id-guard.ts';
 
 // ---------------------------------------------------------------------
@@ -69,6 +69,23 @@ export interface TimelineEntry {
   sourceId: string;
   /** True when this entry is ALSO linked to a DIFFERENT issue/matter than the one being viewed (spec §29.1). Only ever set on 'communication' entries — the only source that can be cross-linked today. */
   crossMatter?: boolean;
+  /**
+   * The underlying audit_events row's OWN primary key — set ONLY on 'audit'
+   * kind entries, undefined for every other kind. Deliberately distinct
+   * from `sourceId`, which for 'audit' entries is the AUDITED OBJECT's id
+   * (issue/task/hold/etc — see auditEntryFrom), not this row's own id: two
+   * different audit_events rows about the same object (routine — one
+   * command commonly writes several audit rows for the same issue in one
+   * transaction) share one `sourceId`, so `sourceId` alone cannot tell them
+   * apart. `tieOf` below folds this in as the tie-break disambiguator for
+   * exactly that reason — without it, several same-object/same-kind audit
+   * rows sharing one microsecond-precision `occurred_at` (the P1 fix's
+   * routine production trigger: `now()` is the transaction timestamp) would
+   * collapse onto one identical `{at, tie}` position, and the strict `tie >
+   * cursor.tie` comparison in isPastCursor would permanently exclude every
+   * one of them past the first page.
+   */
+  auditEventId?: string;
   /**
    * Raw audit_events.before/after jsonb (Wave 2b "readable change-log feed",
    * spec §29.2/§31.4) — undefined for every non-'audit' kind, and for 'audit'
@@ -151,27 +168,55 @@ function inDateRange(at: Date, filters: NormalizedFilters): boolean {
   return true;
 }
 
-/** Total order every source-fetch, sort, and cursor comparison in this file agrees on: newest `at` first; ties broken ascending by `sourceTable:sourceId:kind`. */
+/**
+ * Total order every source-fetch, sort, and cursor comparison in this file
+ * agrees on: newest `at` first; ties broken by
+ * `sourceTable:sourceId:kind`, PLUS `auditEventId` for 'audit' entries
+ * (see its doc comment on TimelineEntry) — omitted for every other kind so
+ * this produces byte-identical strings to before for them.
+ */
 function tieOf(e: TimelineEntry): string {
-  return `${e.sourceTable}:${e.sourceId}:${e.kind}`;
+  const base = `${e.sourceTable}:${e.sourceId}:${e.kind}`;
+  return e.kind === 'audit' && e.auditEventId ? `${base}:${e.auditEventId}` : base;
 }
 
+/**
+ * P1 regression fix (round 3, discovered writing this finding's own
+ * regression test): ties are broken DESCENDING by `tieOf`, not ascending.
+ * This has to match the tie-break direction every paginated source's SQL
+ * query actually fetches rows in — `ORDER BY occurred_at DESC, id DESC` in
+ * comms-repo.ts/fetchIssueObjectGraphAuditBatch/fetchPersonObjectAuditBatch
+ * — because `tieOf` embeds that same row id (comms: the communication
+ * event's own id via sourceId; audit: auditEventId). An ascending tie-break
+ * here was silently INCOMPATIBLE with that descending SQL order: once this
+ * function's tie-break emitted the row with the lexicographically SMALLEST
+ * id from a same-timestamp group, the combined cursor's `tie` watermark
+ * became that smallest id — and isPastCursor's `tieOf(e) > cursor.tie`
+ * check then permanently excluded every row with a SMALLER id in that same
+ * group, even though the SQL side hadn't delivered them yet (it fetches
+ * LARGEST id first). Reproduced directly: 5 audit rows sharing one
+ * microsecond-precision occurred_at, paginated at limit 2, silently lost 3
+ * of the 5. Descending tie-break (matching the SQL order) closes this for
+ * every paginated source uniformly — the "small" sources (phase/notice/
+ * issue_link) have no SQL-side pagination to match, so the direction is a
+ * free (and now consistent) choice for them.
+ */
 function compareEntries(a: TimelineEntry, b: TimelineEntry): number {
   const byTime = b.at.getTime() - a.at.getTime();
   if (byTime !== 0) return byTime;
   const ta = tieOf(a);
   const tb = tieOf(b);
-  return ta < tb ? -1 : ta > tb ? 1 : 0;
+  return ta < tb ? 1 : ta > tb ? -1 : 0;
 }
 
-/** True when `e` belongs strictly AFTER `{at, tie}` in the total order above (i.e. is eligible for the next page). No cursor means every entry qualifies (page 1). */
+/** True when `e` belongs strictly AFTER `{at, tie}` in the total order above (i.e. is eligible for the next page). No cursor means every entry qualifies (page 1). Tie direction matches compareEntries's descending tie-break (see its doc comment) — "after" in descending order means a STRICTLY SMALLER tie value. */
 function isPastCursor(e: TimelineEntry, cursor: { at: string; tie: string } | null): boolean {
   if (!cursor) return true;
   const cursorAtMs = Date.parse(cursor.at);
   const eAtMs = e.at.getTime();
   if (eAtMs < cursorAtMs) return true;
   if (eAtMs > cursorAtMs) return false;
-  return tieOf(e) > cursor.tie;
+  return tieOf(e) < cursor.tie;
 }
 
 // ---------------------------------------------------------------------
@@ -219,9 +264,17 @@ function decodeCombinedCursor(raw: string | null | undefined): CombinedCursorPay
  * a plain [at, id] pair, same shape as this module's `comms`/`audit`
  * per-source cursor fields, so keyset-cursor.ts's encode/decode is reused
  * directly for both (audit_events cursor built the same way below).
+ *
+ * `cursorAt` is Postgres's own microsecond-precision rendering of
+ * occurred_at (keyset-cursor.cursorTimestampExpr, selected alongside the
+ * row by both audit-batch fetchers below) — P1 FIX (round 3): the previous
+ * `row.occurredAt.toISOString()` truncated to millisecond resolution and
+ * silently dropped audit rows sharing a sub-millisecond-precision
+ * occurred_at, which is the routine case (one command's several audit
+ * writes share the transaction's `now()`).
  */
-function auditCursorFor(row: { occurredAt: Date; id: string }): string {
-  return encodeSimpleCursor(row.occurredAt.toISOString(), row.id);
+function auditCursorFor(row: { cursorAt: string; id: string }): string {
+  return encodeSimpleCursor(row.cursorAt, row.id);
 }
 
 // ---------------------------------------------------------------------
@@ -398,6 +451,7 @@ function auditEntryFrom(row: typeof auditEvents.$inferSelect): TimelineEntry {
     actor: row.actorExternalId ?? row.actorId ?? 'unattributed',
     sourceTable: row.objectTable,
     sourceId: row.objectId,
+    auditEventId: row.id,
     before: row.before,
     after: row.after,
   };
@@ -425,7 +479,7 @@ async function fetchIssueObjectGraphAuditBatch(db: DbHandle, issueId: string, fi
   if (decoded && isUuid(decoded.tie)) conditions.push(auditKeysetBefore(decoded));
 
   const rows = await db
-    .select()
+    .select({ ...getTableColumns(auditEvents), cursorAt: cursorTimestampExpr(auditEvents.occurredAt) })
     .from(auditEvents)
     .where(and(...conditions))
     .orderBy(desc(auditEvents.occurredAt), desc(auditEvents.id))
@@ -630,7 +684,7 @@ async function fetchPersonObjectAuditBatch(db: DbHandle, personRefId: string, fi
   if (decoded && isUuid(decoded.tie)) conditions.push(auditKeysetBefore(decoded));
 
   const rows = await db
-    .select()
+    .select({ ...getTableColumns(auditEvents), cursorAt: cursorTimestampExpr(auditEvents.occurredAt) })
     .from(auditEvents)
     .where(and(...conditions))
     .orderBy(desc(auditEvents.occurredAt), desc(auditEvents.id))

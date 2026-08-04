@@ -17,7 +17,7 @@
  * No business rules live here (DESIGN.md §6) — just reads.
  */
 
-import { and, desc, eq, gte, inArray, lte, or, sql, type SQL } from 'drizzle-orm';
+import { and, desc, eq, getTableColumns, gte, inArray, lte, or, sql, type SQL } from 'drizzle-orm';
 import type { DbHandle } from './db-handle.ts';
 import {
   communicationEvents,
@@ -28,7 +28,7 @@ import {
   type CommunicationDirection,
   type CommunicationEvent,
 } from '../db/schema.ts';
-import { clampLimit, decodeCursor, encodeCursor } from './keyset-cursor.ts';
+import { clampLimit, cursorTimestampExpr, decodeCursor, encodeCursor } from './keyset-cursor.ts';
 import { isUuid, sanitizeText, sanitizeUuidArray } from './id-guard.ts';
 
 // ---------------------------------------------------------------------
@@ -163,7 +163,7 @@ export async function listForPerson(db: DbHandle, params: ListForPersonParams): 
   if (cursor) conditions.push(keysetPredicate(cursor));
 
   const rows = await db
-    .select()
+    .select({ ...getTableColumns(communicationEvents), cursorAt: cursorTimestampExpr(communicationEvents.occurredAt) })
     .from(communicationEvents)
     .where(and(...conditions))
     .orderBy(desc(communicationEvents.occurredAt), desc(communicationEvents.id))
@@ -172,7 +172,13 @@ export async function listForPerson(db: DbHandle, params: ListForPersonParams): 
   const hasMore = rows.length > limit;
   const page = hasMore ? rows.slice(0, limit) : rows;
   const last = page[page.length - 1];
-  const nextCursor = hasMore && last ? encodeCursor(last.occurredAt.toISOString(), last.id) : null;
+  // P1 FIX (round 3): cursorAt is Postgres's own microsecond-precision
+  // rendering of occurred_at (see keyset-cursor.cursorTimestampExpr's doc
+  // comment) — NOT `last.occurredAt.toISOString()`, which truncates to
+  // millisecond resolution and silently drops rows sharing a
+  // sub-millisecond-precision occurred_at (routine: comm rows written in
+  // one transaction share `now()`).
+  const nextCursor = hasMore && last ? encodeCursor(last.cursorAt, last.id) : null;
 
   return { rows: page, nextCursor };
 }
@@ -293,7 +299,7 @@ export async function listForIssue(db: DbHandle, params: ListForIssueParams): Pr
   if (cursor) conditions.push(keysetPredicate(cursor));
 
   const rows = await db
-    .select()
+    .select({ ...getTableColumns(communicationEvents), cursorAt: cursorTimestampExpr(communicationEvents.occurredAt) })
     .from(communicationEvents)
     .where(and(...conditions))
     .orderBy(desc(communicationEvents.occurredAt), desc(communicationEvents.id))
@@ -302,7 +308,8 @@ export async function listForIssue(db: DbHandle, params: ListForIssueParams): Pr
   const hasMore = rows.length > limit;
   const page = hasMore ? rows.slice(0, limit) : rows;
   const last = page[page.length - 1];
-  const nextCursor = hasMore && last ? encodeCursor(last.occurredAt.toISOString(), last.id) : null;
+  // P1 FIX (round 3): see listForPerson above — cursorAt, not toISOString().
+  const nextCursor = hasMore && last ? encodeCursor(last.cursorAt, last.id) : null;
 
   if (page.length === 0) {
     return { rows: [], nextCursor, linkedPersonCount: linkedPersonIds.length };
