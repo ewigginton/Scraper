@@ -121,11 +121,22 @@ export async function agingBucketsOfOpenIssues(db: DbHandle, today?: string): Pr
     when ${ageDays} <= 90 then '31-90'
     else '90+'
   end`;
+  // GROUP BY the output column's ordinal position (1), not a re-emitted copy
+  // of bucketExpr: Drizzle binds `${todayValue}` as a fresh parameter each
+  // place a `sql` fragment is interpolated, so a second inline copy of
+  // bucketExpr in the GROUP BY clause parses to a different parameter node
+  // than the SELECT list's copy even though both bind the same value —
+  // Postgres's grouped-column matching compares parsed expressions, not
+  // resolved values, so it fails with "must appear in GROUP BY" on that
+  // structurally-different second copy. Ordinal GROUP BY (standard SQL)
+  // sidesteps the duplication entirely: the DB re-resolves "1" against the
+  // already-computed SELECT list's first column instead of re-parsing a
+  // second textual copy of the expression.
   const rows = await db
     .select({ key: bucketExpr, count: count() })
     .from(issues)
     .where(sql`${issues.lifecycleStatus} <> 'closed'`)
-    .groupBy(bucketExpr);
+    .groupBy(sql`1`);
 
   const result: Record<AgingBucketKey, number> = { '0-7': 0, '8-30': 0, '31-90': 0, '90+': 0 };
   for (const row of rows) {

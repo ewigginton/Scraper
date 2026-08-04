@@ -83,7 +83,7 @@ export async function noActionableTaskQueue(db: DbHandle, params: ExceptionQueue
       and t.due_date >= ${today}
   )`;
 
-  return countAndListByAge(db, condition, issues.createdAt, today, limit);
+  return countAndListByAge(db, condition, sql`${issues.createdAt}`, today, limit);
 }
 
 // ---------------------------------------------------------------------
@@ -103,7 +103,7 @@ export async function missingOrShortSummaryQueue(
   const condition = sql`${issues.lifecycleStatus} not in ('closed', 'passive_wait')
     and length(trim(${issues.summary})) < ${SHORT_SUMMARY_MIN_LEN}`;
 
-  return countAndListByAge(db, condition, issues.createdAt, today, limit);
+  return countAndListByAge(db, condition, sql`${issues.createdAt}`, today, limit);
 }
 
 // ---------------------------------------------------------------------
