@@ -126,7 +126,7 @@ test('index.js forces skip-price-check and skip-review in midday mode', () => {
   assert.match(src, /SCRAPER_MIDDAY/);
   assert.match(src, /skipPriceCheck\s*=.*\|\|\s*midday/);
   assert.match(src, /skipReview\s*=.*\|\|\s*midday/);
-  assert.match(src, /\{\s*midday\s*\}/, 'sendScraperEmail must be called with the midday flag');
+  assert.match(src, /\{\s*midday\b/, 'sendScraperEmail must be called with the midday flag');
 });
 
 test('scripts/run-scraper.sh skips evidence capture in midday mode', () => {

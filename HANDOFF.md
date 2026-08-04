@@ -1,6 +1,6 @@
 # Session Handoff — CCL Land Scraper
 
-Last updated: **Aug 4, 2026, ~2:30 PM Central** (update this stamp when you edit).
+Last updated: **Aug 4, 2026, ~7:30 PM Central** (update this stamp when you edit).
 Read CLAUDE.md first — it has the standing working rules (workflow orchestration,
 model ladder, hard lines) and the Source outage playbook. This file is the
 *live status*: what's in flight right now and why.
@@ -37,9 +37,11 @@ the Mac or come from `data/source-health/` evidence captures.**
   else scraper-shaped gets "y"; (2) commit `c242715` added a nightly
   launchd/cron audit that names any leftover/drifted job in the report email
   until it's removed.
-- **Lead-quality fixes IN FLIGHT** (workflow `lead-quality-fixes`,
-  run `wf_534600b7-e7f`), from Emma's reports of bad leads (all LandWatch
-  pids 427203701, 427406387, 426688209):
+- **Lead-quality fixes LANDED** (3 workflow rounds + inline round 3 after the
+  subagent harness broke; verified by adversarial-Opus attack harnesses rerun
+  to green, full suite 378 pass), from Emma's reports of bad leads (all
+  LandWatch pids 427203701, 427406387, 426688209 — root cause: they entered
+  via Listing Intake, which bypassed every filter):
   1. Under-contract/sale-pending/sold listings must be skipped at scrape time
      (itemized in the email) — today they become leads.
   2. `.24 acres` was parsed as `24` acres (leading-decimal bug) — corrupts
@@ -51,8 +53,17 @@ the Mac or come from `data/source-health/` evidence captures.**
   5. New nightly "lead recheck": live re-fetch of `New Lead`/`Emma Review`
      records on the Mac, flagging now-under-contract and acreage-mismatch
      leads in the email. REPORT ONLY — only Emma moves stages, ever.
-  Verification: adversarial Opus lane (REFUTE mode) per the CLAUDE.md ladder,
-  because acreage feeds price math.
+  6. Intake now enforces the same rules: under-contract/sold or below-floor
+     submissions are rejected with Status `Failed` and a plain-English
+     Result; missing acreage still creates-with-warning. Detection runs on
+     the RAW page title (cleanTitle strips "SOLD - " prefixes). Sold is
+     status-anchored (`SOLD_PATTERNS` in lib/availability.js) so comp prose
+     ("tracts have sold for...") never matches. Recheck treats challenge
+     pages, CoStar error shells, AND content-free app shells as fetch
+     failures — never "looks live".
+  Verified per the CLAUDE.md ladder by adversarial Opus REFUTE lanes over 3
+  rounds; the attack harnesses live in the session scratchpad (attack-*.js)
+  and all rerun green.
 - **Job-audit verify lane** (workflow `wf_d21195ee-d1d`) was still running
   when this was written — it proves the audit catches a planted leftover job.
   Its implementation is already committed (`c242715`, 330 tests green).

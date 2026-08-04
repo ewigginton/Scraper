@@ -76,13 +76,14 @@ See `.env.example` for the full list.
 ## Running
 
 - Install deps: `npm install --silent`
-- Full nightly run (scrape + price check + review, ONE consolidated email): `node index.js`
-- Dry run (scrape and report without Airtable writes; review is skipped): `node index.js --dry-run`
+- Full nightly run (scrape + price check + review + lead recheck, ONE consolidated email): `node index.js`
+- Dry run (scrape and report without Airtable writes; review and lead recheck are skipped): `node index.js --dry-run`
 - Targeted dry run: `SCRAPER_TARGET_COUNTIES="Wayne|KY,Pittsburg|OK,Shannon|MO" SCRAPER_MAX_PAGE=1 node index.js --dry-run --skip-price-check`
 - Review leads only (manual; sends its own review email): `node review-leads.js`
 - Price check only: `node index.js --price-check-only`
 - Scrape without price check: `node index.js --skip-price-check`
 - Scrape without review: `node index.js --skip-review`
+- Scrape without lead recheck: `node index.js --skip-lead-recheck`
 
 ## GitHub Actions
 
@@ -142,8 +143,22 @@ in `lib/airtable.js` — never hardcode field names elsewhere:
   failure → Status `Retry` (re-attempted the next night); second failure →
   `Failed` (a human sets Status back to `New` to force another try). Results
   and failures appear in the consolidated email. Manual run: `npm run intake`
+- Lead recheck (`lib/lead-recheck.js`): nightly, production-Mac-only step that
+  re-fetches the listing URL of every `New Lead` / `Emma Review` record
+  (browser fallback applies — the cloud can't reach LandWatch), capped at 100
+  a night (oldest-unchecked-first, tracked in `data/lead-recheck/state.json`,
+  not on the Airtable record). REPORT ONLY — it never changes Stage or writes
+  any Airtable field; it lists leads that now match an availability phrase
+  (under contract/sold/off-market) or whose live acreage disagrees with the
+  record (>=10% relative difference or a crossing of the 40-acre floor) in a
+  `LEAD RECHECK` section of the consolidated email. Skipped on `--dry-run` and
+  midday runs (live-fetch, production-only, same as review); disable with
+  `--skip-lead-recheck` / `SKIP_LEAD_RECHECK=true`
 - County targets loaded dynamically from Airtable `County` table using `CPA Target`
-- Filtering: accepts listings within 20% of CPA target, watches 20-30% over, rejects >30%
+- Filtering: accepts listings within 20% of CPA target, watches 20-30% over, rejects >30%;
+  a hard 40-acre floor (`SCRAPER_MIN_ACRES`) and an under-contract/pending/off-market skip
+  both apply after detail enrichment, regardless of source URL filter params, and are each
+  itemized in the nightly report (`lib/scraper.js`, `lib/availability.js`)
 - Deduplication: URL match + property fingerprint (county/state/acres/price hash) + location/price-tolerance match; the dedup index includes `Not Interested` records so rejected leads are not re-created
 - Results written to the Airtable `Land` table
 - Failed Airtable writes are queued in `data/failed-writes/` and replayed automatically at the start of the next scrape (processed files move to `data/failed-writes/done/`)
