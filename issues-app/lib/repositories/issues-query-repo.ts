@@ -312,7 +312,21 @@ export function decodeCursor(raw: string | null | undefined): DecodedCursor | nu
  */
 function validCursorForSort(cursor: DecodedCursor | null, spec: SortColumnSpec): DecodedCursor | null {
   if (!cursor) return null;
-  if (spec.valueType === 'timestamp' && Number.isNaN(Date.parse(cursor.sortValue))) return null;
+  if (spec.valueType === 'timestamp') {
+    // ROUND-2 FIX (P2): Date.parse() accepts strings Postgres's timestamptz
+    // parser rejects (e.g. RFC-2822-with-trailing-zone-name strings), so a
+    // crafted `after=` cursor could pass this guard and then throw a raw
+    // driver error at the `${value}::timestamptz` cast in castParam/
+    // keysetPredicate below, instead of the safe "malformed cursor -> page
+    // 1" fallback this function promises. Canonicalize to a real ISO string
+    // rather than merely checking parseability: every legitimate cursor was
+    // minted by extractSortValue's `.toISOString()` above, so re-deriving
+    // the canonical ISO string never changes a valid cursor's value, and a
+    // canonical ISO string always parses in Postgres.
+    const ms = Date.parse(cursor.sortValue);
+    if (Number.isNaN(ms)) return null;
+    return { ...cursor, sortValue: new Date(ms).toISOString() };
+  }
   return cursor;
 }
 

@@ -26,9 +26,27 @@ import styles from './exceptions.module.css';
 
 export const metadata = { title: 'Exceptions — CCL Hub Issues' };
 
+/**
+ * ROUND-2 FIX (P1): this is one of only two routes in app/ with no dynamic
+ * API (params/searchParams) to force per-request rendering, so Next.js
+ * silently static-prerendered it at BUILD time — baking a build-time
+ * "Database not configured" card into permanent HTML when DATABASE_URL is
+ * unset at build, or hard-failing the build when it IS set (because
+ * getCurrentUser()'s production guard threw during prerender, having never
+ * actually been reached by real traffic). Forcing dynamic rendering closes
+ * this for good: request-time render, request-time auth, request-time RLS.
+ */
+export const dynamic = 'force-dynamic';
+
 const ROW_LIMIT = 25;
 
 export default async function ExceptionsPage() {
+  // ROUND-2 FIX (P1): getCurrentUser() runs BEFORE the tryGetDb() early
+  // return so the auth-stub's production guard can never be skipped just
+  // because DATABASE_URL happens to be unset/unreachable — a misconfigured
+  // production deployment fails loudly here instead of quietly rendering
+  // "Database not configured" while never having checked who's asking.
+  const user = await getCurrentUser();
   const db = tryGetDb();
 
   if (!db) {
@@ -39,8 +57,6 @@ export default async function ExceptionsPage() {
       </>
     );
   }
-
-  const user = await getCurrentUser();
 
   const data = await withActor(db, { actorId: user.id, roles: user.roles }, async (tx) => {
     const [noAction, shortSummary, readyBlocked, stale, tasksOpen] = await Promise.all([

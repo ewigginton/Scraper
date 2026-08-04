@@ -36,9 +36,23 @@ export function decodeCursor(raw: string | null | undefined): DecodedCursor | nu
     const json = Buffer.from(raw, 'base64url').toString('utf8');
     const parsed: unknown = JSON.parse(json);
     if (!Array.isArray(parsed) || parsed.length !== 2) return null;
-    const [at, tie] = parsed as [unknown, unknown];
-    if (typeof at !== 'string' || typeof tie !== 'string') return null;
-    if (Number.isNaN(Date.parse(at))) return null;
+    const [rawAt, tie] = parsed as [unknown, unknown];
+    if (typeof rawAt !== 'string' || typeof tie !== 'string') return null;
+    // ROUND-2 FIX (P2): Date.parse() accepts far more formats than
+    // Postgres's timestamptz parser (e.g. RFC-2822-with-trailing-zone-name
+    // strings like "Sat, 01 Jan 2024 00:00:00 GMT+0000 (Coordinated
+    // Universal Time)"). A cursor carrying one of those used to sail past
+    // this guard and then blow up as a raw driver error at the `::timestamptz`
+    // cast in comms-repo.ts/audit-metrics-repo.ts/timeline-repo.ts instead
+    // of the "malformed cursor -> page 1" contract this function promises.
+    // Canonicalize to a real ISO string instead of merely checking
+    // parseability: every legitimate cursor was minted by encodeCursor from
+    // `.toISOString()` in the first place (see the callers in comms-repo.ts
+    // etc.), so re-deriving the canonical ISO string never changes a valid
+    // cursor's value, and a canonical ISO string always parses in Postgres.
+    const atMs = Date.parse(rawAt);
+    if (Number.isNaN(atMs)) return null;
+    const at = new Date(atMs).toISOString();
     if (tie.length === 0 || tie.length > 200) return null;
     // INJECTION FUZZ finding (round 2): `tie` (and, belt-and-braces, `at`)
     // can end up bound as a raw text parameter downstream (tie-break
