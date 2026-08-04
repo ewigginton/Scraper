@@ -5,7 +5,7 @@
  * lib/services/*, not this module (DESIGN.md §6).
  */
 
-import { eq } from 'drizzle-orm';
+import { asc, eq, inArray } from 'drizzle-orm';
 import type { DbHandle } from './db-handle.ts';
 import {
   holds,
@@ -23,6 +23,9 @@ import {
   issueCycles,
 } from '../db/schema.ts';
 
+/** Bound on a batch id-lookup, so this can never become an unbounded read regardless of how many ids a caller passes. */
+const MANY_BY_IDS_LIMIT = 1000;
+
 export interface IssuePersonWithName extends IssuePerson {
   /** person_refs.display_name of the linked person; null if the ref row is gone. */
   personDisplayName: string | null;
@@ -32,6 +35,16 @@ export interface IssueWithCaseData extends Issue {
   people: IssuePersonWithName[];
   holds: Hold[];
   tasks: Task[];
+}
+
+/** Batch issues lookup by id, for display-field joins (e.g. the personal work screen). Bounded via MANY_BY_IDS_LIMIT, never an unbounded read. */
+export async function getManyByIds(db: DbHandle, ids: string[]): Promise<Issue[]> {
+  if (ids.length === 0) return [];
+  return db
+    .select()
+    .from(issues)
+    .where(inArray(issues.id, ids.slice(0, MANY_BY_IDS_LIMIT)))
+    .orderBy(asc(issues.id));
 }
 
 /** Insert a new issue row and return it. */

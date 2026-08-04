@@ -872,3 +872,298 @@ table.n-table {
   border-radius: 999px;
   background-color: var(--n-hover);
 }
+
+/* ==========================================================================
+   All Issues database view (/issues) — additive on top of the shell/table/
+   pill primitives above. See docs/notion-redesign.md "The All Issues
+   database view".
+   ========================================================================== */
+
+/* Sidebar: saved views list row (nav link + delete button side by side). */
+
+.n-saved-view-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.n-saved-view-row .n-nav-item {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.n-saved-view-form {
+  margin: 0;
+  flex: 0 0 auto;
+}
+
+.n-saved-view-delete {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: var(--n-radius);
+  background: transparent;
+  color: var(--n-ink-muted);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.n-saved-view-delete:hover {
+  background-color: var(--n-hover);
+  color: var(--n-ink);
+}
+
+.n-nav-empty {
+  color: var(--n-ink-muted);
+  font-size: 12px;
+  cursor: default;
+}
+
+.n-nav-empty:hover {
+  background-color: transparent;
+}
+
+/* Columns menu popover (a plain <details>/<summary> — no client JS). */
+
+.n-popover-wrap {
+  position: relative;
+  display: inline-block;
+}
+
+.n-popover-wrap > summary {
+  list-style: none;
+}
+
+.n-popover-wrap > summary::-webkit-details-marker {
+  display: none;
+}
+
+.n-popover {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 20;
+  min-width: 12rem;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: var(--space-sm);
+  background-color: var(--n-bg);
+  border: 1px solid var(--n-border);
+  border-radius: var(--n-radius);
+  box-shadow: var(--n-shadow-popover);
+}
+
+.n-popover label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 0;
+  font-weight: 400;
+  font-size: var(--n-font-size);
+  cursor: pointer;
+}
+
+.n-popover input[type='checkbox'] {
+  width: auto;
+}
+
+/* Filter bar controls sized to their content rather than the default
+   full-width form-control styling (globals.css's `input/select { width:
+   100% }` is meant for stacked single-column forms, not an inline bar). */
+
+.n-filter-bar .n-select,
+.n-filter-bar .n-input {
+  width: auto;
+}
+
+.n-filter-bar select[multiple] {
+  min-width: 10rem;
+}
+
+.n-filter-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 400;
+  margin-bottom: 0;
+  white-space: nowrap;
+}
+
+.n-filter-checkbox input[type='checkbox'] {
+  width: auto;
+}
+
+.n-sort-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: inherit;
+}
+
+.n-sort-link:hover {
+  text-decoration: underline;
+}
+
+.n-group-section {
+  margin-bottom: var(--space-xl);
+}
+
+.n-group-section-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  margin-bottom: var(--space-sm);
+}
+
+/* Page header (title + subtitle above content) */
+
+.n-page-title {
+  margin-bottom: 2px;
+}
+
+.n-page-subtitle {
+  color: var(--n-ink-muted);
+  font-size: var(--n-font-size);
+  margin-bottom: var(--space-lg);
+}
+
+/* Warning / blocker card (case page: transition-blocked panel) */
+
+.n-warning-card {
+  border-color: var(--n-pill-orange-fg);
+  background-color: var(--n-pill-orange-bg);
+}
+
+.n-blocker-card {
+  border-color: var(--n-pill-red-fg);
+  background-color: var(--n-pill-red-bg);
+}
+
+.n-card-title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  font-weight: 600;
+  font-size: var(--n-font-size);
+  margin-bottom: var(--space-sm);
+  color: var(--n-ink);
+}
+
+.n-blocker-card .n-card-title {
+  color: var(--n-pill-red-fg);
+}
+
+.n-warning-card .n-card-title {
+  color: var(--n-pill-orange-fg);
+}
+
+.n-blocker-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+.n-blocker-row {
+  padding: var(--space-sm) var(--space-md);
+  background-color: var(--n-bg);
+  border: 1px solid var(--n-border);
+  border-radius: var(--n-radius);
+}
+
+.n-blocker-reason {
+  font-weight: 500;
+  color: var(--n-ink);
+  margin-bottom: 2px;
+  font-size: var(--n-font-size);
+}
+
+.n-blocker-meta {
+  font-size: 12px;
+  color: var(--n-ink-muted);
+}
+
+/* Pagination — "Load more" link */
+
+.n-load-more {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: var(--space-md);
+  font-size: var(--n-font-size);
+  color: var(--n-ink-muted);
+}
+
+.n-load-more:hover {
+  color: var(--n-ink);
+  text-decoration: underline;
+}
+
+/* Quiet Notion-style forms */
+
+.n-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-lg);
+}
+
+.n-form-section {
+  border: 1px solid var(--n-border);
+  border-radius: var(--n-radius);
+  padding: var(--space-md) var(--space-lg);
+  background-color: var(--n-bg);
+}
+
+.n-form-section-title {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--n-ink-muted);
+  margin-bottom: var(--space-md);
+}
+
+.n-field {
+  margin-bottom: var(--space-md);
+}
+
+.n-field:last-child {
+  margin-bottom: 0;
+}
+
+.n-field label {
+  font-size: var(--n-font-size);
+  font-weight: 500;
+  color: var(--n-ink);
+  margin-bottom: 4px;
+  display: block;
+}
+
+.n-field-hint {
+  font-size: 12px;
+  color: var(--n-ink-muted);
+  margin-top: 4px;
+}
+
+.n-field-error {
+  font-size: 12px;
+  color: var(--n-pill-red-fg);
+  margin-top: 4px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* Property-grid value rows that hold multiple pills side by side */
+
+.n-property-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-xs);
+}

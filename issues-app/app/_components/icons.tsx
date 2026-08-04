@@ -132,3 +132,98 @@ export function SidebarCollapseIcon(props: IconProps) {
     </IconBase>
   );
 }
+
+// Properties-grid icons (case header, docs/notion-redesign.md "Case page
+// header") — one per property row (Property, Type, Phase, Coordinator,
+// Priority, Restrictions, Next task, Lifecycle).
+
+export function PinIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="M8 14.5s4.5-4.2 4.5-7.8a4.5 4.5 0 0 0-9 0c0 3.6 4.5 7.8 4.5 7.8z" />
+      <circle cx="8" cy="6.7" r="1.6" />
+    </IconBase>
+  );
+}
+
+export function TagIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="M8.5 2.5h4a1 1 0 0 1 1 1v4L6.2 14.8a1 1 0 0 1-1.4 0L2.2 12.2a1 1 0 0 1 0-1.4z" />
+      <circle cx="10.6" cy="5.4" r="1" />
+    </IconBase>
+  );
+}
+
+export function FlowIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <circle cx="3.5" cy="4" r="1.5" />
+      <circle cx="12.5" cy="12" r="1.5" />
+      <path d="M3.5 5.5v2A2.5 2.5 0 0 0 6 10h1" />
+      <path d="M9.5 10h1a2.5 2.5 0 0 0 2-4" />
+    </IconBase>
+  );
+}
+
+export function PersonIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <circle cx="8" cy="5.2" r="2.4" />
+      <path d="M2.8 13.5a5.2 5.2 0 0 1 10.4 0" />
+    </IconBase>
+  );
+}
+
+export function FlagIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="M4 2.5v11" />
+      <path d="M4 3h7.5l-2 2.7 2 2.8H4z" />
+    </IconBase>
+  );
+}
+
+export function ShieldIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="M8 2.2 13 4v4c0 3.6-2.4 5.9-5 6.8-2.6-.9-5-3.2-5-6.8V4z" />
+    </IconBase>
+  );
+}
+
+export function CheckSquareIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <rect x="2.5" y="2.5" width="11" height="11" rx="1.5" />
+      <path d="M5 8.2 7.2 10.4 11.2 6" />
+    </IconBase>
+  );
+}
+
+export function ClockIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <circle cx="8" cy="8" r="5.5" />
+      <path d="M8 5v3.2l2.2 1.4" />
+    </IconBase>
+  );
+}
+
+export function ActivityIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="M2 8.5h2.6l1.4-4 2 7 1.4-3h4.6" />
+    </IconBase>
+  );
+}
+
+export function WarningIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="M8 2.5 14.5 13.5h-13z" />
+      <path d="M8 6.3v3.4" />
+      <circle cx="8" cy="11.6" r="0.15" fill="currentColor" />
+    </IconBase>
+  );
+}

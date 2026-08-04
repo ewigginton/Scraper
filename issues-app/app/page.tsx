@@ -3,6 +3,8 @@ import { tryGetDb } from './_lib/db.ts';
 import { withActor } from '../lib/db/actor-context.ts';
 import { buildWorkScreen, WORK_QUEUE_LABELS, type WorkQueueKey, type WorkRow } from './_lib/work-screen.ts';
 import { classifyDueDate, formatDate, todayIso } from './_lib/dates.ts';
+import { priorityPillColor, humanize } from './_lib/pills.ts';
+import { Pill } from './_components/Pill.tsx';
 import { DatabaseUnavailable, EmptyQueue } from './_components/EmptyState.tsx';
 import { completeTaskAction, rescheduleTaskAction } from './actions.ts';
 
@@ -51,34 +53,37 @@ export default async function Home({ searchParams }: PageProps) {
   const data = await withActor(db, { actorId: user.id, roles: user.roles }, (tx) =>
     buildWorkScreen(tx, { assigneeId: user.id, queues: user.queues, upcomingWithinDays: 14, today: todayIso() }),
   );
-  const totalCount = QUEUE_ORDER.reduce((sum, key) => sum + data.queues[key].length, 0);
+  // Real per-queue totals (data.counts), not data.queues[key].length — each
+  // queue's rows are capped at 25 (docs/notion-redesign.md "My Work at
+  // volume"), so the row count alone would understate a queue past 25.
+  const totalCount = QUEUE_ORDER.reduce((sum, key) => sum + data.counts[key], 0);
 
   return (
     <>
       <div className="flex justify-between items-center" style={{ marginBottom: 'var(--space-lg)' }}>
         <div>
-          <h1>My Work</h1>
-          <p className="muted">
+          <h1 className="n-page-title">My Work</h1>
+          <p className="n-page-subtitle" style={{ marginBottom: 0 }}>
             Signed in as {user.name} ({user.roles.join(', ')}) — {totalCount} item{totalCount === 1 ? '' : 's'} across all queues.
           </p>
         </div>
       </div>
 
       {workError && (
-        <div className="card banner-error" role="alert" style={{ marginBottom: 'var(--space-lg)' }}>
-          {workError}
+        <div className="n-card n-blocker-card" role="alert" style={{ marginBottom: 'var(--space-lg)' }}>
+          <div className="n-blocker-reason">{workError}</div>
         </div>
       )}
 
       {QUEUE_ORDER.map((key) => (
         <section key={key} className="queue-section" aria-labelledby={`queue-${key}`}>
-          <h2 id={`queue-${key}`}>
-            {WORK_QUEUE_LABELS[key]} <span className="count-badge">{data.queues[key].length}</span>
+          <h2 id={`queue-${key}`} className="flex items-center gap-sm">
+            {WORK_QUEUE_LABELS[key]} <span className="n-count-chip">{data.counts[key]}</span>
           </h2>
           {data.queues[key].length === 0 ? (
             <EmptyQueue label={WORK_QUEUE_LABELS[key]} />
           ) : (
-            <div className="table-scroll">
+            <div className="n-table-wrap">
               <WorkTable rows={data.queues[key]} />
             </div>
           )}
@@ -90,7 +95,7 @@ export default async function Home({ searchParams }: PageProps) {
 
 function WorkTable({ rows }: { rows: WorkRow[] }) {
   return (
-    <table>
+    <table className="n-table">
       <thead>
         <tr>
           <th scope="col">Property / State</th>
@@ -121,13 +126,13 @@ function WorkTableRow({ row }: { row: WorkRow }) {
         {row.propertyLabel}
         {row.state ? `, ${row.state}` : ''}
       </td>
-      <td>{row.issueType ?? '—'}</td>
-      <td>{row.stage ?? '—'}</td>
+      <td>{row.issueType ? humanize(row.issueType) : '—'}</td>
+      <td>{row.stage ? humanize(row.stage) : '—'}</td>
       <td>{row.taskLabel}</td>
       <td>
         <span className={`badge ${urgency === 'none' ? '' : urgency}`}>{formatDate(row.dueDate)}</span>
       </td>
-      <td>{row.priority ?? '—'}</td>
+      <td>{row.priority ? <Pill color={priorityPillColor(row.priority)}>{humanize(row.priority)}</Pill> : '—'}</td>
       <td>{row.assignee ?? '—'}</td>
       <td className="summary-cell">{row.summary ?? '—'}</td>
       <td>
@@ -136,7 +141,7 @@ function WorkTableRow({ row }: { row: WorkRow }) {
             <form action={completeTaskAction}>
               <input type="hidden" name="taskId" value={row.taskId} />
               <input type="hidden" name="returnTo" value="/" />
-              <button type="submit" className="btn">
+              <button type="submit" className="n-btn">
                 Complete
               </button>
             </form>
@@ -148,14 +153,14 @@ function WorkTableRow({ row }: { row: WorkRow }) {
               <label htmlFor={`reschedule-${row.taskId}`} className="visually-hidden">
                 New due date for {row.taskLabel}
               </label>
-              <input id={`reschedule-${row.taskId}`} type="date" name="newDueDate" defaultValue={row.dueDate ?? ''} />
-              <button type="submit" className="btn">
+              <input id={`reschedule-${row.taskId}`} type="date" name="newDueDate" className="n-input" defaultValue={row.dueDate ?? ''} />
+              <button type="submit" className="n-btn">
                 Reschedule
               </button>
             </form>
           )}
           {row.issueId && (
-            <a className="btn" href={`/issues/${row.issueId}`}>
+            <a className="n-btn" href={`/issues/${row.issueId}`}>
               Open case
             </a>
           )}

@@ -1,55 +1,26 @@
 /**
  * app/_lib/reference-data.ts — read-only lookups the intake form and case
- * view need (property_refs / person_refs pickers, issue-type display names)
- * that no repository in lib/repositories/ currently exposes (issues-repo
- * only fetches a property/person by way of an issue; there is no
- * list-properties/list-people repo function). lib/repositories/ is outside
- * this lane's assigned paths, so these stay here as thin, business-rule-free
- * reads (select + order by) rather than being added there. Documented gap:
- * these belong in lib/repositories/ long-term.
+ * view need (property_refs / person_refs pickers, issue-type display names).
+ *
+ * ADVERSARIAL-REVIEW FOLLOW-UP (Issues UI v2, scale foundation): the raw
+ * property_refs/person_refs reads that used to live here directly now go
+ * through lib/repositories/reference-data-repo.ts — closing the
+ * architectural gap this module's previous doc comment flagged
+ * ("lib/repositories/ is outside this lane's assigned paths ... documented
+ * gap: these belong in lib/repositories/ long-term"). This module is now a
+ * thin re-export plus listIssueTypes/propertyLabel, which were never raw
+ * reads (listIssueTypes already goes through config-repo.ts).
  */
 
-import { asc, count } from 'drizzle-orm';
 import type { DbHandle } from '../../lib/repositories/db-handle.ts';
-import { personRefs, propertyRefs, type PersonRef, type PropertyRef } from '../../lib/db/schema.ts';
+import type { PropertyRef } from '../../lib/db/schema.ts';
 import * as configRepo from '../../lib/repositories/config-repo.ts';
+import * as referenceDataRepo from '../../lib/repositories/reference-data-repo.ts';
 
-const LIST_LIMIT = 500;
+export type { LimitedList } from '../../lib/repositories/reference-data-repo.ts';
 
-/**
- * ADVERSARIAL-REVIEW FIX: listProperties/listPeople used to hard-cap at
- * LIST_LIMIT with no offset/pagination and no truncation signal at all —
- * once property_refs or person_refs passes 500 rows, entries alphabetically
- * past the 500th silently become unselectable in the intake form pickers,
- * and neither the UI nor the caller could tell the list was truncated (it
- * looks complete). Full search/filter pagination is a larger UI change;
- * this at minimum returns a total count and hasMore flag so the caller can
- * render "showing 500 of N — search to narrow" instead of silently hiding
- * the gap.
- */
-export interface LimitedList<T> {
-  items: T[];
-  total: number;
-  hasMore: boolean;
-}
-
-export async function listProperties(db: DbHandle): Promise<LimitedList<PropertyRef>> {
-  const [items, [totalRow]] = await Promise.all([
-    db.select().from(propertyRefs).orderBy(asc(propertyRefs.displayName)).limit(LIST_LIMIT),
-    db.select({ value: count() }).from(propertyRefs),
-  ]);
-  const total = totalRow?.value ?? items.length;
-  return { items, total, hasMore: total > items.length };
-}
-
-export async function listPeople(db: DbHandle): Promise<LimitedList<PersonRef>> {
-  const [items, [totalRow]] = await Promise.all([
-    db.select().from(personRefs).orderBy(asc(personRefs.displayName)).limit(LIST_LIMIT),
-    db.select({ value: count() }).from(personRefs),
-  ]);
-  const total = totalRow?.value ?? items.length;
-  return { items, total, hasMore: total > items.length };
-}
+export const listProperties = referenceDataRepo.listProperties;
+export const listPeople = referenceDataRepo.listPeople;
 
 export interface IssueTypeConfig {
   display_name: string;

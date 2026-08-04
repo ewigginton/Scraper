@@ -68,6 +68,22 @@ export interface CaseData {
   history: HistoryEntry[];
 }
 
+/**
+ * History merges audit_events from several source tables (issues, holds,
+ * tasks, payment_requests) plus phase_instances, then sorts the combined
+ * list in memory (occurredAt desc) because there is no single indexed
+ * column to ORDER BY + LIMIT across those heterogeneous sources in one
+ * query. HISTORY_FETCH_CAP bounds each source query so the read stays
+ * defensively finite (docs/notion-redesign.md "no unbounded reads
+ * anywhere ... paginate at 50 with Load more") even though it is not true
+ * keyset pagination pushed down to SQL. The case page then paginates the
+ * capped, sorted array for display. Documented gap: a case with more than
+ * HISTORY_FETCH_CAP audit rows from a single source would silently lose its
+ * oldest entries off the end of History — acceptable at Phase-1 volumes,
+ * flagged here for the eventual keyset-per-object rework.
+ */
+const HISTORY_FETCH_CAP = 500;
+
 const RESTRICTED_EVIDENCE_ROLES = new Set(['manager', 'admin']);
 const RESTRICTED_CLASSIFICATIONS = new Set(['restricted_legal', 'restricted_financial']);
 
@@ -186,7 +202,7 @@ export async function loadCaseData(db: DbHandle, issueId: string, roles: string[
       paymentsRepo.listForIssue(db, issueId),
       db.select().from(evidenceFiles).where(eq(evidenceFiles.issueId, issueId)),
       db.select().from(notices).where(eq(notices.issueId, issueId)),
-      auditRepo.listForObject(db, 'issues', issueId),
+      auditRepo.listForObject(db, 'issues', issueId, { limit: HISTORY_FETCH_CAP }),
     ]);
 
   const vendorJobIds = issueVendorJobs.map((j) => j.id);
@@ -212,6 +228,7 @@ export async function loadCaseData(db: DbHandle, issueId: string, roles: string[
           .from(auditEvents)
           .where(or(...objectPairs.map(([table, id]) => and(eq(auditEvents.objectTable, table), eq(auditEvents.objectId, id)))))
           .orderBy(desc(auditEvents.occurredAt))
+          .limit(HISTORY_FETCH_CAP)
       : [];
 
   const allAudit = [...auditRows, ...extraAuditRows];

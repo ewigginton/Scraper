@@ -11,7 +11,7 @@
  * matches the queue's name, documented per-queue below.
  */
 
-import { and, asc, eq, isNotNull, lte, gt, or } from 'drizzle-orm';
+import { and, asc, count, eq, isNotNull, lte, gt, or, sql } from 'drizzle-orm';
 import type { DbHandle } from './db-handle.ts';
 import {
   approvals,
@@ -27,13 +27,12 @@ import {
  * Bounded default page size for every work-screen queue (adversarial-review
  * finding: none of the seven queue queries applied any LIMIT at all, so an
  * active company's overdue/waitingBlocked buckets would return and render
- * every matching row, unbounded, on every load). A real "N more" affordance
- * with cursor pagination is a larger UI change (spec §25); this bound at
- * least keeps a single work-screen load's query cost and render size
- * constant as task volume grows, which is the safety property that matters
- * most (a runaway query/render is worse than an incomplete-looking list).
+ * every matching row, unbounded, on every load). docs/notion-redesign.md
+ * "My Work at volume": each queue shows its first 25 rows plus a real
+ * per-queue count from `countsForUser` (below) and a "View all N" link into
+ * /issues, rather than rendering an unbounded or 200-row list inline.
  */
-const DEFAULT_QUEUE_LIMIT = 200;
+const DEFAULT_QUEUE_LIMIT = 25;
 
 export interface InboxForUserParams {
   /** External staff identity (lib/auth CurrentUser.id). */
@@ -209,6 +208,84 @@ function addDays(isoDate: string, days: number): string {
   const d = new Date(`${isoDate}T00:00:00Z`);
   d.setUTCDate(d.getUTCDate() + days);
   return d.toISOString().slice(0, 10);
+}
+
+export interface QueueCounts {
+  newUnreviewed: number;
+  actionDateFollowups: number;
+  noticesDue: number;
+  upcoming: number;
+  overdue: number;
+  waitingBlocked: number;
+  approvals: number;
+}
+
+/**
+ * The real total for each of inboxForUser's seven queues (spec "My Work at
+ * volume": queue chips need the true count even once inboxForUser's own
+ * rows are capped at DEFAULT_QUEUE_LIMIT). Uses the SAME filter predicates
+ * as inboxForUser's respective queries, just as `count(*) FILTER (WHERE
+ * ...)` conditional aggregates instead of five separate `SELECT COUNT`
+ * queries against `tasks` — one pass over the table produces all five
+ * task-shaped counts, plus one more pass each for notices/approvals (two
+ * different tables, so a single query can't fold those in too).
+ */
+export async function countsForUser(db: DbHandle, params: InboxForUserParams = {}): Promise<QueueCounts> {
+  const today = params.today ?? new Date().toISOString().slice(0, 10);
+  const upcomingWithinDays = params.upcomingWithinDays ?? 14;
+  const upcomingUntil = addDays(today, upcomingWithinDays);
+  const owner = ownerFilter(params);
+  const issueOwner = issueOwnerFilter(params);
+  const openStatuses = sql`(${tasks.status} = 'open' OR ${tasks.status} = 'in_progress')`;
+
+  const noticesWhere = (() => {
+    const statusPredicate = or(eq(notices.status, 'pending'), eq(notices.status, 'sent'));
+    return issueOwner ? and(statusPredicate, issueOwner) : statusPredicate;
+  })();
+
+  const [[taskCounts], [noticesCount], [approvalsCount]] = await Promise.all([
+    db
+      .select({
+        newUnreviewed: sql<number>`count(*) filter (where ${tasks.status} = 'open' and ${issues.lifecycleStatus} = 'intake')`.mapWith(Number),
+        actionDateFollowups: sql<number>`count(*) filter (where ${openStatuses} and ${tasks.actionDate} is not null and ${tasks.actionDate} <= ${today})`.mapWith(Number),
+        upcoming: sql<number>`count(*) filter (where ${openStatuses} and ${tasks.dueDate} is not null and ${tasks.dueDate} > ${today} and ${tasks.dueDate} <= ${upcomingUntil})`.mapWith(Number),
+        overdue: sql<number>`count(*) filter (where ${openStatuses} and ${tasks.dueDate} is not null and ${tasks.dueDate} <= ${today})`.mapWith(Number),
+        waitingBlocked: sql<number>`count(*) filter (where ${openStatuses} and (${tasks.waitingReason} is not null or ${tasks.waitingParty} is not null))`.mapWith(Number),
+      })
+      // LEFT JOIN (not INNER): the newUnreviewed bucket's FILTER condition
+      // needs issues.lifecycle_status, but the other four buckets are
+      // task-only (matching inboxForUser's un-joined queries) — a task with
+      // no linked issue (issue_id IS NULL) must still count toward those
+      // four. A LEFT JOIN preserves that: for such a task the joined
+      // issues.lifecycle_status is NULL, so the newUnreviewed FILTER
+      // (which requires it = 'intake') correctly contributes 0 for that
+      // row, exactly matching what an INNER JOIN would have done for that
+      // one bucket, without excluding the row from the other four.
+      .from(tasks)
+      .leftJoin(issues, eq(tasks.issueId, issues.id))
+      .where(owner),
+    db
+      .select({ value: count() })
+      .from(notices)
+      .innerJoin(issues, eq(notices.issueId, issues.id))
+      .where(noticesWhere),
+    params.approverPersonRefId
+      ? db
+          .select({ value: count() })
+          .from(approvals)
+          .where(and(eq(approvals.decision, 'pending'), eq(approvals.approverId, params.approverPersonRefId)))
+      : Promise.resolve([{ value: 0 }]),
+  ]);
+
+  return {
+    newUnreviewed: taskCounts?.newUnreviewed ?? 0,
+    actionDateFollowups: taskCounts?.actionDateFollowups ?? 0,
+    noticesDue: noticesCount?.value ?? 0,
+    upcoming: taskCounts?.upcoming ?? 0,
+    overdue: taskCounts?.overdue ?? 0,
+    waitingBlocked: taskCounts?.waitingBlocked ?? 0,
+    approvals: approvalsCount?.value ?? 0,
+  };
 }
 
 /**

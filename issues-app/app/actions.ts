@@ -19,6 +19,7 @@ import * as holdService from '../lib/services/hold-service.ts';
 import * as possessionService from '../lib/services/possession-service.ts';
 import * as eligibilityService from '../lib/services/eligibility-service.ts';
 import * as transitionEngine from '../lib/services/transition-engine.ts';
+import * as savedViewService from '../lib/services/saved-view-service.ts';
 import { IssueAuthorizationError } from '../lib/services/issue-authz.ts';
 import { setActorContext, withActor } from '../lib/db/actor-context.ts';
 import { issues, type IssuePersonRole, type IssueType, type PossessionStatus, type Priority } from '../lib/db/schema.ts';
@@ -355,6 +356,82 @@ export async function recordPossessionAction(formData: FormData): Promise<void> 
   }
 
   revalidatePath(returnTo);
+  redirect(returnTo);
+}
+
+// =====================================================================
+// Saved views — /issues "Save view" / delete (spec §15)
+// =====================================================================
+
+export async function saveIssuesViewAction(formData: FormData): Promise<void> {
+  const db = requireDb();
+  const user = await getCurrentUser();
+  const name = str(formData, 'name');
+  const rawParams = str(formData, 'params');
+  const returnTo = safeReturnTo(formData, '/issues');
+
+  let params: unknown;
+  try {
+    params = rawParams ? JSON.parse(rawParams) : {};
+  } catch {
+    redirect(`${returnTo}${returnTo.includes('?') ? '&' : '?'}savedViewError=${encodeURIComponent('Could not read the current view to save.')}`);
+    return;
+  }
+
+  try {
+    await db.transaction(async (tx) => {
+      await setActorContext(tx, { actorId: user.id, roles: user.roles });
+      return savedViewService.createSavedView(tx, {
+        ownerExternalId: user.id,
+        name,
+        params,
+        actorId: user.id,
+        actorExternalId: user.id,
+        actorRole: user.roles[0] ?? null,
+      });
+    });
+  } catch (err) {
+    if (err instanceof savedViewService.SavedViewServiceError) {
+      redirect(`${returnTo}${returnTo.includes('?') ? '&' : '?'}savedViewError=${encodeURIComponent(err.message)}`);
+    }
+    throw err;
+  }
+
+  // 'layout' (not just the '/issues' page itself): the Sidebar's saved-views
+  // list renders from the root layout on EVERY route, not just /issues.
+  revalidatePath('/', 'layout');
+  redirect(returnTo);
+}
+
+export async function deleteIssuesViewAction(formData: FormData): Promise<void> {
+  const db = requireDb();
+  const user = await getCurrentUser();
+  const id = str(formData, 'id');
+  const returnTo = safeReturnTo(formData, '/issues');
+
+  try {
+    await db.transaction(async (tx) => {
+      await setActorContext(tx, { actorId: user.id, roles: user.roles });
+      // ownerExternalId comes from the authenticated user's own identity,
+      // never from form data — deleteSavedView (and the owner-scoped RLS
+      // policy behind it) already scope by owner, but the form never even
+      // gets a chance to name a different owner's saved view.
+      return savedViewService.deleteSavedView(tx, {
+        ownerExternalId: user.id,
+        id,
+        actorId: user.id,
+        actorExternalId: user.id,
+        actorRole: user.roles[0] ?? null,
+      });
+    });
+  } catch (err) {
+    if (err instanceof savedViewService.SavedViewServiceError) {
+      redirect(`${returnTo}${returnTo.includes('?') ? '&' : '?'}savedViewError=${encodeURIComponent(err.message)}`);
+    }
+    throw err;
+  }
+
+  revalidatePath('/', 'layout');
   redirect(returnTo);
 }
 

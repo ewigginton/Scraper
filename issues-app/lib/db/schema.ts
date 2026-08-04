@@ -26,6 +26,7 @@ import {
   bigint,
   boolean,
   check,
+  customType,
   date,
   index,
   integer,
@@ -44,6 +45,13 @@ import { sql } from 'drizzle-orm';
 // `timestamp(..., { withTimezone: true })`. Alias for readability at call
 // sites below, matching the SQL column type name.
 const tsTz = (name: string) => timestamp(name, { withTimezone: true });
+
+// drizzle-orm/pg-core has no built-in tsvector column type; a minimal
+// customType (select/insert as a plain string) is the standard way to
+// reference one. Only ever queried via `@@`/GIN — never constructed or
+// compared as a JS string — see issues.summaryTsv below and
+// lib/repositories/issues-query-repo.ts.
+const tsvector = customType<{ data: string }>({ dataType: () => 'tsvector' });
 
 // ---------------------------------------------------------------------
 // property_refs
@@ -182,6 +190,14 @@ export const issues = pgTable(
     // NOT property_refs.map_link, which is a sync-owned read-through cache.
     mapLink: text('map_link'),
     priceReviewedAt: tsTz('price_reviewed_at'),
+
+    // 20260804100000_issues_scale_indexes_search_views.sql: generated
+    // (STORED) tsvector over `summary`, 'simple' config. `.generatedAlwaysAs`
+    // excludes this from NewIssue (Postgres rejects an explicit value on a
+    // GENERATED ALWAYS column); it is select-only here, queried via `@@`.
+    summaryTsv: tsvector('summary_tsv')
+      .notNull()
+      .generatedAlwaysAs(sql`to_tsvector('simple', summary)`),
   },
   (t) => [
     index('issues_property_ref_id_idx').on(t.propertyRefId),
@@ -190,6 +206,11 @@ export const issues = pgTable(
     index('issues_priority_idx').on(t.priority),
     index('issues_current_phase_instance_id_idx').on(t.currentPhaseInstanceId),
     index('issues_review_date_idx').on(t.reviewDate),
+    index('issues_lifecycle_status_updated_at_id_idx').on(t.lifecycleStatus, t.updatedAt, t.id),
+    index('issues_issue_type_lifecycle_status_updated_at_idx').on(t.issueType, t.lifecycleStatus, t.updatedAt),
+    index('issues_coordinator_id_lifecycle_status_idx').on(t.coordinatorId, t.lifecycleStatus),
+    index('issues_queue_lifecycle_status_idx').on(t.queue, t.lifecycleStatus),
+    index('issues_summary_tsv_idx').using('gin', t.summaryTsv),
     check(
       'issues_issue_type_check',
       sql`${t.issueType} in ('default_recovery', 'covenant_violation', 'market_readiness', 'property_legal', 'buyer_cleanup')`,
@@ -1490,3 +1511,30 @@ export const auditEvents = pgTable(
 
 export type AuditEvent = typeof auditEvents.$inferSelect;
 export type NewAuditEvent = typeof auditEvents.$inferInsert;
+
+// =====================================================================
+// 20260804100000_issues_scale_indexes_search_views.sql
+// =====================================================================
+
+// saved_views — owner-scoped saved /issues view configurations (spec §15).
+export const savedViews = pgTable(
+  'saved_views',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    createdAt: tsTz('created_at').notNull().defaultNow(),
+    updatedAt: tsTz('updated_at').notNull().defaultNow(),
+
+    // Staff identity is external (see issues.coordinator_id above); no
+    // local users/staff table to foreign-key against.
+    ownerExternalId: text('owner_external_id').notNull(),
+    name: text('name').notNull(),
+    params: jsonb('params').notNull(),
+  },
+  (t) => [
+    unique('saved_views_owner_external_id_name_unique').on(t.ownerExternalId, t.name),
+    index('saved_views_owner_external_id_idx').on(t.ownerExternalId),
+  ],
+);
+
+export type SavedView = typeof savedViews.$inferSelect;
+export type NewSavedView = typeof savedViews.$inferInsert;
