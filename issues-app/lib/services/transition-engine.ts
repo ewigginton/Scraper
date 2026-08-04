@@ -588,6 +588,12 @@ export async function transitionPhase(
     throw new Error('transition-engine: failed to update issue after transition');
   }
 
+  // Shared across the phase_transitioned audit row below AND every
+  // service call in this section, so a transition's whole audit trail
+  // (task completions, hold applies/releases, the phase change itself)
+  // correlates under one id.
+  const correlationId = ctx.correlationId ?? randomUUID();
+
   // Closing tasks, applying holds, and releasing holds all go through
   // their owning services (task-service.completeTask, hold-service.
   // applyHold/releaseHold) rather than writing the tables directly, so a
@@ -604,7 +610,7 @@ export async function transitionPhase(
       actorRole: ctx.actorRole ?? null,
       actorRoles: ctx.roles,
       actorQueues: ctx.actorQueues ?? [],
-      correlationId: ctx.correlationId ?? null,
+      correlationId,
     });
     closedTasks.push(closed);
   }
@@ -627,18 +633,25 @@ export async function transitionPhase(
       actorId: ctx.actorId ?? null,
       actorExternalId: ctx.actorExternalId ?? null,
       actorRole: ctx.actorRole ?? null,
-      correlationId: ctx.correlationId ?? null,
+      correlationId,
     });
     appliedHolds.push(applied);
   }
 
   const releasedHolds: Hold[] = [];
   for (const holdId of ctx.holdsToReleaseIds ?? []) {
-    const released = await holdsRepo.release(tx, holdId, ctx.holdReleasedBy ?? ctx.actorId ?? 'system', ctx.holdReleaseReason ?? `Released by transition to ${toPhase}`);
-    if (released) releasedHolds.push(released);
+    const released = await releaseHold(tx, {
+      holdId,
+      releasedBy: ctx.holdReleasedBy ?? ctx.actorId ?? 'system',
+      actorRoles: ctx.roles,
+      reason: ctx.holdReleaseReason ?? `Released by transition to ${toPhase}`,
+      actorId: ctx.actorId ?? null,
+      actorExternalId: ctx.actorExternalId ?? null,
+      actorRole: ctx.actorRole ?? null,
+      correlationId,
+    });
+    releasedHolds.push(released);
   }
-
-  const correlationId = ctx.correlationId ?? randomUUID();
 
   await writeAudit(tx, {
     actorId: ctx.actorId ?? null,

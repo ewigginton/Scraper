@@ -163,3 +163,26 @@ spec §19 already names Google Workspace as a communication transport):
    Requires workspace-admin consent + an integration contract per spec §22
    with Scott's sign-off (same governance as JustCall/Gmail).
 All tiers require real credentials → Hub-integration phase, after porting.
+
+## Wave 4 — Tremor-pattern tables + admin (Emma, Aug 2026 — from Tremor screenshots)
+- Filter chips: /issues and /people filter bars become chip-style dropdown
+  filters (+Status, +Type, +State, +Costs-style), URL-driven as today.
+- Bulk edit: row checkboxes + act-on-selected (reassign coordinator, change
+  priority/queue, reschedule tasks, attempt transitions). A bulk action is
+  N audited single actions through the existing services — per-row audit
+  rows, per-row blocked-result reporting, no silent skips, stage changes
+  still individually through the transition engine.
+- Export (spec §23): CSV export of the current filtered view —
+  permission-gated, records who exported what and when as an audit event,
+  applies the same data restrictions as the interface (restricted rows
+  excluded for non-authorized roles).
+- Settings area (spec §12): admin UI over the existing versioned config —
+  dropdown values (add/rename/reorder/retire with history), deadlines,
+  thresholds, notification recipients, role-capability matrix, per-person
+  approval limits, personal notification preferences (§8.3). Every change
+  creates a new config version with audit.
+- User management boundary: staff accounts belong to the Hub's shared
+  identity (Master Vision §30.1) — no local user CRUD ever. Our settings
+  cover roles/limits/preferences for identities the Hub provides.
+- Design language only from Tremor — no new npm dependencies; built in the
+  existing plain-React/CSS system.
