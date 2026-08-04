@@ -11,6 +11,10 @@ full-text search, column show/hide, group-by, saved views) · keyset
 pagination + composite indexes · 300-case volume seed · Notion visual idiom.
 
 ## Wave 2 — spec §15/§8.2/§13 completions
+- FIRST: issue-level change log upgrade (Emma priority) — the case page's
+  History section becomes a readable activity feed: newest-first, per-field
+  diffs ("Priority: Normal → High — <actor>, <time>"), category filter kept,
+  paginated. Same audit_events data, human rendering.
 - Search expansion: person name / phone / email, development / tract,
   case id — context-aware per spec §15.
 - Hover cards on every linked person/property (key info + quick links).
