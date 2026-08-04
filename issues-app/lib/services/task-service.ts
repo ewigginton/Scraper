@@ -16,6 +16,7 @@ import type { DbHandle } from '../repositories/db-handle.ts';
 import * as tasksRepo from '../repositories/tasks-repo.ts';
 import { tasks, type NewTask, type Priority, type Task } from '../db/schema.ts';
 import { writeAudit } from './audit.ts';
+import { businessTodayIso } from '../date/business-today.ts';
 
 export class TaskServiceError extends Error {
   code: string;
@@ -113,7 +114,7 @@ export async function completeTask(tx: DbHandle, input: CompleteTaskInput): Prom
   }
   const { overrodeOwnership, basis } = assertTaskAuthorized(existing, input);
 
-  const verifiedCompletionDate = input.verifiedCompletionDate ?? new Date().toISOString().slice(0, 10);
+  const verifiedCompletionDate = input.verifiedCompletionDate ?? businessTodayIso();
   const [updated] = await tx
     .update(tasks)
     .set({

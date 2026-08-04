@@ -17,6 +17,7 @@
 import { and, count, desc, eq, isNull, sql } from 'drizzle-orm';
 import type { DbHandle } from './db-handle.ts';
 import { holds, issues, propertyRefs, tasks, type HoldType, type IssueType, type LifecycleStatus } from '../db/schema.ts';
+import { businessTodayIso } from '../date/business-today.ts';
 
 const MAX_GROUP_ROWS = 200;
 
@@ -85,7 +86,7 @@ export async function openIssuesByCoordinatorOrQueue(db: DbHandle): Promise<Coun
 
 /** Open/in_progress tasks whose due_date has passed, grouped by assignee (falls back to queue, then 'Unassigned'). Bounded to MAX_GROUP_ROWS distinct owners. */
 export async function overdueTaskCountsByCoordinator(db: DbHandle, today?: string): Promise<CountRow[]> {
-  const todayValue = today ?? new Date().toISOString().slice(0, 10);
+  const todayValue = today ?? businessTodayIso();
   const ownerExpr = sql<string>`coalesce(${tasks.assigneeId}, ${tasks.queue}, 'Unassigned')`;
   const rows = await db
     .select({ key: ownerExpr, count: count() })
@@ -113,7 +114,7 @@ export const AGING_BUCKETS: AgingBucketKey[] = ['0-7', '8-30', '31-90', '90+'];
  * can render a stable bar set without checking for missing keys.
  */
 export async function agingBucketsOfOpenIssues(db: DbHandle, today?: string): Promise<Record<AgingBucketKey, number>> {
-  const todayValue = today ?? new Date().toISOString().slice(0, 10);
+  const todayValue = today ?? businessTodayIso();
   const ageDays = sql<number>`extract(day from (${todayValue}::timestamptz - ${issues.createdAt}))`;
   const bucketExpr = sql<string>`case
     when ${ageDays} <= 7 then '0-7'

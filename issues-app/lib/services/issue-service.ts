@@ -7,6 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { and, eq, ne } from 'drizzle-orm';
 import type { DbHandle } from '../repositories/db-handle.ts';
 import * as issuesRepo from '../repositories/issues-repo.ts';
+import { businessTodayIso } from '../date/business-today.ts';
 import {
   approvals,
   holds,
@@ -39,7 +40,7 @@ export class IssueValidationError extends Error {
 }
 
 function todayIso(): string {
-  return new Date().toISOString().slice(0, 10);
+  return businessTodayIso();
 }
 
 // =====================================================================

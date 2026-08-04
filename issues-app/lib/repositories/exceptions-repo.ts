@@ -33,6 +33,7 @@
 import { count, desc, eq, sql, type SQL } from 'drizzle-orm';
 import type { DbHandle } from './db-handle.ts';
 import { issues, propertyRefs, tasks, type Issue, type PropertyRef, type Task } from '../db/schema.ts';
+import { businessTodayIso } from '../date/business-today.ts';
 
 const DEFAULT_ROW_LIMIT = 50;
 const MAX_ROW_LIMIT = 200;
@@ -73,7 +74,7 @@ export interface ExceptionQueueResult<T> {
  */
 export async function noActionableTaskQueue(db: DbHandle, params: ExceptionQueueParams = {}): Promise<ExceptionQueueResult<IssueExceptionRow>> {
   const limit = clampLimit(params.limit);
-  const today = params.today ?? new Date().toISOString().slice(0, 10);
+  const today = params.today ?? businessTodayIso();
 
   const condition = sql`${issues.lifecycleStatus} = 'active' and not exists (
     select 1 from tasks t
@@ -98,7 +99,7 @@ export async function missingOrShortSummaryQueue(
   params: ExceptionQueueParams = {},
 ): Promise<ExceptionQueueResult<IssueExceptionRow>> {
   const limit = clampLimit(params.limit);
-  const today = params.today ?? new Date().toISOString().slice(0, 10);
+  const today = params.today ?? businessTodayIso();
 
   const condition = sql`${issues.lifecycleStatus} not in ('closed', 'passive_wait')
     and length(trim(${issues.summary})) < ${SHORT_SUMMARY_MIN_LEN}`;
@@ -141,7 +142,7 @@ export async function readyToReleaseBlockedQueue(
   params: ReleaseBlockedParams = {},
 ): Promise<ExceptionQueueResult<IssueExceptionRow>> {
   const limit = clampLimit(params.limit);
-  const today = params.today ?? new Date().toISOString().slice(0, 10);
+  const today = params.today ?? businessTodayIso();
   const minDays = Number.isFinite(params.minBlockedDays) && (params.minBlockedDays ?? 0) > 0 ? Math.floor(params.minBlockedDays!) : DEFAULT_RELEASE_BLOCKED_DAYS;
 
   const oldestActiveHoldStart = sql`(
@@ -189,7 +190,7 @@ export interface StaleCasesParams extends ExceptionQueueParams {
  */
 export async function staleCasesQueue(db: DbHandle, params: StaleCasesParams = {}): Promise<ExceptionQueueResult<IssueExceptionRow>> {
   const limit = clampLimit(params.limit);
-  const today = params.today ?? new Date().toISOString().slice(0, 10);
+  const today = params.today ?? businessTodayIso();
   const minDays = Number.isFinite(params.minStaleDays) && (params.minStaleDays ?? 0) > 0 ? Math.floor(params.minStaleDays!) : DEFAULT_STALE_DAYS;
 
   const lastAuditActivity = sql`(
@@ -228,7 +229,7 @@ export interface TasksOpenOverDaysParams extends ExceptionQueueParams {
  */
 export async function tasksOpenOverDaysQueue(db: DbHandle, params: TasksOpenOverDaysParams = {}): Promise<ExceptionQueueResult<TaskExceptionRow>> {
   const limit = clampLimit(params.limit);
-  const today = params.today ?? new Date().toISOString().slice(0, 10);
+  const today = params.today ?? businessTodayIso();
   const minDays = Number.isFinite(params.minOpenDays) && (params.minOpenDays ?? 0) > 0 ? Math.floor(params.minOpenDays!) : DEFAULT_TASK_OPEN_DAYS;
 
   const ageExpr = sql<number>`extract(day from (${today}::timestamptz - ${tasks.createdAt}))`;

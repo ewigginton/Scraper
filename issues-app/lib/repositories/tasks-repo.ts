@@ -13,6 +13,7 @@
 
 import { and, asc, count, eq, isNotNull, lte, gt, or, sql } from 'drizzle-orm';
 import type { DbHandle } from './db-handle.ts';
+import { businessTodayIso } from '../date/business-today.ts';
 import {
   approvals,
   issues,
@@ -107,7 +108,7 @@ function issueOwnerFilter(params: InboxForUserParams) {
  *   (params.approverPersonRefId).
  */
 export async function inboxForUser(db: DbHandle, params: InboxForUserParams = {}): Promise<Inbox> {
-  const today = params.today ?? new Date().toISOString().slice(0, 10);
+  const today = params.today ?? businessTodayIso();
   const upcomingWithinDays = params.upcomingWithinDays ?? 14;
   const upcomingUntil = addDays(today, upcomingWithinDays);
   const owner = ownerFilter(params);
@@ -231,7 +232,7 @@ export interface QueueCounts {
  * different tables, so a single query can't fold those in too).
  */
 export async function countsForUser(db: DbHandle, params: InboxForUserParams = {}): Promise<QueueCounts> {
-  const today = params.today ?? new Date().toISOString().slice(0, 10);
+  const today = params.today ?? businessTodayIso();
   const upcomingWithinDays = params.upcomingWithinDays ?? 14;
   const upcomingUntil = addDays(today, upcomingWithinDays);
   const owner = ownerFilter(params);
@@ -296,7 +297,7 @@ export async function countsForUser(db: DbHandle, params: InboxForUserParams = {
 export async function complete(
   db: DbHandle,
   id: string,
-  verifiedCompletionDate: string = new Date().toISOString().slice(0, 10),
+  verifiedCompletionDate: string = businessTodayIso(),
 ): Promise<Task | undefined> {
   const [row] = await db
     .update(tasks)

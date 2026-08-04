@@ -15,6 +15,7 @@
 
 import { and, asc, count, desc, eq, inArray, or, sql, type SQL } from 'drizzle-orm';
 import type { DbHandle } from './db-handle.ts';
+import { businessTodayIso } from '../date/business-today.ts';
 import {
   issues,
   propertyRefs,
@@ -389,7 +390,7 @@ export async function listIssues(db: DbHandle, params: ListIssuesParams = {}): P
   const spec = SORT_ALLOWLIST[sort.key];
   const limit = clampLimit(params.limit);
   const filters = normalizeFilters(params.filters);
-  const today = params.today ?? new Date().toISOString().slice(0, 10);
+  const today = params.today ?? businessTodayIso();
   const cursor = validCursorForSort(decodeCursor(params.cursor ?? null), spec);
 
   const conditions = buildFilterConditions(filters, today);
@@ -422,7 +423,7 @@ export async function listIssues(db: DbHandle, params: ListIssuesParams = {}): P
 /** Cheap total-count companion to listIssues, ignoring pagination (same filters, no cursor/limit). */
 export async function countIssues(db: DbHandle, params: CountIssuesParams = {}): Promise<number> {
   const filters = normalizeFilters(params.filters);
-  const today = params.today ?? new Date().toISOString().slice(0, 10);
+  const today = params.today ?? businessTodayIso();
   const conditions = buildFilterConditions(filters, today);
   const where = conditions.length > 0 ? and(...conditions) : undefined;
 

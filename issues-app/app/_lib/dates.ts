@@ -10,12 +10,15 @@
  * silently invented business rule.
  */
 
+import { businessTodayIso } from '../../lib/date/business-today.ts';
+
 export type Urgency = 'none' | 'normal' | 'due-soon' | 'overdue';
 
 const DUE_SOON_WINDOW_DAYS = 3;
 
+/** "Today" in the business's configured local timezone (lib/date/business-today.ts) — NOT the UTC calendar day. */
 export function todayIso(): string {
-  return new Date().toISOString().slice(0, 10);
+  return businessTodayIso();
 }
 
 export function classifyDueDate(dueDate: string | null | undefined, today: string = todayIso()): Urgency {
