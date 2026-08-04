@@ -28,7 +28,7 @@ import {
 import * as timelineRepo from './timeline-repo.ts';
 import type { TimelineEntry, TimelineFilters, TimelineResult } from './timeline-repo.ts';
 import { clampLimit } from './keyset-cursor.ts';
-import { isUuid, sanitizeUuidArray } from './id-guard.ts';
+import { containsNulByte, isUuid, sanitizeText, sanitizeUuidArray } from './id-guard.ts';
 
 const MAX_STRING_LEN = 200;
 const LINKED_ISSUES_LIMIT = 200;
@@ -67,17 +67,24 @@ function decodePeopleCursor(raw: string | null | undefined): { sortValue: string
     if (!Array.isArray(parsed) || parsed.length !== 2) return null;
     const [sortValue, id] = parsed as [unknown, unknown];
     if (typeof sortValue !== 'string' || typeof id !== 'string' || !isUuid(id)) return null;
+    // INJECTION FUZZ finding (round 2): sortValue is bound directly as a
+    // text parameter (searchPeople's keyset predicate compares it against
+    // display_name) — a crafted `after=` cursor carrying a NUL byte here
+    // would reach the wire as a bound parameter's value and 500 with a
+    // raw Postgres "invalid byte sequence" error. Reject outright (treat
+    // as an invalid/stale cursor -> page 1) rather than silently
+    // stripping, since altering a cursor's sort value could otherwise
+    // reorder/skip rows.
+    if (containsNulByte(sortValue)) return null;
     return { sortValue, id };
   } catch {
     return null;
   }
 }
 
+/** Delegates to id-guard.sanitizeText, the one shared NUL-byte-stripping free-text sanitizer every repo now uses (round 2: this module's own copy is folded into that shared implementation). */
 function sanitizeQuery(input: unknown): string | null {
-  if (typeof input !== 'string') return null;
-  // eslint-disable-next-line no-control-regex -- stripping the NUL byte Postgres text columns reject outright, same rationale as issues-query-repo.ts's stripNulBytes.
-  const trimmed = input.replace(/\x00/g, '').trim().slice(0, MAX_STRING_LEN);
-  return trimmed.length > 0 ? trimmed : null;
+  return sanitizeText(input, MAX_STRING_LEN);
 }
 
 /** Searchable, keyset-paginated person_refs list (spec: "/people index — searchable, table of person_refs"). Ordered by display_name asc, id asc. */

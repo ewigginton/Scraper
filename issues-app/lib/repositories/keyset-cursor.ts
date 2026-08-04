@@ -13,6 +13,8 @@
  * than a thrown error (same contract as issues-query-repo.decodeCursor).
  */
 
+import { containsNulByte } from './id-guard.ts';
+
 export interface DecodedCursor {
   /** ISO timestamp string of the row the previous page ended on. */
   at: string;
@@ -38,6 +40,14 @@ export function decodeCursor(raw: string | null | undefined): DecodedCursor | nu
     if (typeof at !== 'string' || typeof tie !== 'string') return null;
     if (Number.isNaN(Date.parse(at))) return null;
     if (tie.length === 0 || tie.length > 200) return null;
+    // INJECTION FUZZ finding (round 2): `tie` (and, belt-and-braces, `at`)
+    // can end up bound as a raw text parameter downstream (tie-break
+    // comparisons) — a NUL byte here would 500 with a raw Postgres
+    // "invalid byte sequence" error instead of the "malformed cursor ->
+    // page 1" contract this function otherwise guarantees. Reject rather
+    // than silently strip, since altering a cursor's value could
+    // otherwise reorder/skip rows.
+    if (containsNulByte(at) || containsNulByte(tie)) return null;
     return { at, tie };
   } catch {
     return null;

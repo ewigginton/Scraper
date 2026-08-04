@@ -758,3 +758,79 @@ describe('audit-metrics-repo', () => {
     });
   });
 });
+
+// -----------------------------------------------------------------------
+// INJECTION FUZZ (round 2): a NUL byte (U+0000) in a free-text filter must
+// never reach the driver as a bound parameter's value — Postgres text
+// columns reject it wire-level regardless of parameterization
+// ("invalid byte sequence for encoding \"UTF8\": 0x00"). issues-query-repo
+// and people-repo were already hardened against this; comms-repo,
+// timeline-repo, and audit-metrics-repo were not (this is that gap's
+// regression coverage).
+// -----------------------------------------------------------------------
+describe('NUL byte (U+0000) in free-text filters never reaches the driver', () => {
+  let handle: TestDbHandle;
+
+  beforeEach(async () => {
+    handle = await createTestDb();
+  });
+
+  afterEach(async () => {
+    await closeTestDb(handle);
+  });
+
+  it('comms-repo.listForPerson participantQuery', async () => {
+    const person = await makePerson(handle.db);
+    await expect(commsRepo.listForPerson(handle.db, { personRefId: person.id, participantQuery: ' ', limit: 10 })).resolves.not.toThrow();
+  });
+
+  it('comms-repo.listForIssue participantQuery', async () => {
+    const owner = await makePerson(handle.db);
+    const { issue } = await makeIssueWithPeople(handle.db, [{ personRefId: owner.id, role: 'owner' }]);
+    await expect(
+      commsRepo.listForIssue(handle.db, { issueId: issue.id, includeLinkedPeople: false, participantQuery: ' ', limit: 10 }),
+    ).resolves.not.toThrow();
+  });
+
+  it('timeline-repo.issueTimeline filters.participantQuery', async () => {
+    const owner = await makePerson(handle.db);
+    const { issue } = await makeIssueWithPeople(handle.db, [{ personRefId: owner.id, role: 'owner' }]);
+    await expect(
+      timelineRepo.issueTimeline(handle.db, { issueId: issue.id, filters: { participantQuery: ' ' }, limit: 10 }),
+    ).resolves.not.toThrow();
+  });
+
+  it('timeline-repo.personTimeline filters.participantQuery', async () => {
+    const person = await makePerson(handle.db);
+    await expect(
+      timelineRepo.personTimeline(handle.db, { personRefId: person.id, filters: { participantQuery: ' ' }, limit: 10 }),
+    ).resolves.not.toThrow();
+  });
+
+  it('audit-metrics-repo.recentActivity filters.actor', async () => {
+    await expect(auditMetricsRepo.recentActivity(handle.db, { filters: { actor: ' ' }, limit: 10 })).resolves.not.toThrow();
+  });
+
+  it('people-repo.searchPeople q (already-hardened baseline, guards against regression)', async () => {
+    const { searchPeople } = await import('../lib/repositories/people-repo.ts');
+    await expect(searchPeople(handle.db, { q: ' ' })).resolves.not.toThrow();
+  });
+
+  it('issues-query-repo listIssues searchText (already-hardened baseline, guards against regression)', async () => {
+    const { listIssues } = await import('../lib/repositories/issues-query-repo.ts');
+    await expect(listIssues(handle.db, { filters: { searchText: ' ' } })).resolves.not.toThrow();
+  });
+
+  it('a cursor whose decoded sortValue contains a NUL byte is treated as invalid (page 1), not thrown', async () => {
+    const { decodeCursor: decodeIssuesCursor, encodeCursor: encodeIssuesCursor } = await import('../lib/repositories/issues-query-repo.ts');
+    const poisoned = encodeIssuesCursor('abc def', '00000000-0000-0000-0000-000000000000');
+    expect(decodeIssuesCursor(poisoned)).toBeNull();
+  });
+
+  it('keyset-cursor.decodeCursor rejects a NUL byte in `at` or `tie`', async () => {
+    const { decodeCursor, encodeCursor } = await import('../lib/repositories/keyset-cursor.ts');
+    const goodAt = new Date().toISOString();
+    expect(decodeCursor(encodeCursor(`${goodAt} `, 'tie-1'))).toBeNull();
+    expect(decodeCursor(encodeCursor(goodAt, 'tie -1'))).toBeNull();
+  });
+});

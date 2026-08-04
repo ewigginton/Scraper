@@ -50,7 +50,7 @@ import type { DbHandle } from './db-handle.ts';
 import { auditEvents, holds, issuePeople, notices, phaseInstances, tasks } from '../db/schema.ts';
 import * as commsRepo from './comms-repo.ts';
 import { clampLimit, decodeCursor as decodeSimpleCursor, encodeCursor as encodeSimpleCursor } from './keyset-cursor.ts';
-import { isUuid, sanitizeUuidArray } from './id-guard.ts';
+import { isUuid, sanitizeText, sanitizeUuidArray } from './id-guard.ts';
 
 // ---------------------------------------------------------------------
 // Shared entry shape
@@ -127,13 +127,18 @@ function normalizeFilters(filters: TimelineFilters | undefined): NormalizedFilte
   const kindsInput = filters?.kinds;
   const kindValues = Array.isArray(kindsInput) ? kindsInput.filter((k): k is TimelineKind => typeof k === 'string' && VALID_KINDS.has(k as TimelineKind)) : [];
   const direction = typeof filters?.direction === 'string' && VALID_DIRECTIONS.has(filters.direction) ? filters.direction : null;
-  const participantQueryRaw = typeof filters?.participantQuery === 'string' ? filters.participantQuery.trim().slice(0, MAX_STRING_LEN) : '';
+  // Delegates to id-guard.sanitizeText (INJECTION FUZZ finding, round 2):
+  // this previously only did `.trim().slice(...)` with no NUL-byte strip,
+  // so a `%00` in `participant` reached the wire as a bound parameter's
+  // value and 500'd with a raw Postgres "invalid byte sequence" driver
+  // error on /issues/[id]/timeline instead of behaving like every other
+  // free-text filter's safe no-op.
   return {
     kinds: { requested: Array.isArray(kindsInput) && kindsInput.length > 0, values: [...new Set(kindValues)] },
     personRefIds: sanitizeUuidArray(filters?.personRefIds),
     personRefIdsRequested: Array.isArray(filters?.personRefIds) && filters.personRefIds.length > 0,
     direction,
-    participantQuery: participantQueryRaw.length > 0 ? participantQueryRaw : null,
+    participantQuery: sanitizeText(filters?.participantQuery, MAX_STRING_LEN),
     fromDate: sanitizeDateBound(filters?.fromDate ?? null),
     toDate: sanitizeDateBound(filters?.toDate ?? null),
   };

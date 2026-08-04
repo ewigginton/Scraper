@@ -29,7 +29,7 @@ import {
   type CommunicationEvent,
 } from '../db/schema.ts';
 import { clampLimit, decodeCursor, encodeCursor } from './keyset-cursor.ts';
-import { isUuid, sanitizeUuidArray } from './id-guard.ts';
+import { isUuid, sanitizeText, sanitizeUuidArray } from './id-guard.ts';
 
 // ---------------------------------------------------------------------
 // Allowlists (mirrors the DB CHECK constraints — see lib/db/schema.ts's
@@ -64,10 +64,16 @@ function sanitizeDirection(input: unknown): CommunicationDirection | null {
   return typeof input === 'string' && VALID_DIRECTIONS.has(input as CommunicationDirection) ? (input as CommunicationDirection) : null;
 }
 
+/**
+ * Delegates to id-guard.sanitizeText (INJECTION FUZZ finding, round 2):
+ * this previously only did `.trim().slice(...)` with no NUL-byte strip —
+ * unlike issues-query-repo.ts's/people-repo.ts's equivalents — so a `%00`
+ * in `participant` reached the wire as a bound parameter's value and
+ * 500'd with a raw Postgres "invalid byte sequence" driver error instead
+ * of behaving like every other free-text filter's safe no-op.
+ */
 function sanitizeParticipantQuery(input: unknown): string | null {
-  if (typeof input !== 'string') return null;
-  const trimmed = input.trim().slice(0, MAX_STRING_LEN);
-  return trimmed.length > 0 ? trimmed : null;
+  return sanitizeText(input, MAX_STRING_LEN);
 }
 
 /** Same "parse, drop if invalid, never throw" contract as audit-metrics-repo.ts's sanitizeDateBound — a precise ISO instant, NOT a calendar day; callers owning day-boundary semantics (e.g. a `<input type=date>` UI field) resolve that to an inclusive end-of-day instant BEFORE it reaches this repo. */

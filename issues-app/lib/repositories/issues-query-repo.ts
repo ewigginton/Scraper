@@ -16,6 +16,7 @@
 import { and, asc, count, desc, eq, inArray, or, sql, type SQL } from 'drizzle-orm';
 import type { DbHandle } from './db-handle.ts';
 import { businessTodayIso } from '../date/business-today.ts';
+import { containsNulByte, sanitizeText } from './id-guard.ts';
 import {
   issues,
   propertyRefs,
@@ -81,31 +82,26 @@ interface NormalizedFilters {
   searchText: string | null;
 }
 
-// eslint-disable-next-line no-control-regex -- deliberately matching the NUL byte Postgres text columns can never contain.
-const NUL_BYTE_RE = new RegExp(String.fromCharCode(0), 'g');
-
 /**
  * Postgres `text`/`varchar` columns reject the NUL byte outright (driver
  * error: `invalid byte sequence for encoding "UTF8": 0x00`) — unlike SQL
  * injection, parameterization does NOT protect against this, because the
  * byte reaches the wire as a bound parameter's VALUE, not as SQL syntax.
- * Stripping it here (INJECTION FUZZ finding: `q=%00%00%00` 500'd countIssues/
+ * Stripping it (INJECTION FUZZ finding: `q=%00%00%00` 500'd countIssues/
  * listIssues) keeps every free-text filter (search, state, coordinator/queue)
  * a safe "matches nothing weirder than usual" instead of an uncaught
- * driver exception reaching the client as a 500.
+ * driver exception reaching the client as a 500. Delegates to
+ * id-guard.sanitizeText — the ONE implementation every repo that accepts
+ * free-text input now shares (round 2: comms-repo.ts/timeline-repo.ts/
+ * audit-metrics-repo.ts had each grown their own copy that omitted this
+ * strip entirely).
  */
-function stripNulBytes(value: string): string {
-  return value.replace(NUL_BYTE_RE, '');
-}
-
-/** Tolerant of any runtime shape (not just the declared TS type) — this is a trust boundary, not just a type. */
 function sanitizeStringArray(input: unknown, allowlist?: Set<string>): SanitizedArrayFilter {
   if (!Array.isArray(input)) return { requested: false, values: [] };
   const candidates = new Set<string>();
   for (const raw of input) {
-    if (typeof raw !== 'string') continue;
-    const trimmed = stripNulBytes(raw.trim().slice(0, MAX_STRING_LEN));
-    if (trimmed.length === 0) continue;
+    const trimmed = sanitizeText(raw, MAX_STRING_LEN);
+    if (!trimmed) continue;
     candidates.add(trimmed);
     if (candidates.size >= MAX_FILTER_VALUES) break;
   }
@@ -115,9 +111,7 @@ function sanitizeStringArray(input: unknown, allowlist?: Set<string>): Sanitized
 }
 
 function sanitizeString(input: unknown): string | null {
-  if (typeof input !== 'string') return null;
-  const trimmed = stripNulBytes(input.trim().slice(0, MAX_STRING_LEN));
-  return trimmed.length > 0 ? trimmed : null;
+  return sanitizeText(input, MAX_STRING_LEN);
 }
 
 function normalizeFilters(filters: IssuesQueryFilters | undefined): NormalizedFilters {
@@ -292,6 +286,15 @@ export function decodeCursor(raw: string | null | undefined): DecodedCursor | nu
     const [sortValue, id] = parsed as [unknown, unknown];
     if (typeof sortValue !== 'string' || typeof id !== 'string') return null;
     if (!UUID_RE.test(id)) return null;
+    // INJECTION FUZZ finding (round 2): sortValue is bound directly as a
+    // text-typed parameter for non-timestamp sorts (keysetPredicate's
+    // castParam) — a crafted `after=` cursor carrying a NUL byte here
+    // would reach the wire as a bound parameter's value and 500 with a
+    // raw Postgres "invalid byte sequence" error. Reject outright (treat
+    // as an invalid/stale cursor -> page 1) rather than silently
+    // stripping, since silently altering a cursor's sort value could
+    // otherwise reorder/skip rows.
+    if (containsNulByte(sortValue)) return null;
     return { sortValue, id };
   } catch {
     return null;

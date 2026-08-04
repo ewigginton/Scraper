@@ -66,4 +66,17 @@ describe('people-repo searchPeople', () => {
     const nulByte = String.fromCharCode(0).repeat(3);
     await expect(searchPeople(handle.db, { q: nulByte })).resolves.toBeDefined();
   });
+
+  it('REGRESSION (INJECTION FUZZ, round 2): a cursor whose decoded sortValue carries a NUL byte is treated as page 1, not thrown', async () => {
+    // decodePeopleCursor's sortValue is bound directly as a text parameter
+    // in the keyset predicate (display_name comparison) — replicate its
+    // exact base64url-JSON encoding here (it isn't exported) to prove the
+    // decoder rejects a NUL byte in that field rather than passing it
+    // through to the driver.
+    const match = await makePerson(handle.db, { displayName: 'Cursor Fuzz Target' });
+    const poisonedCursor = Buffer.from(JSON.stringify([`Cursor${String.fromCharCode(0)}Fuzz`, match.id]), 'utf8').toString('base64url');
+    const result = await searchPeople(handle.db, { cursor: poisonedCursor });
+    // Treated as an invalid cursor -> page 1 (matches the real data, not empty/thrown).
+    expect(result.rows.length).toBeGreaterThan(0);
+  });
 });

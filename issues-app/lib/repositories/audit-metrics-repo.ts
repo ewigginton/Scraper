@@ -22,7 +22,7 @@ import { and, desc, eq, gte, inArray, lte, sql, type SQL } from 'drizzle-orm';
 import type { DbHandle } from './db-handle.ts';
 import { auditEvents, type AuditEvent } from '../db/schema.ts';
 import { clampLimit, decodeCursor, encodeCursor } from './keyset-cursor.ts';
-import { isUuid } from './id-guard.ts';
+import { isUuid, sanitizeText } from './id-guard.ts';
 
 /**
  * object_table values any shipped command actually writes today (grepped
@@ -68,10 +68,15 @@ function sanitizeCategories(input: unknown): { requested: boolean; values: strin
   return { requested: input.length > 0, values };
 }
 
+/**
+ * Delegates to id-guard.sanitizeText (INJECTION FUZZ finding, round 2):
+ * this previously only did `.trim().slice(...)` with no NUL-byte strip, so
+ * a `%00` in `actor` reached the wire as a bound parameter's value and
+ * 500'd with a raw Postgres "invalid byte sequence" driver error on
+ * /activity instead of behaving like every other free-text filter.
+ */
 function sanitizeActor(input: unknown): string | null {
-  if (typeof input !== 'string') return null;
-  const trimmed = input.trim().slice(0, MAX_STRING_LEN);
-  return trimmed.length > 0 ? trimmed : null;
+  return sanitizeText(input, MAX_STRING_LEN);
 }
 
 // ---------------------------------------------------------------------
