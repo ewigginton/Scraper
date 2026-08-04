@@ -38,6 +38,13 @@ pagination + composite indexes · 300-case volume seed · Notion visual idiom.
   silently (spec §29.1's matter-context rule), and restricted-classification
   content follows the §29.11 policy (neutral indicator for unauthorized
   viewers, never the content).
+- Timeline filters (Emma, Aug 2026): the timeline view is filterable by
+  person or persons (multi-select of the linked people), contact/entry type
+  (call, text, email, voicemail, notice, task, hold, transition, edit),
+  direction (inbound/outbound), and recipient/participant ("who it's to" —
+  from communication_events participants). Same URL-driven server-side
+  filter pattern as /issues; filters compose; counts shown per filter;
+  bounded queries.
 - Search expansion: person name / phone / email, development / tract,
   case id — context-aware per spec §15.
 - Hover cards on every linked person/property (key info + quick links).
