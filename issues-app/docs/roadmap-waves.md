@@ -190,5 +190,10 @@ All tiers require real credentials → Hub-integration phase, after porting.
   navigable, consistent with the chip filters. CSS-first; a small shared
   client component only where native <select> can't reach (search-within-
   dropdown), reused everywhere rather than per-page one-offs.
+- Badges in Tremor's idiom (Emma, Aug 2026): refine the pill/badge set
+  to Tremor's look — status badges (Live/Inactive/Archived-style) for
+  lifecycle, subtle outline/soft variants, consistent sizing — mapped onto
+  the existing single-source pill color system (app/_lib/pills.ts) so one
+  change restyles every badge app-wide.
 - Design language only from Tremor — no new npm dependencies; built in the
   existing plain-React/CSS system.
