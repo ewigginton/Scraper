@@ -368,6 +368,20 @@ async function main() {
     }
   }
 
+  // Post-pass (integration fix for the Wave-1 verify finding): vary
+  // lifecycle stages and age a slice of the volume data so group-by, aging
+  // buckets, and the exception queues have something real to show at demo
+  // time. Direct updates stay constraint-valid: 'active' requires an owner
+  // (queue backfilled), 'passive_wait' requires a review_date.
+  const { sql } = await import('drizzle-orm');
+  await db.execute(sql`update issues set lifecycle_status='active', queue=coalesce(queue,'new_unreviewed') where id in (select id from issues where lifecycle_status='intake' order by md5(id::text) limit 110)`);
+  await db.execute(sql`update issues set lifecycle_status='waiting' where id in (select id from issues where lifecycle_status='intake' order by md5(id::text) limit 45)`);
+  await db.execute(sql`update issues set lifecycle_status='blocked' where id in (select id from issues where lifecycle_status='intake' order by md5(id::text) limit 25)`);
+  await db.execute(sql`update issues set lifecycle_status='passive_wait', review_date=(now() + interval '21 days')::date where id in (select id from issues where lifecycle_status='intake' order by md5(id::text) limit 20)`);
+  await db.execute(sql`update issues set lifecycle_status='closed' where id in (select id from issues where lifecycle_status='intake' order by md5(id::text) limit 40)`);
+  await db.execute(sql`update issues set created_at = now() - (interval '1 day' * (5 + (('x'||substr(md5(id::text),1,4))::bit(16)::int % 120))) where lifecycle_status <> 'closed' and md5(id::text) < '8'`);
+  console.log('  Varied lifecycle stages and aged a slice of cases for realistic demo data.');
+
   const elapsedMs = Date.now() - startTime;
 
   await client.close();

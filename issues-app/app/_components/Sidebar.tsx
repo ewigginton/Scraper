@@ -112,6 +112,40 @@ export async function Sidebar() {
       </div>
 
       <div className="n-nav-group">
+        <span className="n-nav-group-label">Workspace</span>
+        <a href="/people" className="n-nav-item">
+          <span className="n-nav-icon">
+            <InboxIcon size={16} />
+          </span>
+          <span className="n-nav-label">People</span>
+        </a>
+        <a href="/dashboard" className="n-nav-item">
+          <span className="n-nav-icon">
+            <TableIcon size={16} />
+          </span>
+          <span className="n-nav-label">Dashboard</span>
+        </a>
+        <a href="/activity" className="n-nav-item">
+          <span className="n-nav-icon">
+            <TableIcon size={16} />
+          </span>
+          <span className="n-nav-label">Activity</span>
+        </a>
+        <a href="/exceptions" className="n-nav-item">
+          <span className="n-nav-icon">
+            <TableIcon size={16} />
+          </span>
+          <span className="n-nav-label">Exceptions</span>
+        </a>
+        <a href="/admin/activity" className="n-nav-item">
+          <span className="n-nav-icon">
+            <TableIcon size={16} />
+          </span>
+          <span className="n-nav-label">Admin · Metrics</span>
+        </a>
+      </div>
+
+      <div className="n-nav-group">
         <a href="/issues/new" className="n-nav-item">
           <span className="n-nav-icon">
             <PlusIcon size={16} />
