@@ -16,12 +16,24 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const DEMO_DIR = join(ROOT, '.demo-db');
+// Written by scripts/demo-seed.ts only after a full successful seed —
+// see lib/db/client.ts's DEMO_SEED_SENTINEL doc comment. Checking for this
+// (not just "does .demo-db/ exist") matters because PGlite creates the
+// directory on first open regardless of whether anything was ever
+// migrated/seeded into it; treating a bare/broken directory as "already
+// seeded" left `npm run demo` unable to self-heal after an interrupted
+// first run (Ctrl-C mid-seed) without a manual --fresh or rm -rf.
+const SEED_COMPLETE_SENTINEL = join(DEMO_DIR, '.seed-complete');
 
 if (process.argv.includes('--fresh') && existsSync(DEMO_DIR)) {
   rmSync(DEMO_DIR, { recursive: true });
 }
 
-if (!existsSync(DEMO_DIR)) {
+if (!existsSync(SEED_COMPLETE_SENTINEL)) {
+  if (existsSync(DEMO_DIR)) {
+    console.log('Demo database at .demo-db/ exists but was never fully seeded (interrupted run?) — rebuilding.');
+    rmSync(DEMO_DIR, { recursive: true });
+  }
   console.log('Building demo database (migrations + fixture cases)...');
   const seed = spawnSync(
     process.execPath,

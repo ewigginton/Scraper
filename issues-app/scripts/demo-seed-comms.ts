@@ -35,11 +35,15 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PGlite } from '@electric-sql/pglite';
 import { drizzle } from 'drizzle-orm/pglite';
-import { eq } from 'drizzle-orm';
+import { eq, inArray } from 'drizzle-orm';
 import * as schema from '../lib/db/schema.ts';
+import type { DbHandle } from '../lib/repositories/db-handle.ts';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const DEMO_DIR = join(ROOT, '.demo-db');
+
+/** provider_system value this script stamps on everything it inserts — also the key used to find and clear its own prior output on rerun (see clearPriorDemoComms). */
+const PROVIDER_SYSTEM = 'demo-seed-comms';
 
 /** Seeded PRNG (mulberry32 style) — copied verbatim from scripts/demo-seed.ts's SeededRandom for reproducibility; see that file's own doc comment for the algorithm's provenance. */
 class SeededRandom {
@@ -119,24 +123,50 @@ const VENDOR_THREAD_TEMPLATES = {
   ],
 };
 
-async function main() {
-  if (!existsSync(DEMO_DIR)) {
-    console.error(
-      'demo-seed-comms: .demo-db was not found. Run `npm run demo` first (it builds the base demo database this script adds communications on top of), then re-run this script.',
-    );
-    process.exit(1);
-  }
+/**
+ * Deletes every communication_events/communication_links row this script
+ * previously inserted (identified by provider_system = PROVIDER_SYSTEM),
+ * links first (communication_links.communication_event_id is ON DELETE
+ * RESTRICT), so a rerun starts from a clean slate instead of colliding with
+ * last run's rows on communication_events_provider_dedup_idx. Idempotency
+ * fix for the "crashes on rerun" bug: this makes the whole script a safe
+ * delete-then-reinsert refresh rather than an append that assumes it has
+ * never run before.
+ */
+async function clearPriorDemoComms(tx: DbHandle): Promise<void> {
+  const priorEvents = await tx
+    .select({ id: schema.communicationEvents.id })
+    .from(schema.communicationEvents)
+    .where(eq(schema.communicationEvents.providerSystem, PROVIDER_SYSTEM));
+  const priorEventIds = priorEvents.map((r) => r.id);
+  if (priorEventIds.length === 0) return;
+  await tx.delete(schema.communicationLinks).where(inArray(schema.communicationLinks.communicationEventId, priorEventIds));
+  await tx.delete(schema.communicationEvents).where(inArray(schema.communicationEvents.id, priorEventIds));
+}
 
-  const client = new PGlite(DEMO_DIR);
-  const db = drizzle(client, { schema });
+export interface SeedDemoCommsResult {
+  personsSeeded: number;
+  commsInserted: number;
+  vendorThreadsSeeded: number;
+  eventCount: number;
+  linkCount: number;
+}
+
+/**
+ * Core seeding logic, decoupled from opening/closing the .demo-db PGlite
+ * file so it can run against any already-migrated DbHandle — in particular
+ * an in-memory test PGlite instance (see test/demo-seed-comms.test.ts's
+ * idempotency regression coverage), not just the on-disk demo database.
+ * Idempotent: safe to call more than once against the same database (see
+ * clearPriorDemoComms above).
+ */
+export async function seedDemoComms(rootDb: DbHandle): Promise<SeedDemoCommsResult | null> {
   const rng = new SeededRandom(4242);
 
-  const issuePeopleRows = await db.select().from(schema.issuePeople);
+  const issuePeopleRows = await rootDb.select().from(schema.issuePeople);
   const personIds = [...new Set(issuePeopleRows.map((r) => r.personRefId))];
   if (personIds.length === 0) {
-    console.error('demo-seed-comms: no issue_people rows found in .demo-db — nothing to seed communications for. Run `npm run demo` first.');
-    await client.close();
-    process.exit(1);
+    return null;
   }
 
   const issuesByPerson = new Map<string, string[]>();
@@ -146,54 +176,13 @@ async function main() {
     issuesByPerson.set(row.personRefId, list);
   }
 
-  const allIssues = await db.select({ id: schema.issues.id, issueType: schema.issues.issueType }).from(schema.issues);
-  const issueTypeById = new Map(allIssues.map((i) => [i.id, i.issueType]));
+  const allIssues = await rootDb.select({ id: schema.issues.id, issueType: schema.issues.issueType }).from(schema.issues);
 
   // A fictional "vendor" person for cleanup/default threads that don't
   // already have an issue_people 'vendor' role — prefers the handcrafted
   // fixture vendor (demo-seed.ts's "Hilltop Clearing LLC (demo vendor)"),
   // falling back to any org-kind person_ref if that fixture isn't present.
-  const [fixtureVendor] = await db.select().from(schema.personRefs).where(eq(schema.personRefs.kind, 'org')).limit(1);
-
-  let eventCounter = 0;
-  let linkCounter = 0;
-
-  async function insertComm(opts: {
-    channel: schema.CommunicationChannel;
-    direction: schema.CommunicationDirection;
-    personId: string;
-    occurredAt: Date;
-    summary: string;
-    linkIssueIds: string[];
-    linkPersonId?: string;
-  }): Promise<void> {
-    eventCounter += 1;
-    const [event] = await db
-      .insert(schema.communicationEvents)
-      .values({
-        channel: opts.channel,
-        direction: opts.direction,
-        providerSystem: 'demo-seed-comms',
-        providerEventId: `demo-comm-${eventCounter}`,
-        occurredAt: opts.occurredAt,
-        fromPersonRefId: opts.direction === 'inbound' ? opts.personId : null,
-        toPersonRefId: opts.direction === 'outbound' ? opts.personId : null,
-        summary: opts.summary,
-      })
-      .returning();
-    if (!event) throw new Error('demo-seed-comms: communication_events insert returned no row');
-
-    const linkRows: schema.NewCommunicationLink[] = [];
-    // Always link to the person (so it folds in via includeLinkedPeople).
-    linkRows.push({ communicationEventId: event.id, personRefId: opts.linkPersonId ?? opts.personId });
-    for (const issueId of opts.linkIssueIds) {
-      linkRows.push({ communicationEventId: event.id, issueId, personRefId: null });
-    }
-    for (const link of linkRows) {
-      linkCounter += 1;
-      await db.insert(schema.communicationLinks).values(link);
-    }
-  }
+  const [fixtureVendor] = await rootDb.select().from(schema.personRefs).where(eq(schema.personRefs.kind, 'org')).limit(1);
 
   function randomOccurredAt(): Date {
     const dayOffset = rng.int(60); // 0-59 days ago
@@ -207,66 +196,141 @@ async function main() {
 
   let personsSeeded = 0;
   let commsInserted = 0;
-
-  for (const personId of personIds) {
-    const linkedIssueIds = issuesByPerson.get(personId) ?? [];
-    if (linkedIssueIds.length === 0) continue;
-    const primaryIssueId = rng.pick(linkedIssueIds);
-    const otherIssueIds = linkedIssueIds.filter((id) => id !== primaryIssueId);
-
-    const commCount = 3 + rng.int(8); // 3-10 inclusive
-    for (let i = 0; i < commCount; i++) {
-      const channel = rng.pick(CHANNELS);
-      const direction = rng.pick(DIRECTIONS);
-      const templates = SUMMARY_TEMPLATES[channel];
-      const summary = templates.length > 0 ? rng.pick(templates) : 'Communication logged.';
-
-      // (c) cross-matter: ~20% of comms for a multi-issue person also tag
-      // one of their OTHER issues directly, so it surfaces as cross-matter
-      // context when viewing THIS comm's primary issue's timeline.
-      const linkIssueIds: string[] = [];
-      if (otherIssueIds.length > 0 && rng.bool(0.2)) {
-        linkIssueIds.push(rng.pick(otherIssueIds));
-      }
-
-      await insertComm({ channel, direction, personId, occurredAt: randomOccurredAt(), summary, linkIssueIds });
-      commsInserted += 1;
-    }
-    personsSeeded += 1;
-  }
-
-  // (b) vendor+owner threads on every buyer_cleanup / default_recovery issue.
   let vendorThreadsSeeded = 0;
-  if (fixtureVendor) {
-    for (const issue of allIssues) {
-      if (issue.issueType !== 'buyer_cleanup' && issue.issueType !== 'default_recovery') continue;
-      const threadLength = 3 + rng.int(4); // 3-6
-      for (let i = 0; i < threadLength; i++) {
-        const direction: schema.CommunicationDirection = rng.bool(0.5) ? 'outbound' : 'inbound';
-        const summary = direction === 'outbound' ? rng.pick(VENDOR_THREAD_TEMPLATES.toVendor) : rng.pick(VENDOR_THREAD_TEMPLATES.fromVendor);
-        await insertComm({
-          channel: rng.bool(0.6) ? 'email' : 'text',
-          direction,
-          personId: fixtureVendor.id,
-          occurredAt: randomOccurredAt(),
-          summary,
-          // Direct-to-issue link (not via issue_people, which this script
-          // never writes to) — still surfaces on that issue's timeline with
-          // linkage 'direct'.
-          linkIssueIds: [issue.id],
-        });
+  let eventCounter = 0;
+  let linkCounter = 0;
+
+  // Everything below — clearing this script's own prior output AND
+  // reinserting it — runs in one transaction, so a crash partway through a
+  // rerun rolls back to the last good state instead of leaving a
+  // partially-cleared/partially-reinserted .demo-db committed.
+  await rootDb.transaction(async (tx) => {
+    await clearPriorDemoComms(tx);
+
+    async function insertComm(opts: {
+      channel: schema.CommunicationChannel;
+      direction: schema.CommunicationDirection;
+      personId: string;
+      occurredAt: Date;
+      summary: string;
+      linkIssueIds: string[];
+      linkPersonId?: string;
+    }): Promise<void> {
+      eventCounter += 1;
+      const [event] = await tx
+        .insert(schema.communicationEvents)
+        .values({
+          channel: opts.channel,
+          direction: opts.direction,
+          providerSystem: PROVIDER_SYSTEM,
+          // Content-derived (person + per-run sequence), not a bare counter
+          // restarting at 1 every invocation — combined with clearing this
+          // provider's rows above, a rerun can never collide with rows a
+          // prior run left behind on communication_events_provider_dedup_idx.
+          providerEventId: `demo-comm-${opts.personId}-${eventCounter}`,
+          occurredAt: opts.occurredAt,
+          fromPersonRefId: opts.direction === 'inbound' ? opts.personId : null,
+          toPersonRefId: opts.direction === 'outbound' ? opts.personId : null,
+          summary: opts.summary,
+        })
+        .returning();
+      if (!event) throw new Error('demo-seed-comms: communication_events insert returned no row');
+
+      const linkRows: schema.NewCommunicationLink[] = [];
+      // Always link to the person (so it folds in via includeLinkedPeople).
+      linkRows.push({ communicationEventId: event.id, personRefId: opts.linkPersonId ?? opts.personId });
+      for (const issueId of opts.linkIssueIds) {
+        linkRows.push({ communicationEventId: event.id, issueId, personRefId: null });
+      }
+      for (const link of linkRows) {
+        linkCounter += 1;
+        await tx.insert(schema.communicationLinks).values(link);
+      }
+    }
+
+    for (const personId of personIds) {
+      const linkedIssueIds = issuesByPerson.get(personId) ?? [];
+      if (linkedIssueIds.length === 0) continue;
+      const primaryIssueId = rng.pick(linkedIssueIds);
+      const otherIssueIds = linkedIssueIds.filter((id) => id !== primaryIssueId);
+
+      const commCount = 3 + rng.int(8); // 3-10 inclusive
+      for (let i = 0; i < commCount; i++) {
+        const channel = rng.pick(CHANNELS);
+        const direction = rng.pick(DIRECTIONS);
+        const templates = SUMMARY_TEMPLATES[channel];
+        const summary = templates.length > 0 ? rng.pick(templates) : 'Communication logged.';
+
+        // (c) cross-matter: ~20% of comms for a multi-issue person also tag
+        // one of their OTHER issues directly, so it surfaces as cross-matter
+        // context when viewing THIS comm's primary issue's timeline.
+        const linkIssueIds: string[] = [];
+        if (otherIssueIds.length > 0 && rng.bool(0.2)) {
+          linkIssueIds.push(rng.pick(otherIssueIds));
+        }
+
+        await insertComm({ channel, direction, personId, occurredAt: randomOccurredAt(), summary, linkIssueIds });
         commsInserted += 1;
       }
-      vendorThreadsSeeded += 1;
+      personsSeeded += 1;
     }
+
+    // (b) vendor+owner threads on every buyer_cleanup / default_recovery issue.
+    if (fixtureVendor) {
+      for (const issue of allIssues) {
+        if (issue.issueType !== 'buyer_cleanup' && issue.issueType !== 'default_recovery') continue;
+        const threadLength = 3 + rng.int(4); // 3-6
+        for (let i = 0; i < threadLength; i++) {
+          const direction: schema.CommunicationDirection = rng.bool(0.5) ? 'outbound' : 'inbound';
+          const summary = direction === 'outbound' ? rng.pick(VENDOR_THREAD_TEMPLATES.toVendor) : rng.pick(VENDOR_THREAD_TEMPLATES.fromVendor);
+          await insertComm({
+            channel: rng.bool(0.6) ? 'email' : 'text',
+            direction,
+            personId: fixtureVendor.id,
+            occurredAt: randomOccurredAt(),
+            summary,
+            // Direct-to-issue link (not via issue_people, which this script
+            // never writes to) — still surfaces on that issue's timeline with
+            // linkage 'direct'.
+            linkIssueIds: [issue.id],
+          });
+          commsInserted += 1;
+        }
+        vendorThreadsSeeded += 1;
+      }
+    }
+  });
+
+  return { personsSeeded, commsInserted, vendorThreadsSeeded, eventCount: eventCounter, linkCount: linkCounter };
+}
+
+async function main() {
+  // .seed-complete is written by scripts/demo-seed.ts only after a full
+  // successful seed (see lib/db/client.ts's DEMO_SEED_SENTINEL) — checking
+  // for it, not just the directory, avoids opening a partially-built
+  // .demo-db/ left behind by an interrupted `npm run demo`.
+  if (!existsSync(join(DEMO_DIR, '.seed-complete'))) {
+    console.error(
+      'demo-seed-comms: .demo-db was not found or was never fully seeded. Run `npm run demo` first (it builds the base demo database this script adds communications on top of), then re-run this script.',
+    );
+    process.exit(1);
   }
 
+  const client = new PGlite(DEMO_DIR);
+  const rootDb = drizzle(client, { schema });
+  const result = await seedDemoComms(rootDb);
   await client.close();
+
+  if (!result) {
+    console.error('demo-seed-comms: no issue_people rows found in .demo-db — nothing to seed communications for. Run `npm run demo` first.');
+    process.exit(1);
+  }
+
   console.log('demo-seed-comms: done.');
-  console.log(`  People with communications: ${personsSeeded}`);
-  console.log(`  Vendor/cleanup threads: ${vendorThreadsSeeded}`);
-  console.log(`  communication_events inserted: ${commsInserted} (${eventCounter} total incl. any pre-existing counter state)`);
-  console.log(`  communication_links inserted: ${linkCounter}`);
+  console.log(`  People with communications: ${result.personsSeeded}`);
+  console.log(`  Vendor/cleanup threads: ${result.vendorThreadsSeeded}`);
+  console.log(`  communication_events inserted: ${result.commsInserted} (${result.eventCount} total this run)`);
+  console.log(`  communication_links inserted: ${result.linkCount}`);
 }
 
 main().catch((err) => {

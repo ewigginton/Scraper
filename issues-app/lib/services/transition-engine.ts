@@ -48,9 +48,10 @@ import { checkReleaseEligibility } from './eligibility-service.ts';
 import { setActorContext } from '../db/actor-context.ts';
 import { writeAudit } from './audit.ts';
 import { publishDomainEvent } from './events.ts';
+import { applyHold, releaseHold } from './hold-service.ts';
+import { completeTask } from './task-service.ts';
 import {
   bids,
-  holds,
   issuePeople,
   issues,
   phaseInstances,
@@ -114,13 +115,35 @@ export interface TransitionCtx {
   phaseQueue?: string | null;
   /** If provided, overrides the issue's lifecycle_status after the transition. */
   newLifecycleStatus?: Issue['lifecycleStatus'];
-  /** Task ids to close (status -> 'completed') as part of this transition. */
+  /**
+   * Task ids to close (status -> 'completed') as part of this transition —
+   * routed through task-service.completeTask (same ownership/queue/role
+   * authority check as the standalone "complete a task" command) rather
+   * than written directly, so an unauthorized close is rejected exactly
+   * like it would be outside a transition. Queue names ctx.roles's actor
+   * covers, for the same completeTask authority check (defaults to none,
+   * meaning only a directly-assigned owner or a manager/admin role
+   * override can close a task via this path unless supplied).
+   */
   tasksToCloseIds?: string[];
+  actorQueues?: string[];
   /** New tasks to open as part of this transition (issueId/phaseInstanceId are filled in automatically). */
   tasksToCreate?: Array<Omit<NewTask, 'issueId' | 'phaseInstanceId'>>;
-  /** New holds to apply as part of this transition (propertyRefId/issueId are filled in automatically). */
+  /**
+   * New holds to apply as part of this transition (propertyRefId/issueId
+   * are filled in automatically) — routed through hold-service.applyHold
+   * so each carries its own hold_applied audit row/domain event exactly
+   * like the standalone "apply a hold" command, not just the transition's
+   * own phase_transitioned audit.
+   */
   holdsToApply?: Array<Omit<NewHold, 'propertyRefId' | 'issueId'>>;
-  /** Hold ids to release as part of this transition. */
+  /**
+   * Hold ids to release as part of this transition — routed through
+   * hold-service.releaseHold, so the hold's release_authority is checked
+   * against ctx.roles exactly like the standalone "release a hold" command
+   * (an unauthorized release throws HoldServiceError, it is never a silent
+   * bypass just because it was requested via a transition).
+   */
   holdsToReleaseIds?: string[];
   holdReleaseReason?: string;
   holdReleasedBy?: string;
@@ -565,10 +588,25 @@ export async function transitionPhase(
     throw new Error('transition-engine: failed to update issue after transition');
   }
 
+  // Closing tasks, applying holds, and releasing holds all go through
+  // their owning services (task-service.completeTask, hold-service.
+  // applyHold/releaseHold) rather than writing the tables directly, so a
+  // transition can never bypass the same ownership/queue/role and
+  // release-authority checks — or skip the per-action audit row/domain
+  // event — that the standalone commands enforce. See TransitionCtx's doc
+  // comments on tasksToCloseIds/holdsToApply/holdsToReleaseIds.
   const closedTasks: Task[] = [];
   for (const taskId of ctx.tasksToCloseIds ?? []) {
-    const [closed] = await tx.update(tasks).set({ status: 'completed' }).where(eq(tasks.id, taskId)).returning();
-    if (closed) closedTasks.push(closed);
+    const closed = await completeTask(tx, {
+      taskId,
+      actorId: ctx.actorId ?? null,
+      actorExternalId: ctx.actorExternalId ?? null,
+      actorRole: ctx.actorRole ?? null,
+      actorRoles: ctx.roles,
+      actorQueues: ctx.actorQueues ?? [],
+      correlationId: ctx.correlationId ?? null,
+    });
+    closedTasks.push(closed);
   }
 
   const createdTasks: Task[] = [];
@@ -582,11 +620,16 @@ export async function transitionPhase(
 
   const appliedHolds: Hold[] = [];
   for (const holdInput of ctx.holdsToApply ?? []) {
-    const [applied] = await tx
-      .insert(holds)
-      .values({ ...holdInput, propertyRefId: issue.propertyRefId, issueId: issue.id })
-      .returning();
-    if (applied) appliedHolds.push(applied);
+    const applied = await applyHold(tx, {
+      ...holdInput,
+      propertyRefId: issue.propertyRefId,
+      issueId: issue.id,
+      actorId: ctx.actorId ?? null,
+      actorExternalId: ctx.actorExternalId ?? null,
+      actorRole: ctx.actorRole ?? null,
+      correlationId: ctx.correlationId ?? null,
+    });
+    appliedHolds.push(applied);
   }
 
   const releasedHolds: Hold[] = [];

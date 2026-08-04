@@ -13,7 +13,7 @@
  * seeded PRNG for reproducibility.
  */
 
-import { readdirSync, readFileSync, rmSync, existsSync } from 'node:fs';
+import { readdirSync, readFileSync, rmSync, existsSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PGlite } from '@electric-sql/pglite';
@@ -26,6 +26,17 @@ import { recordPossession } from '../lib/services/possession-service.ts';
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const DEMO_DIR = join(ROOT, '.demo-db');
 const MIGRATIONS_DIR = join(ROOT, 'supabase', 'migrations');
+
+/**
+ * Written only after every migration and fixture insert below has
+ * committed and the PGlite client has closed cleanly — lib/db/client.ts's
+ * createDemoDb() requires this sentinel before it will open .demo-db/, and
+ * scripts/demo.mjs checks for it before deciding a rerun can skip this
+ * script. Its absence is the only reliable "was this ever fully seeded?"
+ * signal: PGlite creates the .demo-db/ directory on first use regardless
+ * of whether anything was ever migrated/seeded into it.
+ */
+const SEED_COMPLETE_SENTINEL = join(DEMO_DIR, '.seed-complete');
 
 function isoDate(daysFromNow: number): string {
   const d = new Date();
@@ -427,6 +438,9 @@ async function main() {
   const elapsedMs = Date.now() - startTime;
 
   await client.close();
+  // Last step, only after the client has closed cleanly: mark this
+  // .demo-db/ as fully seeded. See SEED_COMPLETE_SENTINEL's doc comment.
+  writeFileSync(SEED_COMPLETE_SENTINEL, `${new Date().toISOString()}\n`);
   console.log(`✓ Demo database ready at ${DEMO_DIR}`);
   console.log(`  Migrations: ${files.length}`);
   console.log(`  Fixture cases: 4 (handcrafted showcase)`);

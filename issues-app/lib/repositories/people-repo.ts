@@ -165,13 +165,16 @@ export async function getPersonIssues(db: DbHandle, personRefId: string): Promis
 
 // ---------------------------------------------------------------------
 // personTimelinePage — thin wrapper over timeline-repo.personTimeline that
-// adds an in-memory date-range filter (roadmap: "filter controls ... date
-// range"; timeline-repo.TimelineFilters has no date-range field — see that
-// module's doc comment, out of this lane's assigned paths to extend). The
-// underlying query is still ORDER BY + LIMIT + bounded per source; the date
-// bound only trims the already-bounded page in memory, so a narrow range can
-// legitimately return fewer rows than `limit` without that meaning "no more
-// pages" — callers should keep following nextCursor regardless.
+// accepts fromDate/toDate as separate calendar-day params (the shape a
+// `<input type=date>` filter control naturally produces) and folds them
+// into timeline-repo.TimelineFilters.fromDate/toDate before delegating —
+// that field DOES exist and IS pushed down to SQL per-source (comms via
+// gte/lte-backed repo params, audit via gte/lte, issue_link/phase/notice
+// in-memory over an already-bounded fetch — see timeline-repo.ts's own
+// doc comments). This wrapper must never re-filter `entries` itself: doing
+// so would trim an already-limit-ed, correctly-cursored page AFTER the
+// fact, which both undercounts the page (fewer than `limit` rows even when
+// more matching rows exist) and produces a stale nextCursor.
 // ---------------------------------------------------------------------
 
 export interface PersonTimelinePageParams {
@@ -183,32 +186,20 @@ export interface PersonTimelinePageParams {
   cursor?: string | null;
 }
 
-function parseDateBound(raw: string | null | undefined): number | null {
-  if (typeof raw !== 'string' || raw.length === 0) return null;
-  const ms = Date.parse(raw);
-  return Number.isNaN(ms) ? null : ms;
-}
-
 export async function personTimelinePage(db: DbHandle, params: PersonTimelinePageParams): Promise<TimelineResult> {
-  const result = await timelineRepo.personTimeline(db, {
+  return timelineRepo.personTimeline(db, {
     personRefId: params.personRefId,
-    filters: params.filters,
+    filters: {
+      ...params.filters,
+      fromDate: params.fromDate ?? params.filters?.fromDate ?? null,
+      // toDate is a calendar day boundary — treat it as inclusive through
+      // end-of-day, the same convention timeline-repo.TimelineFilters's own
+      // doc comment documents for this exact field.
+      toDate: params.toDate ? `${params.toDate}T23:59:59.999Z` : (params.filters?.toDate ?? null),
+    },
     limit: params.limit,
     cursor: params.cursor,
   });
-
-  const fromMs = parseDateBound(params.fromDate);
-  // toDate is a calendar day boundary — treat it as inclusive through end-of-day.
-  const toMs = parseDateBound(params.toDate ? `${params.toDate}T23:59:59.999Z` : null);
-  if (fromMs === null && toMs === null) return result;
-
-  const entries = result.entries.filter((e) => {
-    const t = e.at.getTime();
-    if (fromMs !== null && t < fromMs) return false;
-    if (toMs !== null && t > toMs) return false;
-    return true;
-  });
-  return { entries, nextCursor: result.nextCursor };
 }
 
 // ---------------------------------------------------------------------
