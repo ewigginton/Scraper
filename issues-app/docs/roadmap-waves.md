@@ -15,6 +15,19 @@ pagination + composite indexes · 300-case volume seed · Notion visual idiom.
   History section becomes a readable activity feed: newest-first, per-field
   diffs ("Priority: Normal → High — <actor>, <time>"), category filter kept,
   paginated. Same audit_events data, human rendering.
+- Person timeline page (Emma, Aug 2026): /people/[id] renders the person's
+  message/communication timeline from the SHARED communication_events +
+  communication_links tables (spec §9.1, §28.6, §29.11) plus their linked
+  issues and audit projections. Explicitly a stand-in for the Prospects
+  (CRM) person page: when the Hub's CRM ships its person view, Issues links/
+  embeds that page instead — same canonical tables, no duplicate store, no
+  reinvention. Demo seed gains fictional communication_events (calls/texts/
+  emails per person) so timelines are visible at demo time.
+- Issue timeline view (Emma, Aug 2026): each case opens into a "Timeline"
+  view — chronological interleave of communications, tasks, holds applied/
+  released, phase transitions, notices, and material edits from the
+  canonical records (§29.11 shared record-timeline). Same data as the
+  change-log feed but story-ordered and including communications; paginated.
 - Search expansion: person name / phone / email, development / tract,
   case id — context-aware per spec §15.
 - Hover cards on every linked person/property (key info + quick links).
