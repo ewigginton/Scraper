@@ -57,11 +57,6 @@ export async function getById(db: DbHandle, id: string): Promise<IssueWithCaseDa
   return { ...issue, people, holds: issueHolds, tasks: issueTasks };
 }
 
-/** List issues filtered by lifecycle_status. */
-export async function listByStatus(db: DbHandle, status: LifecycleStatus): Promise<Issue[]> {
-  return db.select().from(issues).where(eq(issues.lifecycleStatus, status));
-}
-
 /**
  * Update an issue's lifecycle_status (and any other supplied columns in
  * the same patch). Returns the updated row, or undefined if no issue with

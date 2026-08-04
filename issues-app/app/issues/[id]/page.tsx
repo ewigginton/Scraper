@@ -1,10 +1,18 @@
 import { getCurrentUser } from '../../../lib/auth/current-user.ts';
 import { tryGetDb } from '../../_lib/db.ts';
+import { withActor } from '../../../lib/db/actor-context.ts';
 import { loadCaseData, HISTORY_CATEGORY_LABELS, type HistoryCategory } from '../../_lib/case-view.ts';
 import { propertyLabel } from '../../_lib/reference-data.ts';
 import { classifyDueDate, formatDate, formatDateTime } from '../../_lib/dates.ts';
 import { DatabaseUnavailable } from '../../_components/EmptyState.tsx';
-import { completeTaskAction, rescheduleTaskAction, transitionPhaseAction, type RenderableBlocker } from '../../actions.ts';
+import {
+  completeTaskAction,
+  rescheduleTaskAction,
+  transitionPhaseAction,
+  recordPriceReviewAction,
+  recordPossessionAction,
+  type RenderableBlocker,
+} from '../../actions.ts';
 import type { Task } from '../../../lib/db/schema.ts';
 
 export const metadata = { title: 'Case — CCL Hub Issues' };
@@ -44,7 +52,16 @@ export default async function CasePage({ params, searchParams }: PageProps) {
     );
   }
 
-  const caseData = await loadCaseData(db, id);
+  // ADVERSARIAL-REVIEW FIX: read through withActor (an explicit transaction
+  // with app.actor_id/app.roles set) rather than the bare `db` handle — see
+  // lib/db/actor-context.ts's withActor doc comment. Under a real
+  // RLS-governed connection the previous bare-`db` read returned zero rows
+  // for every table (a silent lockout); under the connection this repo
+  // actually runs on (RLS bypassed), user.roles is now ALSO the input to
+  // loadCaseData's application-layer evidence-classification filter, which
+  // is the control that actually matters regardless of which connection is
+  // in effect.
+  const caseData = await withActor(db, { actorId: user.id, roles: user.roles }, (tx) => loadCaseData(tx, id, user.roles));
   if (!caseData) {
     return (
       <>
@@ -165,6 +182,42 @@ export default async function CasePage({ params, searchParams }: PageProps) {
             ))}
           </div>
         )}
+      </section>
+
+      <section className="card section-details" style={{ marginTop: 'var(--space-lg)' }}>
+        <h2>Release-gate facts</h2>
+        <p className="muted">
+          Recording these is what lets a release-track transition (relisting / releasing / released) actually clear
+          eligibility — see spec §10 (price review) and §29.10/§28.3 (possession/vacancy).
+        </p>
+        <div className="flex gap-md" style={{ flexWrap: 'wrap' }}>
+          <form action={recordPriceReviewAction}>
+            <input type="hidden" name="issueId" value={issue.id} />
+            <input type="hidden" name="returnTo" value={`/issues/${issue.id}`} />
+            <button type="submit" className="btn">
+              Record price review (today)
+            </button>
+            {issue.priceReviewedAt && <p className="muted">Last reviewed: {formatDateTime(issue.priceReviewedAt)}</p>}
+          </form>
+          <form action={recordPossessionAction} className="flex gap-sm items-end">
+            <input type="hidden" name="issueId" value={issue.id} />
+            <input type="hidden" name="returnTo" value={`/issues/${issue.id}`} />
+            <div>
+              <label htmlFor="possessionStatus">Possession status</label>
+              <br />
+              <select id="possessionStatus" name="possessionStatus" defaultValue="vacancy_verified">
+                <option value="occupied_or_suspected">Occupied or suspected occupied</option>
+                <option value="vacancy_unverified">Vacancy unverified</option>
+                <option value="vacancy_verified">Vacancy verified</option>
+                <option value="personal_property_present">Personal property present</option>
+                <option value="cleared">Cleared</option>
+              </select>
+            </div>
+            <button type="submit" className="btn">
+              Record possession observation
+            </button>
+          </form>
+        </div>
       </section>
 
       <details className="card section-details" open>
@@ -427,6 +480,11 @@ export default async function CasePage({ params, searchParams }: PageProps) {
 
       <details className="card section-details">
         <summary>Evidence ({caseData.evidenceFiles.length})</summary>
+        {caseData.restrictedEvidenceCount > 0 && (
+          <p className="muted" role="note">
+            {caseData.restrictedEvidenceCount} restricted record{caseData.restrictedEvidenceCount === 1 ? '' : 's'} (access required) not shown.
+          </p>
+        )}
         {caseData.evidenceFiles.length === 0 ? (
           <p className="muted">No evidence files recorded.</p>
         ) : (

@@ -115,6 +115,8 @@ The canonical Property Operations case, its lifecycle, phases, and work items.
 | wake_event | text | yes | | Event trigger for passive_wait state (spec §21) |
 | review_date | date | yes | | Review date for passive_wait state (spec §21) |
 | config_version_id | uuid | yes | | Foreign key to config_versions; historical cases keep their config version |
+| map_link | text | yes | | Property-Operations-owned Google My Maps link (spec §5/§6, added 20260731090400). NOT `property_refs.map_link` — that column is a sync-owned read-through cache with one writer (the Inventory/Tables sync job); Property Operations never writes it. |
+| price_reviewed_at | timestamptz | yes | | Property-Operations-owned timestamp of the last development-price review (spec §10, added 20260731090400). Compared against `thresholds.price_review_window_months` by the `price_review_complete` prerequisite/blocker. |
 
 **Indices:** property_ref_id, lifecycle_status, coordinator_id, priority, current_phase_instance_id, review_date  
 **Constraints:**
@@ -862,6 +864,7 @@ System configuration, integration tracking, domain events, and audit trail.
 | id | uuid | no | gen_random_uuid() | Primary key |
 | created_at | timestamptz | no | now() | Row creation timestamp (only timestamp, no updated_at) |
 | actor_id | uuid | yes | | Foreign key to person_refs (who performed action) |
+| actor_external_id | text | yes | | Hub staff identity (`lib/auth/current-user.ts` `CurrentUser.id`), added 20260731090500. A free-text external identity, NOT a `person_refs` row — `actor_id` is a uuid FK and cannot hold it. Set on every command whose caller is Hub staff rather than a `person_refs`-modeled actor. |
 | actor_role | text | yes | | Role of actor at time of action |
 | action | text | no | | Action taken (e.g., 'create', 'update', 'release', 'transition') |
 | object_table | text | no | | Table of affected object |

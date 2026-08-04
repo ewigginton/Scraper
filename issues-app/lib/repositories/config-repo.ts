@@ -72,10 +72,31 @@ export async function currentVersion(db: DbHandle, configKey: string): Promise<C
         or(isNull(configVersions.effectiveTo), gt(configVersions.effectiveTo, now)),
       ),
     )
-    .orderBy(desc(configVersions.effectiveFrom))
+    // ADVERSARIAL-REVIEW FIX: ordering by effective_from alone has no
+    // secondary tiebreak, so two rows sharing an identical effective_from
+    // (a config-as-data insert/migration that doesn't guarantee strict
+    // monotonic timestamps) would make "which one is current" arbitrary
+    // (row-order-dependent) rather than deterministically the newer one.
+    // created_at, then id, make the ordering fully deterministic even on an
+    // exact effective_from tie.
+    .orderBy(desc(configVersions.effectiveFrom), desc(configVersions.createdAt), desc(configVersions.id))
     .limit(1);
 
-  currentVersionCache.set(configKey, { value: row, expiresAt: Date.now() + CACHE_TTL_MS });
+  // ROUND-2 ADVERSARIAL-REVIEW FIX: this used to cache `row` unconditionally,
+  // including `undefined` (a miss). A miss caused by an actor-less/RLS-
+  // filtered read (e.g. a page that forgot withActor, per app/issues/new/
+  // page.tsx's sibling fix) would then be served, for the rest of
+  // CACHE_TTL_MS, to every SUBSEQUENT caller — including a correctly
+  // actor-scoped transitionPhase call — making loadTransitionDefinitions
+  // return [] and every phase transition on every issue fail with
+  // "disallowed_transition" / "Allowed destinations: none" until the TTL
+  // expired. This cache exists to avoid re-querying an unchanging config on
+  // hot paths; a miss is exactly the case where staleness is unacceptable
+  // (it disables the transition engine entirely), so misses are never
+  // cached — only a genuine hit is.
+  if (row) {
+    currentVersionCache.set(configKey, { value: row, expiresAt: Date.now() + CACHE_TTL_MS });
+  }
   return row;
 }
 
@@ -93,7 +114,10 @@ export async function get<T = unknown>(db: DbHandle, configKey: string, entryKey
 
   const version = await currentVersion(db, configKey);
   if (!version) {
-    entryCache.set(key, { value: undefined, expiresAt: Date.now() + CACHE_TTL_MS });
+    // ROUND-2 ADVERSARIAL-REVIEW FIX: do not negative-cache — see
+    // currentVersion's matching fix above for why serving a stale miss to a
+    // later, correctly-scoped caller is unacceptable here (it silently
+    // disables the transition engine for the rest of the TTL).
     return undefined;
   }
 
@@ -109,7 +133,9 @@ export async function get<T = unknown>(db: DbHandle, configKey: string, entryKey
     );
 
   const value = row?.entryValue as T | undefined;
-  entryCache.set(key, { value, expiresAt: Date.now() + CACHE_TTL_MS });
+  if (row) {
+    entryCache.set(key, { value, expiresAt: Date.now() + CACHE_TTL_MS });
+  }
   return value;
 }
 

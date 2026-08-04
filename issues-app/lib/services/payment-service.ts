@@ -46,6 +46,8 @@ export interface SubmitPaymentRequestInput {
   sourceDocumentEvidenceFileId?: string | null;
   requestedBy?: string | null;
   actorId?: string | null;
+  /** Hub staff identity (lib/auth/current-user.ts CurrentUser.id) — recorded on audit_events.actor_external_id. */
+  actorExternalId?: string | null;
   actorRole?: string | null;
   correlationId?: string | null;
 }
@@ -79,6 +81,7 @@ export async function submitPaymentRequest(tx: DbHandle, input: SubmitPaymentReq
     if (duplicates.length > 0) {
       await writeAudit(auditDb, {
         actorId: input.actorId ?? null,
+        actorExternalId: input.actorExternalId ?? null,
         actorRole: input.actorRole ?? null,
         action: 'payment_request_duplicate_blocked',
         objectTable: 'payment_requests',
@@ -111,6 +114,7 @@ export async function submitPaymentRequest(tx: DbHandle, input: SubmitPaymentReq
 
   await writeAudit(tx, {
     actorId: input.actorId ?? null,
+    actorExternalId: input.actorExternalId ?? null,
     actorRole: input.actorRole ?? null,
     action: 'payment_request_submitted',
     objectTable: 'payment_requests',
@@ -137,6 +141,8 @@ export interface ApprovePaymentRequestInput {
   paymentRequestId: string;
   approverId: string;
   actorId?: string | null;
+  /** Hub staff identity (lib/auth/current-user.ts CurrentUser.id) — recorded on audit_events.actor_external_id. */
+  actorExternalId?: string | null;
   actorRole?: string | null;
   correlationId?: string | null;
 }
@@ -172,6 +178,7 @@ export async function approvePaymentRequest(tx: DbHandle, input: ApprovePaymentR
 
   await writeAudit(tx, {
     actorId: input.actorId ?? null,
+    actorExternalId: input.actorExternalId ?? null,
     actorRole: input.actorRole ?? null,
     action: 'payment_request_approved',
     objectTable: 'payment_requests',

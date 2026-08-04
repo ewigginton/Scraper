@@ -31,6 +31,14 @@ Suggested series, each independently reviewable:
 - Read Hub `AGENTS.md` and align naming/conventions — it is authoritative and was
   not visible when this package was authored.
 - Point `.env.local` at the DEV Supabase project from Scott. Never production.
+- Whatever role `DATABASE_URL` authenticates as, it must NOT be a superuser or
+  BYPASSRLS role (Supabase's default `postgres` role is BYPASSRLS) — that
+  silently disables every RLS policy in this schema. This package's own
+  migrations provision an `issues_app` role for exactly this
+  (`supabase/migrations/20260731090700_issues_app_role_grants.sql`); confirm
+  the Hub's equivalent role is also `nosuperuser nobypassrls`, and that
+  `app/api/health`'s `rolsuper`/`rolbypassrls` assertion stays wired in
+  after porting.
 - `npm run validate` in the Hub must pass with the renamed migrations.
 - The `domain_events` table here is an outbox seed; if the Hub has already
   promoted `cadence_events` → `domain_events` (Master Vision D18), drop ours and

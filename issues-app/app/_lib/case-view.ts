@@ -59,10 +59,38 @@ export interface CaseData {
   changeOrders: ChangeOrder[];
   costEntries: CostEntry[];
   paymentRequests: PaymentRequest[];
+  /** Only 'internal' evidence, plus every classification when the caller holds manager/admin — see loadCaseData's `roles` param. */
   evidenceFiles: EvidenceFile[];
+  /** Count of restricted_legal/restricted_financial rows withheld from `evidenceFiles` for a non-manager/admin caller. 0 for a manager/admin (nothing withheld) and 0 whenever there is nothing restricted. */
+  restrictedEvidenceCount: number;
   notices: Notice[];
   checklistItems: ChecklistItem[];
   history: HistoryEntry[];
+}
+
+const RESTRICTED_EVIDENCE_ROLES = new Set(['manager', 'admin']);
+const RESTRICTED_CLASSIFICATIONS = new Set(['restricted_legal', 'restricted_financial']);
+
+/**
+ * ADVERSARIAL-REVIEW FIX (P0): apply access_classification filtering in
+ * application code at this read chokepoint, not only in RLS — RLS never
+ * actually governs this connection (see the actor-context findings), and
+ * even when it does, evidence_files_select_classification_aware is the
+ * ONLY enforcement anywhere; a second, connection-independent layer here is
+ * required per requirements line 872 ("unauthorized users shall not receive
+ * the content through timelines, summaries, search, exports, ..."). Returns
+ * the visible subset PLUS a neutral count of what was withheld (line 872:
+ * "the existence of a neutral restricted-record indicator may be shown
+ * where approved") rather than silently shrinking the evidence count with
+ * no explanation.
+ */
+function filterEvidenceForRoles(files: EvidenceFile[], roles: string[]): { visible: EvidenceFile[]; restrictedCount: number } {
+  const canSeeRestricted = roles.some((r) => RESTRICTED_EVIDENCE_ROLES.has(r));
+  if (canSeeRestricted) {
+    return { visible: files, restrictedCount: 0 };
+  }
+  const visible = files.filter((f) => !RESTRICTED_CLASSIFICATIONS.has(f.accessClassification));
+  return { visible, restrictedCount: files.length - visible.length };
 }
 
 export type HistoryCategory =
@@ -136,8 +164,14 @@ function phaseToHistory(row: PhaseInstance): HistoryEntry {
   };
 }
 
-/** Load everything the case view needs for one issue. Returns undefined if the issue doesn't exist. */
-export async function loadCaseData(db: DbHandle, issueId: string): Promise<CaseData | undefined> {
+/**
+ * Load everything the case view needs for one issue. Returns undefined if
+ * the issue doesn't exist. `roles` (the CALLING actor's roles, never
+ * user-suppliable) gates restricted-evidence visibility — see
+ * filterEvidenceForRoles. Defaults to `[]` (i.e. no restricted access) so a
+ * caller that forgets to pass roles fails closed rather than open.
+ */
+export async function loadCaseData(db: DbHandle, issueId: string, roles: string[] = []): Promise<CaseData | undefined> {
   const base = await issuesRepo.getById(db, issueId);
   if (!base) return undefined;
 
@@ -188,6 +222,8 @@ export async function loadCaseData(db: DbHandle, issueId: string): Promise<CaseD
   const currentPhase = base.currentPhaseInstanceId ? phaseHistory.find((p) => p.id === base.currentPhaseInstanceId) : undefined;
   const allowedNextPhases = currentPhase ? await computeAllowedNextPhases(db, base.issueType, currentPhase.phaseKey) : [];
 
+  const { visible: visibleEvidence, restrictedCount } = filterEvidenceForRoles(issueEvidence, roles);
+
   return {
     issue: base,
     property,
@@ -202,7 +238,8 @@ export async function loadCaseData(db: DbHandle, issueId: string): Promise<CaseD
     changeOrders: issueChangeOrders,
     costEntries: issueCostEntries,
     paymentRequests: issuePaymentRequests,
-    evidenceFiles: issueEvidence,
+    evidenceFiles: visibleEvidence,
+    restrictedEvidenceCount: restrictedCount,
     notices: issueNotices,
     checklistItems: issueChecklistItems,
     history,

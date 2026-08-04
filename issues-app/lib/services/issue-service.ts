@@ -24,8 +24,9 @@ import {
   type Task,
 } from '../db/schema.ts';
 import { writeAudit } from './audit.ts';
-import { consumeEvent, publishDomainEvent } from './events.ts';
+import { consumeEvent, publishDomainEvent, type ConsumeEventResult } from './events.ts';
 import { applyHold } from './hold-service.ts';
+import { assertIssueAuthorized } from './issue-authz.ts';
 
 export class IssueValidationError extends Error {
   code = 'issue_validation_failed';
@@ -304,6 +305,16 @@ function addDaysIso(isoDate: string, days: number): string {
 export interface ReopenAsNewCycleInput {
   issueId: string;
   reason: string;
+  /**
+   * ADVERSARIAL-REVIEW FIX: required idempotency key for this reopen
+   * ATTEMPT (e.g. a client-generated request id, or a stable key derived
+   * from the triggering UI action) — the same key retried (network retry,
+   * double form-submit) is a no-op, not a second issue_cycles row. Unlike
+   * `correlationId` (which correlates rows WITHIN one occurrence),
+   * `idempotencyKey` identifies the occurrence ITSELF; the caller must
+   * supply a fresh one for a genuinely NEW, deliberate reopen.
+   */
+  idempotencyKey: string;
   nextTask?: CreateIssueTaskInput;
   actorId?: string | null;
   actorRole?: string | null;
@@ -319,97 +330,119 @@ export interface ReopenAsNewCycleResult {
  * Reopen a closed Issue as a new Issue Cycle: preserves all prior cycle
  * history (issue_cycles rows are additive, never overwritten) and reopens
  * the issue for active work.
+ *
+ * ADVERSARIAL-REVIEW FIX: unlike `openFromLoanDefault`/
+ * `handleReinstatementEffective`, this command used to have no idempotency
+ * protection at all — a retried/double-submitted call inserted a SECOND
+ * issue_cycles row (plus a second follow-up task and audit row), and its
+ * own published domain event embedded a fresh `randomUUID()` in its
+ * idempotencyKey on every call, defeating domain_events' ON CONFLICT DO
+ * NOTHING dedup by construction (DESIGN.md hard rule #5). Now wrapped in
+ * `consumeEvent` exactly like those two commands, keyed on the caller's
+ * supplied `idempotencyKey` (source_system 'property_operations.command' —
+ * this is a locally-triggered command retry, not an inbound external event,
+ * but consumeEvent's claim mechanism is exactly what a retry-safe command
+ * needs regardless of who triggers it). Takes `db` (not `tx`) accordingly —
+ * consumeEvent opens its own transaction.
  */
-export async function reopenAsNewCycle(tx: DbHandle, input: ReopenAsNewCycleInput): Promise<ReopenAsNewCycleResult> {
+export async function reopenAsNewCycle(db: DbHandle, input: ReopenAsNewCycleInput): Promise<ConsumeEventResult<ReopenAsNewCycleResult>> {
   if (!input.reason || input.reason.trim().length === 0) {
     throw new IssueValidationError(['a reason is required to reopen an issue as a new cycle']);
   }
-
-  const [existing] = await tx.select().from(issues).where(eq(issues.id, input.issueId));
-  if (!existing) {
-    throw new IssueValidationError([`issue ${input.issueId} not found`]);
+  if (!input.idempotencyKey) {
+    throw new IssueValidationError(['an idempotency key is required to reopen an issue as a new cycle']);
   }
 
-  // issues_active_requires_owner_check (20260731090000_issues_core.sql)
-  // rejects lifecycle_status='active' with no coordinator_id AND no queue.
-  // createIssue allows an issue to have neither at intake, so a reopen
-  // that unconditionally forces 'active' below could hit that constraint
-  // as an unhandled 500 instead of a typed validation error
-  // (adversarial-review finding). Require the caller to supply one via
-  // nextTask.queue when the existing issue has neither.
-  const willHaveOwner = Boolean(existing.coordinatorId) || Boolean(existing.queue) || Boolean(input.nextTask?.queue) || Boolean(input.nextTask?.assigneeId);
-  if (!willHaveOwner) {
-    throw new IssueValidationError([
-      'reopening this issue requires a coordinator or queue: it has neither, so pass nextTask.queue (or nextTask.assigneeId) to reopen it',
-    ]);
-  }
-
-  await issuesRepo.openCycle(tx, input.issueId, { reason: input.reason });
-
-  let task: Task | null = null;
-  if (input.nextTask) {
-    if (!input.nextTask.assigneeId && !input.nextTask.queue) {
-      throw new IssueValidationError(['the reopen follow-up task requires an assignee or a queue']);
+  return consumeEvent(db, 'property_operations.command', `reopen_as_new_cycle:${input.idempotencyKey}`, async (tx) => {
+    const [existing] = await tx.select().from(issues).where(eq(issues.id, input.issueId));
+    if (!existing) {
+      throw new IssueValidationError([`issue ${input.issueId} not found`]);
     }
-    const [created] = await tx
-      .insert(tasks)
-      .values({
-        issueId: input.issueId,
-        propertyRefId: existing.propertyRefId,
-        assigneeId: input.nextTask.assigneeId ?? null,
-        queue: input.nextTask.queue ?? null,
-        title: input.nextTask.title,
-        description: input.nextTask.description ?? null,
-        dueDate: input.nextTask.dueDate,
-        priority: input.nextTask.priority ?? existing.priority,
+
+    // issues_active_requires_owner_check (20260731090000_issues_core.sql)
+    // rejects lifecycle_status='active' with no coordinator_id AND no
+    // queue. createIssue allows an issue to have neither at intake, so a
+    // reopen that unconditionally forces 'active' below could hit that
+    // constraint as an unhandled 500 instead of a typed validation error
+    // (adversarial-review finding). Require the caller to supply one via
+    // nextTask.queue when the existing issue has neither.
+    const willHaveOwner = Boolean(existing.coordinatorId) || Boolean(existing.queue) || Boolean(input.nextTask?.queue) || Boolean(input.nextTask?.assigneeId);
+    if (!willHaveOwner) {
+      throw new IssueValidationError([
+        'reopening this issue requires a coordinator or queue: it has neither, so pass nextTask.queue (or nextTask.assigneeId) to reopen it',
+      ]);
+    }
+
+    await issuesRepo.openCycle(tx, input.issueId, { reason: input.reason });
+
+    let task: Task | null = null;
+    if (input.nextTask) {
+      if (!input.nextTask.assigneeId && !input.nextTask.queue) {
+        throw new IssueValidationError(['the reopen follow-up task requires an assignee or a queue']);
+      }
+      const [created] = await tx
+        .insert(tasks)
+        .values({
+          issueId: input.issueId,
+          propertyRefId: existing.propertyRefId,
+          assigneeId: input.nextTask.assigneeId ?? null,
+          queue: input.nextTask.queue ?? null,
+          title: input.nextTask.title,
+          description: input.nextTask.description ?? null,
+          dueDate: input.nextTask.dueDate,
+          priority: input.nextTask.priority ?? existing.priority,
+        })
+        .returning();
+      task = created ?? null;
+    }
+
+    const [updated] = await tx
+      .update(issues)
+      .set({
+        lifecycleStatus: 'active',
+        // Carry forward an owner/queue from the reopen follow-up task when
+        // the issue itself had neither (see the willHaveOwner check
+        // above) — otherwise issues_active_requires_owner_check would
+        // reject this update.
+        coordinatorId: existing.coordinatorId ?? input.nextTask?.assigneeId ?? null,
+        queue: existing.queue ?? input.nextTask?.queue ?? null,
       })
+      .where(eq(issues.id, input.issueId))
       .returning();
-    task = created ?? null;
-  }
+    if (!updated) {
+      throw new Error('issue-service.reopenAsNewCycle: failed to update issue lifecycle_status');
+    }
 
-  const [updated] = await tx
-    .update(issues)
-    .set({
-      lifecycleStatus: 'active',
-      // Carry forward an owner/queue from the reopen follow-up task when
-      // the issue itself had neither (see the willHaveOwner check above) —
-      // otherwise issues_active_requires_owner_check would reject this
-      // update.
-      coordinatorId: existing.coordinatorId ?? input.nextTask?.assigneeId ?? null,
-      queue: existing.queue ?? input.nextTask?.queue ?? null,
-    })
-    .where(eq(issues.id, input.issueId))
-    .returning();
-  if (!updated) {
-    throw new Error('issue-service.reopenAsNewCycle: failed to update issue lifecycle_status');
-  }
+    const correlationId = input.correlationId ?? randomUUID();
 
-  const correlationId = input.correlationId ?? randomUUID();
+    await writeAudit(tx, {
+      actorId: input.actorId ?? null,
+      actorRole: input.actorRole ?? null,
+      action: 'issue_reopened_new_cycle',
+      objectTable: 'issues',
+      objectId: input.issueId,
+      before: { lifecycleStatus: existing.lifecycleStatus },
+      after: { lifecycleStatus: updated.lifecycleStatus },
+      reason: input.reason,
+      correlationId,
+      source: 'issue-service.reopenAsNewCycle',
+    });
 
-  await writeAudit(tx, {
-    actorId: input.actorId ?? null,
-    actorRole: input.actorRole ?? null,
-    action: 'issue_reopened_new_cycle',
-    objectTable: 'issues',
-    objectId: input.issueId,
-    before: { lifecycleStatus: existing.lifecycleStatus },
-    after: { lifecycleStatus: updated.lifecycleStatus },
-    reason: input.reason,
-    correlationId,
-    source: 'issue-service.reopenAsNewCycle',
+    await publishDomainEvent(tx, {
+      eventType: 'property_operations.issue_reopened',
+      payload: { issueId: input.issueId, reason: input.reason },
+      issueId: input.issueId,
+      propertyRefId: existing.propertyRefId,
+      actor: input.actorId ?? null,
+      correlationId,
+      // Derived from the SAME stable idempotencyKey the caller supplied
+      // (not randomUUID()) so a replay of this exact reopen occurrence
+      // cannot double-publish (adversarial-review finding).
+      idempotencyKey: `issue_reopened:${input.issueId}:${input.idempotencyKey}`,
+    });
+
+    return { issue: updated, task };
   });
-
-  await publishDomainEvent(tx, {
-    eventType: 'property_operations.issue_reopened',
-    payload: { issueId: input.issueId, reason: input.reason },
-    issueId: input.issueId,
-    propertyRefId: existing.propertyRefId,
-    actor: input.actorId ?? null,
-    correlationId,
-    idempotencyKey: `issue_reopened:${input.issueId}:${randomUUID()}`,
-  });
-
-  return { issue: updated, task };
 }
 
 // =====================================================================
@@ -462,6 +495,72 @@ export async function closeIssue(tx: DbHandle, input: CloseIssueInput): Promise<
     reason: input.reason,
     correlationId,
     source: 'issue-service.closeIssue',
+  });
+
+  return updated;
+}
+
+// =====================================================================
+// recordPriceReview — spec §10 (development price review window)
+// =====================================================================
+// ADVERSARIAL-REVIEW FIX: prior to this command, the ONLY mechanism able to
+// write issues.price_reviewed_at was TransitionCtx.priceReviewedAt on
+// transitionPhase, which (a) had an ordering bug making it unable to
+// satisfy the very same call's own price_review_complete prerequisite/
+// gates_release check (fixed separately in transition-engine.ts), and (b)
+// is only reachable from WITHIN a phase transition attempt, even though
+// spec §10 review is its own recordable fact/decision independent of any
+// particular transition, and priceReviewBlockers (eligibility-service.ts)
+// checks it per-issue across every open default_recovery/market_readiness
+// issue on a property, not just whichever one is currently transitioning.
+// Standalone, audited command — no domain event (same DECISION task-
+// service.ts documents for its own routine commands: spec names explicit
+// event types for hold apply/release, reinstatement, and issue creation,
+// not for this).
+
+export interface RecordPriceReviewInput {
+  issueId: string;
+  reviewedAt?: string | Date;
+  actorId?: string | null;
+  actorExternalId?: string | null;
+  actorRole?: string | null;
+  /** Roles the acting user currently holds — rechecked server-side regardless of what the UI offered (never from form data). */
+  actorRoles?: string[];
+  correlationId?: string | null;
+}
+
+/** Record that the development price was reviewed for `issueId` (spec §10). */
+export async function recordPriceReview(tx: DbHandle, input: RecordPriceReviewInput): Promise<Issue> {
+  if (!input.issueId) {
+    throw new IssueValidationError(['a price review requires the issue it belongs to']);
+  }
+
+  const [existing] = await tx.select().from(issues).where(eq(issues.id, input.issueId));
+  if (!existing) {
+    throw new IssueValidationError([`issue ${input.issueId} not found`]);
+  }
+
+  // ADVERSARIAL-REVIEW FIX (round 2, P1 IDOR) — see issue-authz.ts's doc
+  // comment.
+  assertIssueAuthorized(input, 'Recording a price review');
+
+  const reviewedAt = input.reviewedAt ? new Date(input.reviewedAt) : new Date();
+  const [updated] = await tx.update(issues).set({ priceReviewedAt: reviewedAt }).where(eq(issues.id, input.issueId)).returning();
+  if (!updated) {
+    throw new Error('issue-service.recordPriceReview: update returned no row');
+  }
+
+  await writeAudit(tx, {
+    actorId: input.actorId ?? null,
+    actorExternalId: input.actorExternalId ?? null,
+    actorRole: input.actorRole ?? null,
+    action: 'price_review_recorded',
+    objectTable: 'issues',
+    objectId: input.issueId,
+    before: { priceReviewedAt: existing.priceReviewedAt },
+    after: { priceReviewedAt: updated.priceReviewedAt },
+    correlationId: input.correlationId ?? null,
+    source: 'issue-service.recordPriceReview',
   });
 
   return updated;

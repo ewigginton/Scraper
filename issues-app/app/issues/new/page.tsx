@@ -3,6 +3,8 @@ import { listIssueTypes, listPeople, listProperties, propertyLabel } from '../..
 import { addDaysIso, todayIso } from '../../_lib/dates.ts';
 import { DatabaseUnavailable } from '../../_components/EmptyState.tsx';
 import { createIssueAction } from '../../actions.ts';
+import { getCurrentUser } from '../../../lib/auth/current-user.ts';
+import { withActor } from '../../../lib/db/actor-context.ts';
 import type { IssuePersonRole } from '../../../lib/db/schema.ts';
 
 export const metadata = { title: 'New Issue — CCL Hub Issues' };
@@ -27,7 +29,22 @@ export default async function NewIssuePage({ searchParams }: PageProps) {
     );
   }
 
-  const [properties, people, issueTypes] = await Promise.all([listProperties(db), listPeople(db), listIssueTypes(db)]);
+  // ROUND-2 ADVERSARIAL-REVIEW FIX: this page used to read on the bare `db`
+  // handle with no actor context at all (unlike app/page.tsx and
+  // app/issues/[id]/page.tsx, which both already read through withActor) —
+  // under a real RLS-governed connection every `*_select_broad_internal`
+  // policy requires issues_current_actor() is not null, so all three lists
+  // silently came back empty (intake looked like an empty database, not an
+  // error) and — because listIssueTypes goes through configRepo.get, which
+  // negative-caches a miss — a single anonymous GET here could poison the
+  // shared config cache for every other request for CACHE_TTL_MS. See
+  // config-repo.ts's `get`/`currentVersion` fix for the cache half of this.
+  const user = await getCurrentUser();
+  const [properties, people, issueTypes] = await withActor(db, { actorId: user.id, roles: user.roles }, (tx) =>
+    Promise.all([listProperties(tx), listPeople(tx), listIssueTypes(tx)]),
+  );
+  const propertyOptions = properties.items;
+  const personOptions = people.items;
   const minDueDate = addDaysIso(todayIso(), 1);
 
   return (
@@ -46,13 +63,18 @@ export default async function NewIssuePage({ searchParams }: PageProps) {
           <label htmlFor="propertyRefId">Property *</label>
           <select id="propertyRefId" name="propertyRefId" required>
             <option value="">Select a property…</option>
-            {properties.map((p) => (
+            {propertyOptions.map((p) => (
               <option key={p.id} value={p.id}>
                 {propertyLabel(p)} {p.state ? `(${p.state})` : ''}
               </option>
             ))}
           </select>
-          {properties.length === 0 && <p className="muted">No property_refs exist yet — add one before creating an issue.</p>}
+          {propertyOptions.length === 0 && <p className="muted">No property_refs exist yet — add one before creating an issue.</p>}
+          {properties.hasMore && (
+            <p className="muted" role="note">
+              Showing {propertyOptions.length} of {properties.total} properties — not all properties are listed; ask an admin to narrow this list if the one you need is missing.
+            </p>
+          )}
         </div>
 
         <div className="form-group">
@@ -81,12 +103,17 @@ export default async function NewIssuePage({ searchParams }: PageProps) {
                 <label htmlFor={`personRefId_${i}`}>Person {i + 1}</label>
                 <select id={`personRefId_${i}`} name={`personRefId_${i}`}>
                   <option value="">— none —</option>
-                  {people.map((p) => (
+                  {personOptions.map((p) => (
                     <option key={p.id} value={p.id}>
                       {p.displayName}
                     </option>
                   ))}
                 </select>
+                {i === 0 && people.hasMore && (
+                  <p className="muted" role="note">
+                    Showing {personOptions.length} of {people.total} people.
+                  </p>
+                )}
               </div>
               <div style={{ flex: 1 }}>
                 <label htmlFor={`personRole_${i}`}>Role</label>

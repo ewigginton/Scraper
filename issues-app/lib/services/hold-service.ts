@@ -113,6 +113,16 @@ export interface ReleaseHoldInput {
   actorRoles: string[];
   reason: string;
   actorId?: string | null;
+  /**
+   * Hub staff identity (lib/auth/current-user.ts CurrentUser.id) — recorded
+   * on audit_events.actor_external_id. ADVERSARIAL-REVIEW FIX: this field
+   * was missing entirely (unlike ApplyHoldInput's actorExternalId), so
+   * releasing a hold — the most security-sensitive command in this
+   * package — was audited with NO attributable actor whenever actorId is
+   * null, which is the shape every server action produces (Hub staff
+   * identity is a free-text external identity, not a person_refs uuid).
+   */
+  actorExternalId?: string | null;
   actorRole?: string | null;
   correlationId?: string | null;
 }
@@ -141,7 +151,14 @@ export async function releaseHold(tx: DbHandle, input: ReleaseHoldInput): Promis
     throw new HoldServiceError('hold_already_released', `Hold ${input.holdId} was already released.`);
   }
 
-  const requiredRoles = existing.releaseAuthority ? [existing.releaseAuthority] : DEFAULT_RELEASE_AUTHORITY_ROLES;
+  // release_authority is a single text column but may name more than one
+  // authorized role as a comma-separated list (e.g. possession-service's
+  // occupancy holds, releasable by any of the same roles allowed to record
+  // the superseding possession observation) — every existing caller sets a
+  // single role, which round-trips unchanged through split(',').
+  const requiredRoles = existing.releaseAuthority
+    ? existing.releaseAuthority.split(',').map((role) => role.trim()).filter(Boolean)
+    : DEFAULT_RELEASE_AUTHORITY_ROLES;
   const authorized = input.actorRoles.some((role) => requiredRoles.includes(role));
   if (!authorized) {
     throw new HoldServiceError(
@@ -157,6 +174,7 @@ export async function releaseHold(tx: DbHandle, input: ReleaseHoldInput): Promis
 
   await writeAudit(tx, {
     actorId: input.actorId ?? null,
+    actorExternalId: input.actorExternalId ?? null,
     actorRole: input.actorRole ?? null,
     action: 'hold_released',
     objectTable: 'holds',

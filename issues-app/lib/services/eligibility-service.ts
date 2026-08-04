@@ -18,7 +18,6 @@
 import { and, desc, eq, inArray, ne, or } from 'drizzle-orm';
 import type { DbHandle } from '../repositories/db-handle.ts';
 import * as holdsRepo from '../repositories/holds-repo.ts';
-import * as configRepo from '../repositories/config-repo.ts';
 import {
   approvals,
   issues,
@@ -62,6 +61,30 @@ const HOLD_OWNER_MODULE: Record<HoldType, string> = {
 /** Possession statuses that satisfy the "vacancy/possession resolved" prerequisite. */
 const POSSESSION_RESOLVED_STATUSES = new Set(['vacancy_verified', 'cleared']);
 
+/**
+ * ROUND-3 ADVERSARIAL-REVIEW FIX (P0 safety-core hole, round 2 fix was
+ * incomplete): the round-2 fix enumerated only 4 of the 9 non-resolved
+ * possession statuses the DB check constraint allows (schema.ts's
+ * possessionStatusCheck / migration 20260731090000 line 507) as an explicit
+ * "negative evidence" allowlist — `unknown`, `removal_authorized`, `stored`,
+ * `transferred`, and `disposed` fell through into the old
+ * `possessionRequired` issue-type short-circuit below and came back with NO
+ * blocker for a property_legal-only property, even though e.g.
+ * `removal_authorized` is authorization to remove personal property, not
+ * removal itself (spec §29.6 line 802 lists Removal Authorized/Stored as
+ * distinct from Cleared).
+ *
+ * Rather than enumerate a second, still-incomplete negative list, this is
+ * now the exact logical inverse of POSSESSION_RESOLVED_STATUSES: ANY latest
+ * possession record whose status is not vacancy_verified/cleared blocks
+ * release unconditionally, regardless of which issue type(s) happen to be
+ * open on the property. That makes this closed-by-construction against any
+ * status added later to the check constraint — there is no third list to
+ * fall out of sync. `possessionRequired`'s issue-type scoping is preserved
+ * for the ONE case it was ever justified for: no possession record exists
+ * at all (see that function's doc comment).
+ */
+
 async function activeHoldBlockers(tx: DbHandle, propertyRefId: string): Promise<EligibilityBlocker[]> {
   const active = await holdsRepo.activeForProperty(tx, propertyRefId);
   return active.map((hold) => ({
@@ -74,6 +97,38 @@ async function activeHoldBlockers(tx: DbHandle, propertyRefId: string): Promise<
   }));
 }
 
+/**
+ * ADVERSARIAL-REVIEW FIX: this used to run unconditionally for EVERY
+ * release-gating property, including property_legal — but property_legal's
+ * own seeded transition (resolution -> released) names no
+ * vacancy/possession-related prerequisite at all (its release is a legal
+ * matter resolution, not a vacancy/cleanup disposition).
+ *
+ * FOLLOW-UP FIX (this round): the first version of this scoping fix
+ * required an OPEN default_recovery/market_readiness issue to exist before
+ * treating possession as required — which flipped a fail-SAFE default into
+ * a fail-OPEN one: a property with NO open issue at all (e.g. queried in
+ * the abstract, or between cases) came back possession-NOT-required, i.e.
+ * eligible, which contradicts DESIGN.md's safety core ("no property may
+ * pass release while ... unresolved possession ... exists" is a
+ * property-level statement, not conditioned on an issue happening to be
+ * open) and broke test/eligibility.test.ts's
+ * "blocks release when possession is unresolved (no possession record at
+ * all)" regression test. Correct rule: possession is required UNLESS we
+ * have positive, narrow evidence it doesn't apply — i.e. every open issue
+ * on the property (if any exist at all) is property_legal. No open issues
+ * at all is NOT such evidence (fail closed/safe), so it still requires
+ * possession.
+ */
+async function possessionRequired(tx: DbHandle, propertyRefId: string): Promise<boolean> {
+  const openIssues = await tx
+    .select({ id: issues.id, issueType: issues.issueType })
+    .from(issues)
+    .where(and(eq(issues.propertyRefId, propertyRefId), ne(issues.lifecycleStatus, 'closed')));
+  if (openIssues.length === 0) return true;
+  return !openIssues.every((issue) => issue.issueType === 'property_legal');
+}
+
 async function possessionBlocker(tx: DbHandle, propertyRefId: string): Promise<EligibilityBlocker | null> {
   const [latest] = await tx
     .select()
@@ -84,12 +139,31 @@ async function possessionBlocker(tx: DbHandle, propertyRefId: string): Promise<E
     .orderBy(desc(possessionRecords.observedAt), desc(possessionRecords.createdAt), desc(possessionRecords.id))
     .limit(1);
 
-  if (!latest || !POSSESSION_RESOLVED_STATUSES.has(latest.possessionStatus)) {
+  // ROUND-3 FIX: ANY positive record of a non-resolved possession status
+  // ALWAYS blocks release, regardless of possessionRequired's issue-type
+  // scoping below — that scoping is only a defensible skip for "no evidence
+  // either way" (see possessionRequired's doc comment), never for an
+  // explicit non-resolved observation, whatever its exact status string.
+  // This must run BEFORE the possessionRequired short-circuit, not after.
+  if (latest && !POSSESSION_RESOLVED_STATUSES.has(latest.possessionStatus)) {
     return {
       code: 'possession_unresolved',
-      reason: latest
-        ? `Possession status is "${latest.possessionStatus.replace(/_/g, ' ')}", not vacancy-verified or cleared.`
-        : 'Possession status has never been recorded for this property.',
+      reason: `Possession status is "${latest.possessionStatus.replace(/_/g, ' ')}", not vacancy-verified or cleared.`,
+      ownerModule: 'Property Operations',
+      nextAction: 'Verify vacancy/possession and record a possession_records entry of vacancy_verified or cleared.',
+    };
+  }
+
+  if (!(await possessionRequired(tx, propertyRefId))) {
+    return null;
+  }
+
+  // Only reachable here when `!latest` (no possession record exists at
+  // all) — any resolved or non-resolved status was already returned above.
+  if (!latest) {
+    return {
+      code: 'possession_unresolved',
+      reason: 'Possession status has never been recorded for this property.',
       ownerModule: 'Property Operations',
       nextAction: 'Verify vacancy/possession and record a possession_records entry of vacancy_verified or cleared.',
     };
@@ -128,62 +202,33 @@ async function cleanupNotVerifiedBlockers(tx: DbHandle, propertyRefId: string): 
 }
 
 /**
- * §10: development price must be reviewed within
- * thresholds.price_review_window_months. Scoped per-issue (each
- * release-gating issue on the property carries its own
- * price_reviewed_at — see 20260731090400 migration); an issue that has
- * never had a review, or whose review is stale, blocks.
+ * §10 development-price-review enforcement.
+ *
+ * ADVERSARIAL-REVIEW FOLLOW-UP FIX (this round): this function USED to be
+ * called unconditionally from `evaluate()` for every gates_release check on
+ * a property, regardless of which specific transition triggered it. That
+ * made the release-track workflow structurally unreachable for
+ * default_recovery: `cleanup -> relisting` and `buyer_cleanup -> relisting`
+ * are both `gates_release: true` (per 20260731090600) but do NOT name
+ * `price_review_complete` as a prerequisite — only `relisting -> released`
+ * does, per that same migration's own comment ("price_review_complete ...
+ * stays on the ONE transition that already named it"). Because this
+ * function did not know which prerequisites the in-flight transition
+ * actually names, it blocked `cleanup -> relisting` on a price review that
+ * transition never claims to require, making it impossible to ever reach
+ * `relisting` (and thus `released`) at all — reproduced by
+ * test/release-gate-facts.test.ts's "same-call ctx.priceReviewedAt
+ * satisfies that same call's price_review_complete prerequisite" test,
+ * which failed at the FIRST gates_release hop (`cleanup -> relisting`)
+ * even though that hop names no price-review prerequisite.
+ *
+ * Enforcement now lives SOLELY in transition-engine.ts's
+ * `price_review_complete` named-prerequisite checker, which already runs
+ * against current DB state before any gates_release transition commits —
+ * exactly on the transition(s) that name it, and nowhere else. This
+ * function is intentionally not reinstated as a second, broader copy of
+ * that same check.
  */
-async function priceReviewBlockers(tx: DbHandle, propertyRefId: string): Promise<EligibilityBlocker[]> {
-  // Scoped to the issue types whose release represents putting a priced
-  // listing on the market (default_recovery, market_readiness) — not
-  // property_legal, whose release is a legal-matter resolution rather than
-  // a pricing decision (spec §10 is about "development price" review).
-  //
-  // NOT excludeIssueId-filtered (unlike openIssuePhaseBlockers): the price
-  // review lives on the SAME issue that is releasing, so excluding it would
-  // defeat the check for the exact case it exists to cover. It is a fresh
-  // read of current DB state at check time, so a review recorded earlier in
-  // the same command sequence (or by the caller before invoking
-  // transitionPhase) is already visible here — no additional exclusion
-  // needed to make the happy path reachable.
-  const relevant = await tx
-    .select({ id: issues.id, priceReviewedAt: issues.priceReviewedAt, issueType: issues.issueType, lifecycleStatus: issues.lifecycleStatus })
-    .from(issues)
-    .where(
-      and(
-        eq(issues.propertyRefId, propertyRefId),
-        inArray(issues.issueType, ['default_recovery', 'market_readiness']),
-        ne(issues.lifecycleStatus, 'closed'),
-      ),
-    );
-  if (relevant.length === 0) return [];
-
-  const thresholds = await configRepo.get<Record<string, unknown>>(tx, 'phase_1_defaults', 'thresholds');
-  const windowMonths = typeof thresholds?.price_review_window_months === 'number' ? thresholds.price_review_window_months : 6;
-
-  const blockers: EligibilityBlocker[] = [];
-  for (const issue of relevant) {
-    let stale = true;
-    if (issue.priceReviewedAt) {
-      const deadline = new Date(issue.priceReviewedAt);
-      deadline.setUTCMonth(deadline.getUTCMonth() + windowMonths);
-      stale = deadline.getTime() < Date.now();
-    }
-    if (stale) {
-      blockers.push({
-        code: 'price_review_stale',
-        reason: issue.priceReviewedAt
-          ? `Issue ${issue.id}'s price review is older than the ${windowMonths}-month window.`
-          : `Issue ${issue.id} has never had a price review recorded.`,
-        ownerModule: 'Property Operations',
-        nextAction: 'Record a development price review before release.',
-      });
-    }
-  }
-  return blockers;
-}
-
 async function openIssuePhaseBlockers(tx: DbHandle, propertyRefId: string, excludeIssueId?: string): Promise<EligibilityBlocker[]> {
   // DECISION: spec §21/§28.3 name "open blocking issue phases" without
   // defining exactly which phases block. Simplest defensible reading:
@@ -261,9 +306,9 @@ async function mapLinkBlocker(tx: DbHandle, propertyRefId: string): Promise<Elig
   // Property-Operations-owned fact (issues.map_link), not property_refs —
   // property_refs is a sync-owned read-through cache Property Operations
   // never writes (adversarial-review fix, 20260731090400 migration). NOT
-  // excludeIssueId-filtered — see priceReviewBlockers' doc comment above
-  // for why (same reasoning applies: the map link lives on the releasing
-  // issue itself).
+  // excludeIssueId-filtered: the map link lives on the releasing issue
+  // itself, so excluding it would defeat the check for the exact case it
+  // exists to cover.
   const recoveryIssues = await tx
     .select({ id: issues.id, mapLink: issues.mapLink })
     .from(issues)
@@ -303,7 +348,10 @@ async function evaluate(tx: DbHandle, propertyRefId: string, options: CheckEligi
   blockers.push(...(await cleanupNotVerifiedBlockers(tx, propertyRefId)));
   blockers.push(...(await openIssuePhaseBlockers(tx, propertyRefId, options.excludeIssueId)));
   blockers.push(...(await missingApprovalBlockers(tx, propertyRefId)));
-  blockers.push(...(await priceReviewBlockers(tx, propertyRefId)));
+  // price review is enforced solely by transition-engine.ts's
+  // price_review_complete named prerequisite checker — see the doc comment
+  // above openIssuePhaseBlockers's neighbor (formerly priceReviewBlockers)
+  // for why it is not duplicated here.
   const mapLink = await mapLinkBlocker(tx, propertyRefId);
   if (mapLink) blockers.push(mapLink);
 

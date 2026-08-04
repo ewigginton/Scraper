@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { and, eq } from 'drizzle-orm';
-import { transitionPhase, TransitionError } from '../lib/services/transition-engine.ts';
+import { transitionPhase, TransitionError, IMPLEMENTED_PREREQUISITE_NAMES } from '../lib/services/transition-engine.ts';
+import type { TransitionDefinition } from '../lib/services/transition-engine.ts';
 import { createIssue } from '../lib/services/issue-service.ts';
 import { applyHold } from '../lib/services/hold-service.ts';
 import { auditEvents, bids, configEntries, configVersions, issues, phaseInstances, possessionRecords, vendors } from '../lib/db/schema.ts';
@@ -255,5 +256,32 @@ describe('transition-engine', () => {
       const result = await transitionPhase(handle.db, issue.id, 'released', { roles: ['coordinator'] });
       expect(result.newPhase.phaseKey).toBe('released');
     });
+  });
+
+  it('every prerequisite name in the currently-effective config "transitions" entry resolves to a real checker', async () => {
+    // Guards the transition-engine/seed-config coupling: a typo'd or
+    // newly-added prerequisite name in a future migration would otherwise
+    // only be caught at runtime, on whichever transition first exercises
+    // it (fail-closed per transitionPhase's 'unimplemented_prerequisite'
+    // error) — possibly in production. Reads the SAME currently-effective
+    // version transitionPhase itself reads (configRepo.get), so this
+    // matches actual runtime resolution rather than also flagging
+    // superseded (effective_to-less but out-ranked) older versions that
+    // transitionPhase never selects.
+    const byIssueType = await configRepo.get<Record<string, TransitionDefinition[]>>(handle.db, 'phase_1_defaults', 'transitions');
+    expect(byIssueType).toBeDefined();
+
+    const unresolved: string[] = [];
+    for (const [issueType, defs] of Object.entries(byIssueType ?? {})) {
+      for (const def of defs) {
+        for (const name of def.prerequisites ?? []) {
+          if (!IMPLEMENTED_PREREQUISITE_NAMES.has(name)) {
+            unresolved.push(`${issueType}: ${def.from_phase} -> ${def.to_phase}: "${name}"`);
+          }
+        }
+      }
+    }
+
+    expect(unresolved).toEqual([]);
   });
 });

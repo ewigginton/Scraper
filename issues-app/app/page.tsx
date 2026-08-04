@@ -1,5 +1,6 @@
 import { getCurrentUser } from '../lib/auth/current-user.ts';
 import { tryGetDb } from './_lib/db.ts';
+import { withActor } from '../lib/db/actor-context.ts';
 import { buildWorkScreen, WORK_QUEUE_LABELS, type WorkQueueKey, type WorkRow } from './_lib/work-screen.ts';
 import { classifyDueDate, formatDate, todayIso } from './_lib/dates.ts';
 import { DatabaseUnavailable, EmptyQueue } from './_components/EmptyState.tsx';
@@ -35,7 +36,21 @@ export default async function Home({ searchParams }: PageProps) {
     );
   }
 
-  const data = await buildWorkScreen(db, { assigneeId: user.id, upcomingWithinDays: 14, today: todayIso() });
+  // ADVERSARIAL-REVIEW FIX: read through withActor — see
+  // lib/db/actor-context.ts's doc comment and app/issues/[id]/page.tsx's
+  // matching fix. The bare `db` handle used previously returns zero rows
+  // under a real RLS-governed connection (issues_current_actor() is null).
+  //
+  // ROUND-2 ADVERSARIAL-REVIEW FIX: `queues: user.queues` — this used to
+  // omit queues entirely, so tasks-repo.ts's ownerFilter (assigneeId OR
+  // queues) only ever matched on direct assignment. Queue-only tasks
+  // (openFromLoanDefault's 'new_unreviewed', handleReinstatementEffective's
+  // 'waiting_blocked') were invisible on every work screen even though
+  // task-service.ts's assertTaskAuthorized would have let this same user
+  // complete them — see CurrentUser.queues's doc comment.
+  const data = await withActor(db, { actorId: user.id, roles: user.roles }, (tx) =>
+    buildWorkScreen(tx, { assigneeId: user.id, queues: user.queues, upcomingWithinDays: 14, today: todayIso() }),
+  );
   const totalCount = QUEUE_ORDER.reduce((sum, key) => sum + data.queues[key].length, 0);
 
   return (

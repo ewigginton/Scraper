@@ -16,17 +16,61 @@ import { getCurrentUser } from '../lib/auth/current-user.ts';
 import * as taskService from '../lib/services/task-service.ts';
 import * as issueService from '../lib/services/issue-service.ts';
 import * as holdService from '../lib/services/hold-service.ts';
+import * as possessionService from '../lib/services/possession-service.ts';
 import * as eligibilityService from '../lib/services/eligibility-service.ts';
 import * as transitionEngine from '../lib/services/transition-engine.ts';
-import { setActorContext } from '../lib/db/actor-context.ts';
-import { issues, type IssuePersonRole, type IssueType, type Priority } from '../lib/db/schema.ts';
+import { IssueAuthorizationError } from '../lib/services/issue-authz.ts';
+import { setActorContext, withActor } from '../lib/db/actor-context.ts';
+import { issues, type IssuePersonRole, type IssueType, type PossessionStatus, type Priority } from '../lib/db/schema.ts';
 
 const MIN_SUMMARY_LENGTH = 20;
 const PERSON_ROW_COUNT = 4;
 
+/**
+ * ADVERSARIAL-REVIEW FIX (round 2, P1): recordPossessionAction used to cast
+ * `str(formData, 'possessionStatus')` straight to `PossessionStatus` with no
+ * runtime check at all — an arbitrary string from form data would sail
+ * through the cast and be inserted into possession_records.possession_status
+ * (a plain `text` column with a DB check constraint as the only backstop).
+ * Mirrors lib/db/schema.ts's PossessionStatus type exactly; kept as a
+ * runtime literal here (schema.ts's PossessionStatus is a type-only union,
+ * not backed by a runtime array) so this validates before the cast rather
+ * than after a DB round-trip.
+ */
+const KNOWN_POSSESSION_STATUSES = new Set<PossessionStatus>([
+  'unknown',
+  'occupied_or_suspected',
+  'vacancy_unverified',
+  'vacancy_verified',
+  'personal_property_present',
+  'removal_disposition_review',
+  'removal_authorized',
+  'stored',
+  'transferred',
+  'disposed',
+  'cleared',
+]);
+
 function str(formData: FormData, key: string): string {
   const v = formData.get(key);
   return typeof v === 'string' ? v.trim() : '';
+}
+
+/**
+ * ADVERSARIAL-REVIEW FIX (P2 open redirect): `returnTo` used to be read
+ * straight off user-controlled form data with no validation and passed
+ * unvalidated to redirect()/revalidatePath() — a hidden field an attacker
+ * controls (or same-origin HTML injection) could set it to an absolute or
+ * protocol-relative URL (`https://evil.example`, `//evil.example`) and this
+ * server action would issue a redirect to it. The only legitimate values
+ * are the hidden inputs this app itself renders (`/` and
+ * `/issues/${id}`), so requiring a single leading slash (rejecting the
+ * protocol-relative `//host` form, backslash variants, and absolute URLs)
+ * loses nothing.
+ */
+function safeReturnTo(formData: FormData, fallback = '/'): string {
+  const v = str(formData, 'returnTo');
+  return /^\/(?!\/)[^\\]*$/.test(v) ? v : fallback;
 }
 
 // =====================================================================
@@ -37,17 +81,32 @@ export async function completeTaskAction(formData: FormData): Promise<void> {
   const db = requireDb();
   const user = await getCurrentUser();
   const taskId = str(formData, 'taskId');
-  const returnTo = str(formData, 'returnTo') || '/';
+  const returnTo = safeReturnTo(formData, '/');
 
-  await db.transaction(async (tx) => {
-    await setActorContext(tx, { actorId: user.id, roles: user.roles });
-    return taskService.completeTask(tx, {
-      taskId,
-      actorExternalId: user.id,
-      actorRole: user.roles[0] ?? null,
-      correlationId: null,
+  try {
+    await db.transaction(async (tx) => {
+      await setActorContext(tx, { actorId: user.id, roles: user.roles });
+      // actorRoles/actorQueues come from the authenticated user's own
+      // roles/queues, never from form data (requirements line 378: the
+      // server independently rechecks permission) — see task-service.ts's
+      // assertTaskAuthorized (IDOR fix). actorQueues is round-2's fix for
+      // that same check having no production source for queue coverage —
+      // see CurrentUser.queues's doc comment.
+      return taskService.completeTask(tx, {
+        taskId,
+        actorExternalId: user.id,
+        actorRole: user.roles[0] ?? null,
+        actorRoles: user.roles,
+        actorQueues: user.queues,
+        correlationId: null,
+      });
     });
-  });
+  } catch (err) {
+    if (err instanceof taskService.TaskServiceError) {
+      redirect(`${returnTo}${returnTo.includes('?') ? '&' : '?'}workError=${encodeURIComponent(err.message)}`);
+    }
+    throw err;
+  }
 
   revalidatePath('/');
   revalidatePath(returnTo);
@@ -59,22 +118,31 @@ export async function rescheduleTaskAction(formData: FormData): Promise<void> {
   const user = await getCurrentUser();
   const taskId = str(formData, 'taskId');
   const newDueDate = str(formData, 'newDueDate');
-  const returnTo = str(formData, 'returnTo') || '/';
+  const returnTo = safeReturnTo(formData, '/');
 
   if (!newDueDate) {
     redirect(`${returnTo}${returnTo.includes('?') ? '&' : '?'}workError=${encodeURIComponent('A new due date is required to reschedule.')}`);
   }
 
-  await db.transaction(async (tx) => {
-    await setActorContext(tx, { actorId: user.id, roles: user.roles });
-    return taskService.rescheduleTask(tx, {
-      taskId,
-      newDueDate,
-      actorExternalId: user.id,
-      actorRole: user.roles[0] ?? null,
-      correlationId: null,
+  try {
+    await db.transaction(async (tx) => {
+      await setActorContext(tx, { actorId: user.id, roles: user.roles });
+      return taskService.rescheduleTask(tx, {
+        taskId,
+        newDueDate,
+        actorExternalId: user.id,
+        actorRole: user.roles[0] ?? null,
+        actorRoles: user.roles,
+        actorQueues: user.queues,
+        correlationId: null,
+      });
     });
-  });
+  } catch (err) {
+    if (err instanceof taskService.TaskServiceError) {
+      redirect(`${returnTo}${returnTo.includes('?') ? '&' : '?'}workError=${encodeURIComponent(err.message)}`);
+    }
+    throw err;
+  }
 
   revalidatePath('/');
   revalidatePath(returnTo);
@@ -91,12 +159,23 @@ export interface RenderableBlocker {
   nextAction: string;
 }
 
-async function buildBlockerList(db: ReturnType<typeof requireDb>, propertyRefId: string, err: transitionEngine.TransitionError): Promise<RenderableBlocker[]> {
+async function buildBlockerList(
+  db: ReturnType<typeof requireDb>,
+  actor: { actorId: string; roles: string[] },
+  propertyRefId: string,
+  err: transitionEngine.TransitionError,
+): Promise<RenderableBlocker[]> {
   if (err.code === 'prerequisites_not_met') {
     const blockers: RenderableBlocker[] = [];
     for (const detail of err.reasons) {
       if (detail.startsWith('no_blocking_holds')) {
-        const elig = await eligibilityService.checkReleaseEligibility(db, propertyRefId);
+        // ADVERSARIAL-REVIEW FIX (P2 reliability): this used to read on the
+        // bare `db` handle with no actor context, so under a real
+        // RLS-governed connection every row would be silently filtered out
+        // (SELECT RLS hides rows rather than erroring) and this would report
+        // "no blockers" for a genuinely blocked property. Read through
+        // withActor like every other authenticated read.
+        const elig = await withActor(db, actor, (tx) => eligibilityService.checkReleaseEligibility(tx, propertyRefId));
         blockers.push(...elig.blockers.map((b) => ({ reason: b.reason, owner: b.ownerModule, nextAction: b.nextAction })));
       } else {
         blockers.push({
@@ -132,28 +211,37 @@ export async function transitionPhaseAction(formData: FormData): Promise<void> {
   const issueId = str(formData, 'issueId');
   const toPhase = str(formData, 'toPhase');
   const reason = str(formData, 'reason') || null;
+  const actor = { actorId: user.id, roles: user.roles };
 
-  const [issueRow] = await db.select().from(issues).where(eq(issues.id, issueId));
+  // ADVERSARIAL-REVIEW FIX: this pre-flight read used to run on the bare
+  // `db` handle with no actor context, so under a real RLS-governed
+  // connection it always returned zero rows (issues_current_actor() is
+  // null) and every transition attempt redirected with "Issue not found.",
+  // regardless of whether the issue existed. Read through withActor like
+  // every other authenticated read.
+  const issueRow = await withActor(db, actor, async (tx) => {
+    const [row] = await tx.select().from(issues).where(eq(issues.id, issueId));
+    return row;
+  });
   if (!issueRow) {
     redirect(`/issues/${issueId}?transitionError=${encodeURIComponent(JSON.stringify([{ reason: 'Issue not found.', owner: 'Property Operations', nextAction: 'Reload the case.' }]))}`);
   }
 
   try {
-    // Best-effort actor context on `db` too, for the denial-audit write
-    // below (5th arg auditDb) — NOTE: on a pooled production driver this
-    // only reliably reaches the audit insert if that insert lands on the
-    // same pooled connection this set_config ran on, which postgres-js
-    // does not guarantee across two separate top-level `db` calls. Solving
-    // connection affinity for a non-transactional audit write is out of
-    // this fix's scope; documented here rather than silently assumed to
-    // work. It is reliable in tests (PGlite is a single connection).
-    await setActorContext(db, { actorId: user.id, roles: user.roles });
     await db.transaction(async (tx) => {
-      await setActorContext(tx, { actorId: user.id, roles: user.roles });
+      await setActorContext(tx, actor);
       // `db` (NOT `tx`) is passed as the 5th arg (auditDb) so a denial
       // audit row (forbidden/prerequisites_not_met/not_eligible) survives
       // even though this transaction is about to roll back on the thrown
-      // TransitionError (adversarial-review finding).
+      // TransitionError (adversarial-review finding). recordDenial itself
+      // now opens its own short-lived transaction and sets its own actor
+      // context on `auditDb` before writing — it no longer depends on any
+      // actor context previously (and uselessly) set on the bare `db`
+      // handle outside a transaction (see transition-engine.ts's
+      // recordDenial doc comment; a bare, non-transactional
+      // setActorContext(db, ...) never survives past the statement that set
+      // it, so the removed call here was a guaranteed no-op, not merely
+      // "best-effort").
       return transitionEngine.transitionPhase(
         tx,
         issueId,
@@ -169,7 +257,7 @@ export async function transitionPhaseAction(formData: FormData): Promise<void> {
     });
   } catch (err) {
     if (err instanceof transitionEngine.TransitionError) {
-      const blockers = await buildBlockerList(db, issueRow.propertyRefId, err);
+      const blockers = await buildBlockerList(db, actor, issueRow.propertyRefId, err);
       redirect(`/issues/${issueId}?transitionError=${encodeURIComponent(JSON.stringify(blockers))}`);
     }
     throw err;
@@ -177,6 +265,97 @@ export async function transitionPhaseAction(formData: FormData): Promise<void> {
 
   revalidatePath(`/issues/${issueId}`);
   redirect(`/issues/${issueId}`);
+}
+
+// =====================================================================
+// Release-gate facts — record price review / possession (spec §10, §28.3,
+// §29.10). ADVERSARIAL-REVIEW FIX: prior to these two actions, nothing in
+// app/actions.ts (or anywhere in the UI) could ever write issues.
+// price_reviewed_at or possession_records — the two facts
+// checkReleaseEligibility's gates_release check requires — making the
+// release-track workflow structurally unreachable through the shipped UI
+// for any real property. issue-service.recordPriceReview and
+// possession-service.recordPossession already existed as command-layer
+// fixes; this wires them into the case view the same way transitionPhase
+// already is.
+// =====================================================================
+
+export async function recordPriceReviewAction(formData: FormData): Promise<void> {
+  const db = requireDb();
+  const user = await getCurrentUser();
+  const issueId = str(formData, 'issueId');
+  const returnTo = safeReturnTo(formData, `/issues/${issueId}`);
+
+  try {
+    await db.transaction(async (tx) => {
+      await setActorContext(tx, { actorId: user.id, roles: user.roles });
+      // actorRoles comes from the authenticated user's own roles, never
+      // from form data (requirements line 378: the server independently
+      // rechecks permission) — see issue-authz.ts's assertIssueAuthorized
+      // (round-2 IDOR fix).
+      return issueService.recordPriceReview(tx, {
+        issueId,
+        actorExternalId: user.id,
+        actorRole: user.roles[0] ?? null,
+        actorRoles: user.roles,
+      });
+    });
+  } catch (err) {
+    if (err instanceof issueService.IssueValidationError) {
+      redirect(`${returnTo}${returnTo.includes('?') ? '&' : '?'}workError=${encodeURIComponent(err.violations.join('; '))}`);
+    }
+    if (err instanceof IssueAuthorizationError) {
+      redirect(`${returnTo}${returnTo.includes('?') ? '&' : '?'}workError=${encodeURIComponent(err.message)}`);
+    }
+    throw err;
+  }
+
+  revalidatePath(returnTo);
+  redirect(returnTo);
+}
+
+export async function recordPossessionAction(formData: FormData): Promise<void> {
+  const db = requireDb();
+  const user = await getCurrentUser();
+  const issueId = str(formData, 'issueId');
+  const rawPossessionStatus = str(formData, 'possessionStatus');
+  const notes = str(formData, 'notes') || null;
+  const returnTo = safeReturnTo(formData, `/issues/${issueId}`);
+
+  // ADVERSARIAL-REVIEW FIX (round 2, P1): validate against the known enum
+  // BEFORE the cast — see KNOWN_POSSESSION_STATUSES's doc comment.
+  if (!KNOWN_POSSESSION_STATUSES.has(rawPossessionStatus as PossessionStatus)) {
+    redirect(`${returnTo}${returnTo.includes('?') ? '&' : '?'}workError=${encodeURIComponent(`Unknown possession status: "${rawPossessionStatus}".`)}`);
+  }
+  const possessionStatus = rawPossessionStatus as PossessionStatus;
+
+  try {
+    await db.transaction(async (tx) => {
+      await setActorContext(tx, { actorId: user.id, roles: user.roles });
+      // actorRoles comes from the authenticated user's own roles, never
+      // from form data — see issue-authz.ts's assertIssueAuthorized
+      // (round-2 IDOR fix).
+      return possessionService.recordPossession(tx, {
+        issueId,
+        possessionStatus,
+        notes,
+        actorExternalId: user.id,
+        actorRole: user.roles[0] ?? null,
+        actorRoles: user.roles,
+      });
+    });
+  } catch (err) {
+    if (err instanceof possessionService.PossessionServiceError) {
+      redirect(`${returnTo}${returnTo.includes('?') ? '&' : '?'}workError=${encodeURIComponent(err.message)}`);
+    }
+    if (err instanceof IssueAuthorizationError) {
+      redirect(`${returnTo}${returnTo.includes('?') ? '&' : '?'}workError=${encodeURIComponent(err.message)}`);
+    }
+    throw err;
+  }
+
+  revalidatePath(returnTo);
+  redirect(returnTo);
 }
 
 // =====================================================================

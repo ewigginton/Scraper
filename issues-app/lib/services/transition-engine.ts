@@ -45,6 +45,7 @@ import type { DbHandle } from '../repositories/db-handle.ts';
 import * as holdsRepo from '../repositories/holds-repo.ts';
 import * as configRepo from '../repositories/config-repo.ts';
 import { checkReleaseEligibility } from './eligibility-service.ts';
+import { setActorContext } from '../db/actor-context.ts';
 import { writeAudit } from './audit.ts';
 import { publishDomainEvent } from './events.ts';
 import {
@@ -281,6 +282,18 @@ const PREREQUISITE_CHECKERS: Record<string, PrerequisiteChecker> = {
 };
 
 /**
+ * Names transitionPhase can resolve to a real checker right now. Exported
+ * ONLY so test-time config validation (test/transition.test.ts) can assert
+ * every prerequisite name in every seeded config_versions row actually
+ * resolves, catching a typo'd or newly-added prerequisite name in a future
+ * migration before it fails closed at runtime on whichever transition first
+ * exercises it (adversarial-review follow-up: nothing previously verified
+ * seed-config/checker-registry agreement outside of exercising each
+ * transition one at a time).
+ */
+export const IMPLEMENTED_PREREQUISITE_NAMES: ReadonlySet<string> = new Set(Object.keys(PREREQUISITE_CHECKERS));
+
+/**
  * `no_blocking_holds` above already delegates to holds-repo directly (it
  * needs only the boolean), but exported here too so callers that want the
  * full blocker detail (e.g. an "explain why this is blocked" UI action) can
@@ -301,6 +314,25 @@ async function loadTransitionDefinitions(tx: DbHandle, issueType: string): Promi
  * the denied attempt and its blockers are "exactly the legally interesting
  * event"). Called with `auditDb`, NOT `tx`, so the row survives even though
  * the caller is about to roll back the transaction that held `tx`.
+ *
+ * ADVERSARIAL-REVIEW FIX (P1 reliability): this used to write directly on
+ * whatever handle `auditDb` was, with no actor context of its own. In
+ * production, app/actions.ts's `db` (the top-level, non-transactional
+ * handle it passes as auditDb) never carries actor context — a bare,
+ * non-transactional `setActorContext(db, ...)` call is a guaranteed no-op
+ * (set_config(..., is_local=true) is reverted the instant the statement
+ * that set it completes; see lib/db/actor-context.ts). Under real RLS
+ * (audit_events_insert_any_authenticated requires
+ * issues_current_actor() is not null) that made every denial-audit INSERT
+ * fail outright, turning a denied-but-safe transition into an unhandled
+ * 500 instead of the intended blocker-list redirect (reproduced by
+ * test/repro-denial-audit-rls.test.ts). Opening a dedicated, short-lived
+ * transaction here — independent of both `tx` (about to roll back) and
+ * whatever transaction (if any) `auditDb` itself came from — and
+ * establishing actor context INSIDE it makes the denial audit
+ * self-sufficient: it does not depend on the caller having already set
+ * actor context on `auditDb`, and it commits on its own regardless of what
+ * happens to `tx` afterward.
  */
 async function recordDenial(
   auditDb: DbHandle,
@@ -311,18 +343,24 @@ async function recordDenial(
   ctx: TransitionCtx,
   reasons: string[],
 ): Promise<void> {
-  await writeAudit(auditDb, {
-    actorId: ctx.actorId ?? null,
-    actorExternalId: ctx.actorExternalId ?? null,
-    actorRole: ctx.actorRole ?? null,
-    action: 'phase_transition_denied',
-    objectTable: 'issues',
-    objectId: issue.id,
-    before: { phaseKey: fromPhase },
-    after: { attemptedPhaseKey: toPhase, denialCode: code, reasons },
-    reason: ctx.reason ?? null,
-    correlationId: ctx.correlationId ?? null,
-    source: 'transition-engine.transitionPhase',
+  await auditDb.transaction(async (auditTx) => {
+    await setActorContext(auditTx, {
+      actorId: ctx.actorExternalId ?? ctx.actorId ?? 'system',
+      roles: ctx.roles ?? [],
+    });
+    await writeAudit(auditTx, {
+      actorId: ctx.actorId ?? null,
+      actorExternalId: ctx.actorExternalId ?? null,
+      actorRole: ctx.actorRole ?? null,
+      action: 'phase_transition_denied',
+      objectTable: 'issues',
+      objectId: issue.id,
+      before: { phaseKey: fromPhase },
+      after: { attemptedPhaseKey: toPhase, denialCode: code, reasons },
+      reason: ctx.reason ?? null,
+      correlationId: ctx.correlationId ?? null,
+      source: 'transition-engine.transitionPhase',
+    });
   });
 }
 
@@ -367,7 +405,7 @@ export async function transitionPhase(
   ctx: TransitionCtx,
   auditDb: DbHandle = tx,
 ): Promise<TransitionResult> {
-  const [issue] = await tx.select().from(issues).where(eq(issues.id, issueId));
+  let [issue] = await tx.select().from(issues).where(eq(issues.id, issueId));
   if (!issue) {
     throw new TransitionError('issue_not_found', `Issue ${issueId} not found.`);
   }
@@ -403,6 +441,29 @@ export async function transitionPhase(
       'forbidden',
       `Transitioning "${currentPhase.phaseKey}" -> "${toPhase}" requires role(s): ${allowedRoles.join(', ')}.`,
     );
+  }
+
+  // ADVERSARIAL-REVIEW FIX (release-track structurally unreachable): the
+  // ONLY mechanism that can ever write issues.price_reviewed_at is
+  // ctx.priceReviewedAt on THIS call, but `issue` above was fetched at
+  // function entry, before this write — so a caller passing
+  // ctx.priceReviewedAt to satisfy price_review_complete on this same
+  // transition (e.g. relisting -> released, which both names the
+  // prerequisite AND gates_release) could never actually satisfy it: the
+  // prerequisite loop and the gates_release eligibility check below both
+  // read/re-query current DB state, and current DB state hadn't been
+  // updated yet. Applying the write here — after authorization, before any
+  // prerequisite/eligibility check reads it — lets a transition legitimately
+  // record "we just reviewed the price" as part of itself. Re-assigns the
+  // local `issue` so the in-memory read in priceReviewComplete (which reads
+  // issue.priceReviewedAt directly, not a fresh query) sees it too.
+  if (ctx.priceReviewedAt) {
+    const [reviewed] = await tx
+      .update(issues)
+      .set({ priceReviewedAt: new Date(ctx.priceReviewedAt) })
+      .where(eq(issues.id, issue.id))
+      .returning();
+    if (reviewed) issue = reviewed;
   }
 
   const failedPrerequisites: string[] = [];
@@ -492,7 +553,11 @@ export async function transitionPhase(
     .set({
       currentPhaseInstanceId: newPhase.id,
       lifecycleStatus: ctx.newLifecycleStatus ?? issue.lifecycleStatus,
-      priceReviewedAt: ctx.priceReviewedAt ? new Date(ctx.priceReviewedAt) : issue.priceReviewedAt,
+      // priceReviewedAt was already applied above (before the prerequisite/
+      // gates_release checks ran) when ctx.priceReviewedAt was supplied;
+      // `issue.priceReviewedAt` already reflects that write, so re-stating
+      // it here is idempotent, not a second source of truth.
+      priceReviewedAt: issue.priceReviewedAt,
     })
     .where(eq(issues.id, issue.id))
     .returning();

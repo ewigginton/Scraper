@@ -67,9 +67,20 @@ export async function createTestDb(): Promise<TestDbHandle> {
  * it MUST be called inside an explicit transaction to have any effect
  * beyond the single statement it runs in — see test/rls.test.ts.
  */
+/**
+ * Mirrors lib/db/actor-context.ts's KNOWN_ROLES allowlist (adversarial-review
+ * fix: a role string containing the ',' delimiter would otherwise be split
+ * into multiple roles by the DB-side string_to_array decode — see
+ * lib/db/actor-context.ts's doc comment). Kept as a separate literal (not
+ * imported) since this is a test-only helper deliberately mirroring, not
+ * calling, the production encoder.
+ */
+const KNOWN_ROLES = new Set(['employee', 'coordinator', 'manager', 'loan_services', 'sales', 'accounting', 'admin', 'service']);
+
 export async function setActorContext(db: DbHandle, actorId: string, roles: string[] = []): Promise<void> {
+  const safeRoles = roles.filter((r) => KNOWN_ROLES.has(r));
   await db.execute(`select set_config('app.actor_id', '${actorId.replace(/'/g, "''")}', true)`);
-  await db.execute(`select set_config('app.roles', '${roles.join(',').replace(/'/g, "''")}', true)`);
+  await db.execute(`select set_config('app.roles', '${safeRoles.join(',').replace(/'/g, "''")}', true)`);
 }
 
 export async function closeTestDb(handle: TestDbHandle): Promise<void> {

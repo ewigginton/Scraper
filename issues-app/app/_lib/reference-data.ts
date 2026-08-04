@@ -9,19 +9,46 @@
  * these belong in lib/repositories/ long-term.
  */
 
-import { asc } from 'drizzle-orm';
+import { asc, count } from 'drizzle-orm';
 import type { DbHandle } from '../../lib/repositories/db-handle.ts';
 import { personRefs, propertyRefs, type PersonRef, type PropertyRef } from '../../lib/db/schema.ts';
 import * as configRepo from '../../lib/repositories/config-repo.ts';
 
 const LIST_LIMIT = 500;
 
-export async function listProperties(db: DbHandle): Promise<PropertyRef[]> {
-  return db.select().from(propertyRefs).orderBy(asc(propertyRefs.displayName)).limit(LIST_LIMIT);
+/**
+ * ADVERSARIAL-REVIEW FIX: listProperties/listPeople used to hard-cap at
+ * LIST_LIMIT with no offset/pagination and no truncation signal at all —
+ * once property_refs or person_refs passes 500 rows, entries alphabetically
+ * past the 500th silently become unselectable in the intake form pickers,
+ * and neither the UI nor the caller could tell the list was truncated (it
+ * looks complete). Full search/filter pagination is a larger UI change;
+ * this at minimum returns a total count and hasMore flag so the caller can
+ * render "showing 500 of N — search to narrow" instead of silently hiding
+ * the gap.
+ */
+export interface LimitedList<T> {
+  items: T[];
+  total: number;
+  hasMore: boolean;
 }
 
-export async function listPeople(db: DbHandle): Promise<PersonRef[]> {
-  return db.select().from(personRefs).orderBy(asc(personRefs.displayName)).limit(LIST_LIMIT);
+export async function listProperties(db: DbHandle): Promise<LimitedList<PropertyRef>> {
+  const [items, [totalRow]] = await Promise.all([
+    db.select().from(propertyRefs).orderBy(asc(propertyRefs.displayName)).limit(LIST_LIMIT),
+    db.select({ value: count() }).from(propertyRefs),
+  ]);
+  const total = totalRow?.value ?? items.length;
+  return { items, total, hasMore: total > items.length };
+}
+
+export async function listPeople(db: DbHandle): Promise<LimitedList<PersonRef>> {
+  const [items, [totalRow]] = await Promise.all([
+    db.select().from(personRefs).orderBy(asc(personRefs.displayName)).limit(LIST_LIMIT),
+    db.select({ value: count() }).from(personRefs),
+  ]);
+  const total = totalRow?.value ?? items.length;
+  return { items, total, hasMore: total > items.length };
 }
 
 export interface IssueTypeConfig {
