@@ -12,6 +12,7 @@
  */
 
 import { humanize } from '../_lib/pills.ts';
+import { displayableContactEntries } from '../_lib/reference-data.ts';
 import type { PersonRef, PropertyRef } from '../../lib/db/schema.ts';
 
 export interface HoverCardProps {
@@ -38,13 +39,6 @@ export function HoverCard({ trigger, children, className }: HoverCardProps) {
 // with a quick link to the full /people/[id] profile.
 // ---------------------------------------------------------------------
 
-function contactSnapshotEntries(snapshot: unknown): Array<[string, string]> {
-  if (typeof snapshot !== 'object' || snapshot === null || Array.isArray(snapshot)) return [];
-  return Object.entries(snapshot as Record<string, unknown>)
-    .filter((entry): entry is [string, string] => typeof entry[1] === 'string' && entry[1].length > 0)
-    .slice(0, 5);
-}
-
 export interface PersonHoverCardProps {
   person: Pick<PersonRef, 'id' | 'displayName' | 'contactSnapshot'>;
   /** e.g. issue_people.role ("owner", "buyer_prospect", ...) — omitted when this trigger has no case-specific role (e.g. a bare /people index row). */
@@ -54,7 +48,7 @@ export interface PersonHoverCardProps {
 
 /** Wraps a plain `<a href="/people/[id]">{displayName}</a>` trigger (in-ecosystem link, spec requirement — never omitted even though the hover card itself also links) with a contact-snapshot + role peek card. */
 export function PersonHoverCard({ person, role, className }: PersonHoverCardProps) {
-  const contacts = contactSnapshotEntries(person.contactSnapshot);
+  const contacts = displayableContactEntries(person.contactSnapshot);
   return (
     <HoverCard
       className={className}

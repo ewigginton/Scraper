@@ -40,3 +40,31 @@ export function propertyLabel(property: PropertyRef | undefined | null): string 
   const parts = [property.displayName, property.development, property.tract].filter(Boolean);
   return parts.length > 0 ? String(parts[0]) : property.id;
 }
+
+/**
+ * The ONLY person_refs.contact_snapshot keys any renderer in this app is
+ * allowed to display. contact_snapshot is a sync-owned read-model cache
+ * with an external writer (person_refs has no RLS access_classification
+ * column to restrict it, unlike evidence_files — see 20260731090200_
+ * issues_rls.sql's own comment) and docs/data-dictionary.md scopes the
+ * column to "Cached phone/email/address snapshot" — but nothing in code
+ * enforced that shape before this allowlist existed. Without it, the day
+ * the upstream sync adds an identity field to this jsonb (SSN last-4, DOB,
+ * a safety/do-not-contact note), it would render instantly on every hover
+ * card and person page with no review and no way for RLS to intervene —
+ * exactly what requirements line 872's "unauthorized users shall not
+ * receive [restricted content] through ... summaries" clause exists to
+ * prevent. If contact_snapshot legitimately grows a new displayable field,
+ * add it here deliberately — that is the point of an allowlist.
+ */
+const DISPLAYABLE_CONTACT_KEYS = ['phone', 'mobile', 'email', 'address', 'preferred_contact'] as const;
+
+/** Shared by HoverCard.tsx's PersonHoverCard, app/people/[id]/page.tsx, and app/people/page.tsx — the ONE place all three renderers of contact_snapshot agree on what's safe to show. */
+export function displayableContactEntries(snapshot: unknown): Array<[string, string]> {
+  if (typeof snapshot !== 'object' || snapshot === null || Array.isArray(snapshot)) return [];
+  const rec = snapshot as Record<string, unknown>;
+  return DISPLAYABLE_CONTACT_KEYS.flatMap((key): Array<[string, string]> => {
+    const value = rec[key];
+    return typeof value === 'string' && value.length > 0 ? [[key, value]] : [];
+  });
+}

@@ -7,6 +7,7 @@
 
 import { asc, eq, inArray } from 'drizzle-orm';
 import type { DbHandle } from './db-handle.ts';
+import { isUuid } from './id-guard.ts';
 import {
   holds,
   issuePeople,
@@ -62,6 +63,12 @@ export async function create(db: DbHandle, data: NewIssue): Promise<Issue> {
  * that id exists.
  */
 export async function getById(db: DbHandle, id: string): Promise<IssueWithCaseData | undefined> {
+  // Guard per id-guard.ts's package rule: every id reaching a `::uuid`
+  // cast/eq comes from a URL param and MUST be validated first — an
+  // invalid string here previously threw a raw driver error (SQLSTATE
+  // 22P02) instead of resolving undefined like every sibling repo's
+  // getById (people-repo.getPerson, contract-refs-repo.getById).
+  if (!isUuid(id)) return undefined;
   const [issue] = await db.select().from(issues).where(eq(issues.id, id));
   if (!issue) {
     return undefined;

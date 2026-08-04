@@ -52,7 +52,7 @@ These tables cache canonical data owned by other systems. Property Operations re
 | external_id | text | yes | | ID in the source system; may be null for hand-entered records |
 | display_name | text | no | | Human-readable name for display |
 | kind | text | no | | 'person' or 'org' |
-| contact_snapshot | jsonb | no | {} | Cached phone/email/address snapshot |
+| contact_snapshot | jsonb | no | {} | Cached phone/email/address snapshot. **Display contract:** only the keys in `app/_lib/reference-data.ts`'s `DISPLAYABLE_CONTACT_KEYS` allowlist (`phone`, `mobile`, `email`, `address`, `preferred_contact`) are ever rendered (hover cards, person page, /people index) — this column carries no `access_classification` and RLS cannot restrict individual jsonb keys, so a future sync change adding a new field here does NOT automatically become displayable; extend the allowlist deliberately. |
 | person_id | uuid | yes | | Link to canonical Person record (filled by identity service) |
 | aliases | jsonb | no | {} | Alternative names and identifiers |
 

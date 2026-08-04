@@ -15,6 +15,7 @@ import { withActor } from '../../lib/db/actor-context.ts';
 import { Pill } from '../_components/Pill.tsx';
 import { DatabaseUnavailable } from '../_components/EmptyState.tsx';
 import { searchPeople, type PersonListRow } from '../../lib/repositories/people-repo.ts';
+import { displayableContactEntries } from '../_lib/reference-data.ts';
 
 export const metadata = { title: 'People — CCL Hub Issues' };
 
@@ -27,10 +28,9 @@ function firstString(v: string | string[] | undefined): string | undefined {
 }
 
 function contactSummary(row: PersonListRow['person']): string {
-  const snapshot = row.contactSnapshot as Record<string, unknown> | null | undefined;
-  const phone = typeof snapshot?.phone === 'string' ? snapshot.phone : null;
-  const email = typeof snapshot?.email === 'string' ? snapshot.email : null;
-  const parts = [phone, email].filter((v): v is string => Boolean(v));
+  const entries = displayableContactEntries(row.contactSnapshot);
+  const byKey = new Map(entries);
+  const parts = [byKey.get('phone'), byKey.get('email')].filter((v): v is string => Boolean(v));
   return parts.length > 0 ? parts.join(' · ') : '—';
 }
 

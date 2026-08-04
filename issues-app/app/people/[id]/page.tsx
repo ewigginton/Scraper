@@ -20,7 +20,7 @@ import { tryGetDb } from '../../_lib/db.ts';
 import { withActor } from '../../../lib/db/actor-context.ts';
 import { formatDateTime } from '../../_lib/dates.ts';
 import { humanize } from '../../_lib/pills.ts';
-import { propertyLabel } from '../../_lib/reference-data.ts';
+import { displayableContactEntries, propertyLabel } from '../../_lib/reference-data.ts';
 import { Pill } from '../../_components/Pill.tsx';
 import { AuditDiffLine } from '../../_components/ChangeLogFeed.tsx';
 import { DatabaseUnavailable } from '../../_components/EmptyState.tsx';
@@ -82,13 +82,6 @@ function buildTimelineHref(id: string, sp: Awaited<PageProps['searchParams']>, o
   return qs ? `/people/${id}?${qs}` : `/people/${id}`;
 }
 
-function contactEntries(snapshot: unknown): Array<[string, string]> {
-  if (typeof snapshot !== 'object' || snapshot === null || Array.isArray(snapshot)) return [];
-  return Object.entries(snapshot as Record<string, unknown>)
-    .filter((entry): entry is [string, string] => typeof entry[1] === 'string' && entry[1].length > 0)
-    .slice(0, 20);
-}
-
 function aliasCount(aliases: unknown): number {
   if (Array.isArray(aliases)) return aliases.length;
   if (typeof aliases === 'object' && aliases !== null) return Object.keys(aliases).length;
@@ -145,7 +138,7 @@ export default async function PersonPage({ params, searchParams }: PageProps) {
   }
 
   const { person, issueRows, timeline, enrichment, hasAnyComms } = data;
-  const contacts = contactEntries(person.contactSnapshot);
+  const contacts = displayableContactEntries(person.contactSnapshot);
   const aliases = aliasCount(person.aliases);
 
   return (

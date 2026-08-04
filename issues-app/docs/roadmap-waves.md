@@ -212,7 +212,9 @@ All tiers require real credentials → Hub-integration phase, after porting.
   tracker screenshot): (a) a phase-progress stepper at the top of every
   case: completed phases as check-circles with their real dates (from
   phase_instances), current phase highlighted, expected remaining phases
-  hollow; branching workflows show the path actually taken + expected
+  hollow; every completed node shows date AND who made that change (actor
+  from the phase's audit/transition record — display name once Hub identity
+  lands, the recorded external id until then); branching workflows show the path actually taken + expected
   remainder for the current type, never a fabricated linear story. (b) The
   case/person Timeline feeds adopt the same connected vertical-line visual:
   node per entry (check/icon by entry kind), line connecting entries,

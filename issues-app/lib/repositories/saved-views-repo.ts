@@ -7,6 +7,7 @@
 import { and, asc, eq } from 'drizzle-orm';
 import type { DbHandle } from './db-handle.ts';
 import { savedViews, type NewSavedView, type SavedView } from '../db/schema.ts';
+import { isUuid } from './id-guard.ts';
 
 /** A single owner's saved views are a small, bounded list; this bound exists so the query still explicitly carries a LIMIT (never an unbounded read). */
 const LIST_LIMIT = 200;
@@ -23,6 +24,10 @@ export async function listForOwner(db: DbHandle, ownerExternalId: string): Promi
 
 /** Fetch one of an owner's saved views by id. Undefined if it doesn't exist OR belongs to a different owner (never leaks existence across owners). */
 export async function getForOwner(db: DbHandle, ownerExternalId: string, id: string): Promise<SavedView | undefined> {
+  // Guard per id-guard.ts's package rule: a non-uuid `id` (route param /
+  // form field) previously threw a raw driver error instead of resolving
+  // undefined -> the caller's typed 'saved_view_not_found' error.
+  if (!isUuid(id)) return undefined;
   const [row] = await db
     .select()
     .from(savedViews)
@@ -50,6 +55,9 @@ export async function create(db: DbHandle, data: NewSavedView): Promise<SavedVie
 
 /** Delete an owner's saved view by id. Returns the deleted row, or undefined if no row matched (wrong id OR wrong owner). */
 export async function remove(db: DbHandle, ownerExternalId: string, id: string): Promise<SavedView | undefined> {
+  // Same guard as getForOwner above — a non-uuid id must resolve
+  // undefined (-> 'saved_view_not_found'), never throw a raw driver error.
+  if (!isUuid(id)) return undefined;
   const [row] = await db
     .delete(savedViews)
     .where(and(eq(savedViews.ownerExternalId, ownerExternalId), eq(savedViews.id, id)))
