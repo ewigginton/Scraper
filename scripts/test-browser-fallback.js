@@ -19,11 +19,16 @@ const http = require('http');
 const fetch = require('node-fetch');
 const browserFetch = require('../lib/browser-fetch');
 
-const LIVE_URLS = [
-  'https://www.landwatch.com/kentucky/johnson-county/land-for-sale?minAcreage=40&sortBy=date_desc&page=1',
-  'https://www.land.com/Kentucky/johnson-county/land-over-40-acres/all-land/date-posted/page-1',
-  'https://www.landandfarm.com/search/kentucky/johnson-county/land-for-sale?minAcres=40&sort=newest&page=1',
-];
+// Probe URLs come from the parsers' own buildSearchUrls so this test can
+// never drift from what the scraper actually requests. (A hardcoded list here
+// went stale when LandWatch retired its query-string URL scheme in 2026: the
+// probe reported "HTTP 400" from the Mac while the real scraper — on the new
+// path scheme — was fetching fine.)
+const PROBE_COUNTY = [{ county: 'Johnson', state: 'KY' }];
+const LIVE_URLS = ['landwatch', 'landcom', 'landfarm'].map(name => {
+  const parser = require('../lib/parsers').parsers[name]();
+  return parser.buildSearchUrls(PROBE_COUNTY)[0].url;
+});
 
 const BLOCK_RE = /just a moment|incapsula|access denied|px-captcha|verify you are a human|attention required|enable javascript and cookies/i;
 
