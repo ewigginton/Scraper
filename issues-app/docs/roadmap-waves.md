@@ -200,5 +200,13 @@ All tiers require real credentials → Hub-integration phase, after porting.
   used for blocked-transition panels, restricted-content indicators, stale-
   case prompts, demo-mode notes, and exception rows. One component, themed
   by the pill color tokens, light+dark.
+- Breadcrumbs everywhere (Emma, Aug 2026): a shared server-rendered
+  Breadcrumbs component on every page — e.g. All Issues > Cedar Ridge
+  Tract 14 > Timeline, People > Dale Harmon, Dashboard, Settings > Roles.
+  Every segment clickable; list-level crumbs preserve the active filter/
+  view context (return to the filtered view you came from, via the same
+  URL-driven params); record crumbs use display names, not ids; current
+  page is plain text (not a link) per accessibility convention, with
+  aria-label="Breadcrumb" nav semantics.
 - Design language only from Tremor — no new npm dependencies; built in the
   existing plain-React/CSS system.
