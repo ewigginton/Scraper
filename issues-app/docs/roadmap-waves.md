@@ -184,5 +184,11 @@ All tiers require real credentials → Hub-integration phase, after porting.
 - User management boundary: staff accounts belong to the Hub's shared
   identity (Master Vision §30.1) — no local user CRUD ever. Our settings
   cover roles/limits/preferences for identities the Hub provides.
+- Select dropdowns in Tremor's idiom (Emma, Aug 2026): styled
+  select/combobox for every filter and form select — searchable when the
+  option list is long (states, coordinators, people pickers), keyboard
+  navigable, consistent with the chip filters. CSS-first; a small shared
+  client component only where native <select> can't reach (search-within-
+  dropdown), reused everywhere rather than per-page one-offs.
 - Design language only from Tremor — no new npm dependencies; built in the
   existing plain-React/CSS system.
