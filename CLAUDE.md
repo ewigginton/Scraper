@@ -130,7 +130,11 @@ in `lib/airtable.js` — never hardcode field names elsewhere:
   `New Lead` — only Emma does. Price-drop promotions arrive as `Price Drop`
   (not truly new leads). See `test/stage-policy.test.js`
 - `scripts/run-scraper.sh` self-updates the checkout from GitHub `main`
-  before each nightly run; failures surface as warnings in the report email
+  before each nightly run; failures surface as warnings in the report email.
+  It also audits the Mac's installed launchd agents/crontab against
+  `services/*.plist`, surfacing leftover or schedule-drifted jobs as a
+  warning in the same email — detection is automatic, removal stays manual
+  via `scripts/setup-production.sh`
 - Whitetail/MossyOak use the class-name-agnostic `extractByDetailLinks` engine in `base-parser.js` (detail-link anchors + price/acreage text extraction); when adding a source, prefer that engine plus real-HTML fixtures captured from the production Mac
 - Listing Intake (`lib/intake.js`, Airtable table `Listing Intake`): team
   members submit listing URLs via an Airtable form; the nightly run imports
@@ -147,3 +151,31 @@ in `lib/airtable.js` — never hardcode field names elsewhere:
   single consolidated email (no separate scheduled review job/email)
 - Launch scripts use a local run lock so scraper/review jobs do not overlap
 - Parser fetch/parse failures, bot-block detections, and markup-drift suspicions are saved locally under `data/source-health/` (HTML evidence in `data/source-health/snapshots/`) and summarized in reports
+
+## Source outage playbook (learned from the LandWatch outage, fixed Aug 2026)
+
+When a source's report line drops to "0 checked" with markup-drift warnings
+("pages load but no listings were recognized"), suspect a site redesign of
+URLs/markup — NOT a bot-block. Bot-blocks show up as 403/challenge warnings
+instead; "page fetched OK, zero cards matched" means our URL scheme or
+selectors are stale. Urgent-fix path that worked for LandWatch (PR #29,
+commit 108622c):
+
+1. Get real evidence first: read `data/source-health/<date>.jsonl` and
+   `data/source-health/snapshots/` from the production Mac (evidence-inbox
+   flow) — fix against actual served HTML, never against guesses. Queue
+   evidence-capture URL variants for any filter segment still unconfirmed
+   (captures run on the 2 AM nightly only; midday skips them).
+2. Fix the parser's URL builder + selectors against that HTML. LandWatch's
+   2026 scheme: `/{state}-land-for-sale/{county}-county` paths, `/page-N`
+   pagination (collapse the series), and error-shell detection (HTTP 200
+   with an empty app shell must count as a failed page, not "no results").
+3. Lock the fix in with a real-HTML fixture in `test/fixtures/` captured
+   from the production Mac.
+4. Ship via branch → PR → CI. The Mac self-updates from `main` before every
+   run, so merged-by-2-AM-Central means the next nightly runs it; the
+   12:30 PM midday run is the earliest same-day live confirmation (but it
+   emails only when noteworthy — silence means no crash AND no new leads,
+   see `isMiddayRunNoteworthy` in `lib/notify.js`).
+5. Verify from the report email: real "N checked" counts with no
+   markup-drift warnings for that source = fixed.

@@ -129,6 +129,13 @@ GitHub also emails "Run failed" notifications when the nightly dry-run
 workflow fails — those stop when the workflow is healthy, and can be tuned
 in GitHub notification settings, not on this machine.
 
+**Automatic drift detection.** Every nightly run now audits this Mac's
+installed launchd agents and crontab against what `services/*.plist` in the
+repo expects, and flags any leftover or schedule-drifted job right in the
+nightly email's WARNINGS section — no more discovering months later that an
+old job kept sending extra mail. Detection is automatic; removal is still
+manual, via `bash scripts/setup-production.sh` as described above.
+
 ## 6. Optional: a midday sweep for same-day listings
 
 The 2:00 AM run is the full pipeline (scrape + price check + intake +
