@@ -189,9 +189,13 @@ checklist_items→ops_checklist_items · config_versions→ops_config_versions �
 config_entries→ops_config_entries ·
 integration_identities→ops_integration_identities ·
 audit_events→ops_audit_events · saved_views→ops_saved_views ·
-communication_links→ops_communication_links (becomes the join table
-linking cadence_communications rows to ops_issues/ops_tasks — the one
-piece Cadence doesn't model) · consumed_events→ops_consumed_events ONLY if
+communication_links→ops_communication_links (the join table linking
+cadence_communications rows to ops_issues/ops_tasks. Prefix rationale
+(Emma asked, 2026-08-04): prefix follows the WRITER of the fact — the
+"belongs to this case" assertion is written by Issues, so ops_, even
+though it points at cadence rows. CHECK AT PORT: if cadence_timeline_events
+is a generalized comm↔entity linkage with a write path Scott sanctions for
+Issues, write links there instead and drop this table entirely) · consumed_events→ops_consumed_events ONLY if
 the Hub's domain_event_jobs doesn't already provide consumer-side
 idempotency for Issues subscribers (check at port; drop if covered).
 

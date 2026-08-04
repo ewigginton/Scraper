@@ -38,6 +38,19 @@ export function decodeCursor(raw: string | null | undefined): DecodedCursor | nu
     if (!Array.isArray(parsed) || parsed.length !== 2) return null;
     const [rawAt, tie] = parsed as [unknown, unknown];
     if (typeof rawAt !== 'string' || typeof tie !== 'string') return null;
+    if (tie.length === 0 || tie.length > 200) return null;
+    // INJECTION FUZZ finding (round 2): `tie` (and, belt-and-braces, `at`)
+    // can end up bound as a raw text parameter downstream (tie-break
+    // comparisons) — a NUL byte here would 500 with a raw Postgres
+    // "invalid byte sequence" error instead of the "malformed cursor ->
+    // page 1" contract this function otherwise guarantees. Reject rather
+    // than silently strip, since altering a cursor's value could
+    // otherwise reorder/skip rows. Checked against `rawAt` (the raw decoded
+    // value), BEFORE the timestamp canonicalization below — canonicalizing
+    // first would launder a NUL byte straight out of `at` (a fresh
+    // `toISOString()` string can never contain one) and silently defeat
+    // this check.
+    if (containsNulByte(rawAt) || containsNulByte(tie)) return null;
     // ROUND-2 FIX (P2): Date.parse() accepts far more formats than
     // Postgres's timestamptz parser (e.g. RFC-2822-with-trailing-zone-name
     // strings like "Sat, 01 Jan 2024 00:00:00 GMT+0000 (Coordinated
@@ -53,15 +66,6 @@ export function decodeCursor(raw: string | null | undefined): DecodedCursor | nu
     const atMs = Date.parse(rawAt);
     if (Number.isNaN(atMs)) return null;
     const at = new Date(atMs).toISOString();
-    if (tie.length === 0 || tie.length > 200) return null;
-    // INJECTION FUZZ finding (round 2): `tie` (and, belt-and-braces, `at`)
-    // can end up bound as a raw text parameter downstream (tie-break
-    // comparisons) — a NUL byte here would 500 with a raw Postgres
-    // "invalid byte sequence" error instead of the "malformed cursor ->
-    // page 1" contract this function otherwise guarantees. Reject rather
-    // than silently strip, since altering a cursor's value could
-    // otherwise reorder/skip rows.
-    if (containsNulByte(at) || containsNulByte(tie)) return null;
     return { at, tie };
   } catch {
     return null;
