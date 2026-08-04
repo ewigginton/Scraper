@@ -45,7 +45,7 @@
  *    re-trim the same batch next time — is the correct fix.
  */
 
-import { and, desc, eq, inArray, lte, or, type SQL } from 'drizzle-orm';
+import { and, desc, eq, inArray, or, sql, type SQL } from 'drizzle-orm';
 import type { DbHandle } from './db-handle.ts';
 import { auditEvents, holds, issuePeople, notices, phaseInstances, tasks } from '../db/schema.ts';
 import * as commsRepo from './comms-repo.ts';
@@ -202,33 +202,72 @@ function matchesSourceKey(e: TimelineEntry, key: 'comms' | 'audit'): boolean {
  * Merge every fetched candidate (small-source entries + paginated-source
  * batches) into one page, and compute the next combined cursor.
  *
- * Per-source advancement rule (the fix for the "faster source's boundary
- * silently skips a slower source's unconsumed rows" bug): a paginated
- * source's persisted cursor only moves forward once ALL of its fetched
- * batch made it into the returned page (fetchedCount === consumedCount) —
- * at that point it's safe to jump to that source's own next-page cursor.
- * If only SOME of a batch was consumed, the source's cursor is left
- * UNCHANGED; the next page re-fetches the identical batch, and the
- * isPastCursor filter (driven by the combined {at, tie}, not any one
- * source's pace) correctly strips the already-emitted prefix and re-offers
- * exactly the leftover suffix. This converges because the combined cursor
- * strictly advances every page (as long as there is more data to page
- * through) even when a given source doesn't.
+ * TWO correctness hazards a naive top-K merge across independently-limited
+ * sources runs into, both handled below:
+ *
+ * 1. Per-source advancement: a paginated source's persisted cursor only
+ *    moves forward once ALL of its still-relevant fetched rows made it
+ *    into a returned page (see `pendingFromSource`/`fullyConsumed`) — at
+ *    that point it's safe to jump to that source's own next-page cursor.
+ *    If only SOME were consumed, the source's cursor is left UNCHANGED; the
+ *    next page re-fetches the identical batch, and the isPastCursor filter
+ *    (driven by the combined {at, tie}, not any one source's pace)
+ *    correctly strips the already-emitted prefix and re-offers exactly the
+ *    leftover suffix.
+ *
+ * 2. Safe watermark: a source with a SMALL per-page fetch limit only ever
+ *    "sees" down to a certain depth each round (the oldest `at` in its
+ *    fetched batch — its "explored boundary"). If another source (or a
+ *    fully-available small source) offers a candidate OLDER than some
+ *    still-active source's explored boundary, emitting it now would be
+ *    unsound: that shallow source might have a HIDDEN row, not yet
+ *    fetched, that's chronologically NEWER than the candidate but older
+ *    than the shallow source's own already-seen rows — exactly the
+ *    scenario where two audit rows 6ms apart share a batch with a third
+ *    source's row sitting 13ms further back, still unexplored. Candidates
+ *    older than `safeWatermark` (the deepest/most-recent explored boundary
+ *    among all sources that still have more data) are withheld this round;
+ *    they remain valid candidates and get correctly interleaved once a
+ *    later page explores that source deeper.
+ *
+ * Both mechanisms converge: the combined cursor strictly advances every
+ * page as long as unconsumed/unexplored data remains anywhere.
  */
 function mergeAndPaginate(smallEntries: TimelineEntry[], paginated: PaginatedBatch[], cursor: CombinedCursorPayload | null, limit: number): { entries: TimelineEntry[]; nextCursor: string | null } {
   const candidates = [...smallEntries, ...paginated.flatMap((p) => p.entries)];
-  const eligible = candidates.filter((e) => isPastCursor(e, cursor)).sort(compareEntries);
+  const eligible = candidates.filter((e) => isPastCursor(e, cursor));
 
-  const hasMore = eligible.length > limit;
-  const page = hasMore ? eligible.slice(0, limit) : eligible;
+  // safeWatermark: the newest ("shallowest") explored-boundary among every
+  // paginated source that still has more data (repoNextCursor !== null).
+  // Undefined (no source is a threat) means no candidate needs withholding.
+  let safeWatermarkMs: number | undefined;
+  for (const source of paginated) {
+    if (source.repoNextCursor === null || source.entries.length === 0) continue;
+    const boundaryMs = Math.min(...source.entries.map((e) => e.at.getTime()));
+    safeWatermarkMs = safeWatermarkMs === undefined ? boundaryMs : Math.max(safeWatermarkMs, boundaryMs);
+  }
+
+  const emittable = (safeWatermarkMs === undefined ? eligible : eligible.filter((e) => e.at.getTime() >= safeWatermarkMs!)).sort(compareEntries);
+  const withheldByWatermark = eligible.length > emittable.length;
+
+  const anySourceHasMoreBeyondFetch = paginated.some((p) => p.repoNextCursor !== null);
+  const hasMore = emittable.length > limit || withheldByWatermark || anySourceHasMoreBeyondFetch;
+  const page = hasMore ? emittable.slice(0, limit) : emittable;
   const last = page[page.length - 1];
 
   if (!hasMore || !last) return { entries: page, nextCursor: null };
 
   const nextPayload: CombinedCursorPayload = { at: last.at.toISOString(), tie: tieOf(last) };
   for (const source of paginated) {
+    // How many of THIS fetch's rows are still "new" this round (not
+    // already emitted on an earlier page) — comparing against the raw
+    // fetched count would be wrong once a re-fetched batch's leading rows
+    // have already been consumed previously (see this function's doc
+    // comment, point 1). Rows withheld by the watermark correctly count as
+    // "still pending" here too, since they did NOT make it into `page`.
+    const pendingFromSource = source.entries.filter((e) => isPastCursor(e, cursor)).length;
     const consumedCount = page.filter((e) => matchesSourceKey(e, source.key)).length;
-    const fullyConsumed = consumedCount === source.fetchedCount;
+    const fullyConsumed = consumedCount === pendingFromSource;
     const nextSourceCursor = fullyConsumed ? (source.repoNextCursor ?? SOURCE_DONE) : source.cursorUsed;
     if (source.key === 'comms') nextPayload.comms = nextSourceCursor;
     else nextPayload.audit = nextSourceCursor;
@@ -347,11 +386,12 @@ async function fetchIssueObjectGraphAuditBatch(db: DbHandle, issueId: string, so
   return { key: 'audit', entries: page.map(auditEntryFrom), repoNextCursor, fetchedCount: page.length, cursorUsed: sourceCursor };
 }
 
-function keysetBefore(decoded: { at: string; tie: string }): SQL {
-  return and(
-    // strictly before (occurred_at, id) in desc order — standard seek predicate.
-    or(lte(auditEvents.occurredAt, new Date(decoded.at)), undefined),
-  )!;
+/** Standard "seek method" predicate: strictly past `decoded` in (occurred_at DESC, id DESC) order — same shape as comms-repo.ts's/audit-metrics-repo.ts's keysetPredicate. */
+function auditKeysetBefore(decoded: { at: string; tie: string }): SQL {
+  return sql`(
+    (${auditEvents.occurredAt} < ${decoded.at}::timestamptz)
+    OR (${auditEvents.occurredAt} = ${decoded.at}::timestamptz AND ${auditEvents.id} < ${decoded.tie}::uuid)
+  )`;
 }
 
 /** Direct read of phase_instances (NOT via audit_events — see this module's header comment). Small per-issue cardinality: fetched in full every page, bounded defensively. */
@@ -528,7 +568,7 @@ async function fetchPersonObjectAuditBatch(db: DbHandle, personRefId: string, so
 
   const conditions: SQL[] = [eq(auditEvents.objectTable, 'person_refs'), eq(auditEvents.objectId, personRefId)];
   const decoded = sourceCursor ? decodeSimpleCursor(sourceCursor) : null;
-  if (decoded && isUuid(decoded.tie)) conditions.push(keysetBefore(decoded));
+  if (decoded && isUuid(decoded.tie)) conditions.push(auditKeysetBefore(decoded));
 
   const rows = await db
     .select()

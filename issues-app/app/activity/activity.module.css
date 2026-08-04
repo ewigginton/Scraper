@@ -1,0 +1,54 @@
+/* app/activity/activity.module.css — page-specific styling only; every
+   color/spacing token and reusable component class (card, badge, muted,
+   btn, form-group) comes from app/globals.css as-is (see task brief). */
+
+.title {
+  margin-bottom: var(--space-sm);
+}
+
+.filterBar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-lg);
+  align-items: flex-end;
+  margin-bottom: var(--space-lg);
+}
+
+.filterBar :global(.form-group) {
+  margin-bottom: 0;
+  min-width: 12rem;
+}
+
+.filterActions {
+  margin-bottom: 0;
+}
+
+.feed {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 var(--space-lg) 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+.feedRow {
+  border: 1px solid var(--color-border);
+  border-radius: 0.375rem;
+  padding: var(--space-md);
+}
+
+.feedLine {
+  display: flex;
+  gap: var(--space-sm);
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.reason {
+  margin-top: var(--space-xs);
+}
+
+.linkRow {
+  margin-top: var(--space-xs);
+}

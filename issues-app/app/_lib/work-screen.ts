@@ -60,7 +60,10 @@ export interface WorkRow {
   taskLabel: string;
   dueDate: string | null;
   priority: string | null;
+  /** A real staff identity string (task.assigneeId) — displayed as-is, never humanized (it isn't a snake_case enum). */
   assignee: string | null;
+  /** Set ONLY when there's no individual assignee and the row falls back to its queue key (e.g. 'new_unreviewed') — the renderer humanizes this, unlike `assignee`, which is an opaque identity string, not a label. */
+  assigneeQueue: string | null;
   summary: string | null;
   canComplete: boolean;
   canReschedule: boolean;
@@ -115,7 +118,8 @@ function taskToRow(task: Task, ctx: JoinContext): WorkRow {
     taskLabel: task.title,
     dueDate: task.dueDate,
     priority: task.priority,
-    assignee: task.assigneeId ?? task.queue ?? null,
+    assignee: task.assigneeId ?? null,
+    assigneeQueue: task.assigneeId ? null : (task.queue ?? null),
     summary: task.description ?? issue?.summary ?? null,
     canComplete: task.status === 'open' || task.status === 'in_progress',
     canReschedule: task.status === 'open' || task.status === 'in_progress',
@@ -140,6 +144,7 @@ function noticeToRow(notice: Notice, ctx: JoinContext): WorkRow {
     dueDate: notice.cureDeadline,
     priority: null,
     assignee: null,
+    assigneeQueue: null,
     summary: issue?.summary ?? null,
     canComplete: false,
     canReschedule: false,
@@ -164,6 +169,7 @@ function approvalToRow(approval: Approval, ctx: JoinContext): WorkRow {
     dueDate: null,
     priority: null,
     assignee: null,
+    assigneeQueue: null,
     summary: approval.thresholdRule ?? issue?.summary ?? null,
     canComplete: false,
     canReschedule: false,

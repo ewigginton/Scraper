@@ -4,9 +4,40 @@ import { withActor } from '../lib/db/actor-context.ts';
 import { buildWorkScreen, WORK_QUEUE_LABELS, type WorkQueueKey, type WorkRow } from './_lib/work-screen.ts';
 import { classifyDueDate, formatDate, todayIso } from './_lib/dates.ts';
 import { priorityPillColor, humanize } from './_lib/pills.ts';
+import { buildIssuesHref, type IssuesHrefOverrides } from './_lib/issues-view.ts';
 import { Pill } from './_components/Pill.tsx';
 import { DatabaseUnavailable, EmptyQueue } from './_components/EmptyState.tsx';
 import { completeTaskAction, rescheduleTaskAction } from './actions.ts';
+
+/**
+ * Maps each My Work queue to its best-available /issues filter params
+ * (docs/notion-redesign.md "My Work at volume": "a 'View all N' link into
+ * /issues pre-filtered to that queue's params"). issues-query-repo's filter
+ * allowlist is issue-level (type/status/state/priority/owner/overdue/q) —
+ * it has no notion of a task's action_date, a notice's cure_deadline, or an
+ * approval at all, so `actionDateFollowups`/`noticesDue`/`upcoming`/
+ * `approvals` have no exact equivalent and fall back to "this coordinator's
+ * own issues" (documented gap, not a silently invented filter). The other
+ * three queues DO have an exact issue-level equivalent and use it.
+ */
+function issuesHrefForQueue(key: WorkQueueKey, userId: string): string {
+  const overrides: IssuesHrefOverrides = (() => {
+    switch (key) {
+      case 'newUnreviewed':
+        return { owner: userId, status: ['intake'] };
+      case 'overdue':
+        return { owner: userId, overdue: '1' };
+      case 'waitingBlocked':
+        return { owner: userId, status: ['waiting', 'blocked'] };
+      case 'actionDateFollowups':
+      case 'noticesDue':
+      case 'upcoming':
+      case 'approvals':
+        return { owner: userId };
+    }
+  })();
+  return buildIssuesHref({}, overrides);
+}
 
 export const metadata = { title: 'My Work — CCL Hub Issues' };
 
@@ -79,6 +110,11 @@ export default async function Home({ searchParams }: PageProps) {
         <section key={key} className="queue-section" aria-labelledby={`queue-${key}`}>
           <h2 id={`queue-${key}`} className="flex items-center gap-sm">
             {WORK_QUEUE_LABELS[key]} <span className="n-count-chip">{data.counts[key]}</span>
+            {data.counts[key] > 0 && (
+              <a className="n-load-more" href={issuesHrefForQueue(key, user.id)} style={{ marginTop: 0, fontSize: 12 }}>
+                View all {data.counts[key]} &rarr;
+              </a>
+            )}
           </h2>
           {data.queues[key].length === 0 ? (
             <EmptyQueue label={WORK_QUEUE_LABELS[key]} />
@@ -133,7 +169,7 @@ function WorkTableRow({ row }: { row: WorkRow }) {
         <span className={`badge ${urgency === 'none' ? '' : urgency}`}>{formatDate(row.dueDate)}</span>
       </td>
       <td>{row.priority ? <Pill color={priorityPillColor(row.priority)}>{humanize(row.priority)}</Pill> : '—'}</td>
-      <td>{row.assignee ?? '—'}</td>
+      <td>{row.assignee ?? (row.assigneeQueue ? humanize(row.assigneeQueue) : '—')}</td>
       <td className="summary-cell">{row.summary ?? '—'}</td>
       <td>
         <div className="flex flex-col gap-sm row-actions">

@@ -74,13 +74,30 @@ interface NormalizedFilters {
   searchText: string | null;
 }
 
+// eslint-disable-next-line no-control-regex -- deliberately matching the NUL byte Postgres text columns can never contain.
+const NUL_BYTE_RE = new RegExp(String.fromCharCode(0), 'g');
+
+/**
+ * Postgres `text`/`varchar` columns reject the NUL byte outright (driver
+ * error: `invalid byte sequence for encoding "UTF8": 0x00`) — unlike SQL
+ * injection, parameterization does NOT protect against this, because the
+ * byte reaches the wire as a bound parameter's VALUE, not as SQL syntax.
+ * Stripping it here (INJECTION FUZZ finding: `q=%00%00%00` 500'd countIssues/
+ * listIssues) keeps every free-text filter (search, state, coordinator/queue)
+ * a safe "matches nothing weirder than usual" instead of an uncaught
+ * driver exception reaching the client as a 500.
+ */
+function stripNulBytes(value: string): string {
+  return value.replace(NUL_BYTE_RE, '');
+}
+
 /** Tolerant of any runtime shape (not just the declared TS type) — this is a trust boundary, not just a type. */
 function sanitizeStringArray(input: unknown, allowlist?: Set<string>): SanitizedArrayFilter {
   if (!Array.isArray(input)) return { requested: false, values: [] };
   const candidates = new Set<string>();
   for (const raw of input) {
     if (typeof raw !== 'string') continue;
-    const trimmed = raw.trim().slice(0, MAX_STRING_LEN);
+    const trimmed = stripNulBytes(raw.trim().slice(0, MAX_STRING_LEN));
     if (trimmed.length === 0) continue;
     candidates.add(trimmed);
     if (candidates.size >= MAX_FILTER_VALUES) break;
@@ -92,7 +109,7 @@ function sanitizeStringArray(input: unknown, allowlist?: Set<string>): Sanitized
 
 function sanitizeString(input: unknown): string | null {
   if (typeof input !== 'string') return null;
-  const trimmed = input.trim().slice(0, MAX_STRING_LEN);
+  const trimmed = stripNulBytes(input.trim().slice(0, MAX_STRING_LEN));
   return trimmed.length > 0 ? trimmed : null;
 }
 

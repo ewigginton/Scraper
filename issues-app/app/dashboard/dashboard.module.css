@@ -1,0 +1,102 @@
+/* app/dashboard/dashboard.module.css — page-specific styling only; every
+   reusable component class (card, badge, muted, table-scroll, n-table,
+   n-pill-*) comes from app/globals.css as-is (see task brief). CSS-only
+   bars: no chart library, a plain div with a width percentage. */
+
+.title {
+  margin-bottom: var(--space-sm);
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr));
+  gap: var(--space-lg);
+  margin-bottom: var(--space-lg);
+}
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+.panelTitle {
+  margin-bottom: 0;
+}
+
+.barList {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.barRow {
+  display: block;
+  color: inherit;
+  text-decoration: none;
+  border-radius: 0.25rem;
+  padding: var(--space-xs) 0;
+}
+
+a.barRow:hover {
+  text-decoration: none;
+  background-color: var(--color-accent-light);
+}
+
+.barHead {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-sm);
+  font-size: var(--font-size-sm);
+  margin-bottom: 2px;
+}
+
+.barLabel {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.barCount {
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.barTrack {
+  height: 0.5rem;
+  border-radius: 0.25rem;
+  background-color: var(--color-border);
+  overflow: hidden;
+}
+
+.barFill {
+  height: 100%;
+  background-color: var(--color-accent);
+  border-radius: 0.25rem;
+}
+
+.barFill.warn {
+  background-color: var(--status-due-soon);
+}
+
+.barFill.danger {
+  background-color: var(--status-overdue);
+}
+
+.headline {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-sm);
+}
+
+.headlineNumber {
+  font-size: var(--font-size-2xl);
+  font-weight: 700;
+}
+
+.emptyPanel {
+  margin: 0;
+}

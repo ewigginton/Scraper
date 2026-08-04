@@ -4,9 +4,12 @@
  * live in lib/services, not here.
  */
 
-import { eq } from 'drizzle-orm';
+import { asc, eq } from 'drizzle-orm';
 import type { DbHandle } from './db-handle.ts';
 import { vendors, type NewVendor, type Vendor } from '../db/schema.ts';
+
+/** Bound on the vendors list, so this can never become an unbounded read as the table grows (docs/notion-redesign.md "no unbounded reads anywhere"). */
+const LIST_LIMIT = 500;
 
 /** Insert a new vendor row and return it. */
 export async function create(db: DbHandle, data: NewVendor): Promise<Vendor> {
@@ -17,9 +20,9 @@ export async function create(db: DbHandle, data: NewVendor): Promise<Vendor> {
   return row;
 }
 
-/** List all vendors. */
+/** List vendors, alphabetically, with a stable id tiebreaker. Bounded via LIST_LIMIT. */
 export async function list(db: DbHandle): Promise<Vendor[]> {
-  return db.select().from(vendors);
+  return db.select().from(vendors).orderBy(asc(vendors.displayName), asc(vendors.id)).limit(LIST_LIMIT);
 }
 
 /** Fetch a single vendor by id. */

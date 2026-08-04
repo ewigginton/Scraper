@@ -150,7 +150,9 @@ export default async function CasePage({ params, searchParams }: PageProps) {
               <PersonIcon size={15} />
             </span>
             <span className="n-property-label">Coordinator</span>
-            <span className="n-property-value">{issue.coordinatorId ?? issue.queue ?? '—'}</span>
+            <span className="n-property-value">
+              {issue.coordinatorId ?? (issue.queue ? humanize(issue.queue) : '—')}
+            </span>
           </div>
 
           <div className="n-property-row">
