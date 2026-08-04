@@ -141,8 +141,14 @@ function parseColumns(v: string | string[] | undefined): ColumnKey[] {
     .slice(0, 100);
   if (requested.length === 0) return DEFAULT_COLUMNS;
   const valid = new Set<ColumnKey>(requested.filter((c): c is ColumnKey => ALL_COLUMN_KEYS.has(c)));
-  for (const key of ALWAYS_VISIBLE_COLUMNS) valid.add(key);
+  // Checked BEFORE adding ALWAYS_VISIBLE_COLUMNS below (bug fix: the
+  // always-visible columns used to be added first, which made `valid`
+  // non-empty even when every REQUESTED column was invalid — the
+  // "all-invalid -> DEFAULT_COLUMNS" fallback this function's own doc
+  // comment promises was dead code, silently degrading an all-invalid
+  // `cols=` to just the property column instead of the full default set).
   if (valid.size === 0) return DEFAULT_COLUMNS;
+  for (const key of ALWAYS_VISIBLE_COLUMNS) valid.add(key);
   return Array.from(valid).sort((a, b) => (COLUMN_ORDER.get(a) ?? 0) - (COLUMN_ORDER.get(b) ?? 0));
 }
 

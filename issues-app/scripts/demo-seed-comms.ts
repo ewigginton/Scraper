@@ -14,7 +14,6 @@
  * Run `npm run demo`'s server, stop it (Ctrl-C), THEN run this script —
  * never both at once.
  *
-
  * Wave 2 roadmap: "Demo seed gains fictional communication_events
  * (calls/texts/emails per person) so timelines are visible at demo time."
  *
@@ -342,7 +341,18 @@ async function main() {
   console.log(`  communication_links inserted: ${result.linkCount}`);
 }
 
-main().catch((err) => {
-  console.error('demo-seed-comms failed:', err);
-  process.exit(1);
-});
+// Only auto-run when executed directly (`node scripts/demo-seed-comms.ts`),
+// never when this module is merely IMPORTED — e.g. by
+// test/demo-seed-comms.test.ts, which imports seedDemoComms() for direct
+// testing. Without this guard, importing the module for any reason runs
+// main() as a side effect, including its existsSync(.seed-complete) check
+// and process.exit(1) on a "not fully seeded" .demo-db/, which surfaced as
+// an unhandled rejection during `npm run test` even though every assertion
+// still passed.
+const isMain = process.argv[1] === fileURLToPath(import.meta.url);
+if (isMain) {
+  main().catch((err) => {
+    console.error('demo-seed-comms failed:', err);
+    process.exit(1);
+  });
+}
