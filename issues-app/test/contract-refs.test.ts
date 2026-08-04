@@ -49,6 +49,29 @@ describe('contract-refs-repo', () => {
       expect(rows.map((r) => r.id)).toEqual([newer.row.id, older.row.id]);
     });
 
+    it('sorts a null executed_date (draft/unexecuted) AFTER a real executed_date, not before', async () => {
+      // Regression for the NULLS FIRST default: ORDER BY executed_date DESC
+      // in Postgres puts NULLs first unless NULLS LAST is explicit, which
+      // would surface an unexecuted draft contract as "primary" ahead of
+      // an actually-executed one.
+      const property = await makeProperty(handle.db);
+      const executed = await makeContract(handle, {
+        propertyRefId: property.id,
+        contractNumber: 'EXECUTED-1',
+        statusCached: 'Executed',
+        executedDate: '2025-01-01',
+      });
+      const draft = await makeContract(handle, {
+        propertyRefId: property.id,
+        contractNumber: 'DRAFT-1',
+        statusCached: 'Draft',
+        executedDate: null,
+      });
+
+      const rows = await contractRefsRepo.getForProperty(handle.db, property.id);
+      expect(rows.map((r) => r.id)).toEqual([executed.row.id, draft.row.id]);
+    });
+
     it('returns an empty array for a property with no contracts', async () => {
       const property = await makeProperty(handle.db);
       const rows = await contractRefsRepo.getForProperty(handle.db, property.id);

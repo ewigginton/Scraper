@@ -8,7 +8,7 @@
  * table comment), so this module only ever SELECTs.
  */
 
-import { desc, eq } from 'drizzle-orm';
+import { desc, eq, sql } from 'drizzle-orm';
 import type { DbHandle } from './db-handle.ts';
 import { contractRefs, type ContractRef } from '../db/schema.ts';
 import { isUuid } from './id-guard.ts';
@@ -28,7 +28,7 @@ export async function getForProperty(db: DbHandle, propertyRefId: string): Promi
     .select()
     .from(contractRefs)
     .where(eq(contractRefs.propertyRefId, propertyRefId))
-    .orderBy(desc(contractRefs.executedDate), desc(contractRefs.createdAt))
+    .orderBy(sql`${contractRefs.executedDate} desc nulls last`, desc(contractRefs.createdAt))
     .limit(FOR_PROPERTY_LIMIT);
 }
 
