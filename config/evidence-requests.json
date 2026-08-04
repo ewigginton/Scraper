@@ -1,6 +1,9 @@
 {
   "urls": [
-    "https://www.landwatch.com/kentucky/wayne-county/land-for-sale?minAcreage=40&sort=date_desc",
+    "https://www.landwatch.com/kentucky-land-for-sale/wayne-county",
+    "https://www.landwatch.com/kentucky-land-for-sale/wayne-county/page-2",
+    "https://www.landwatch.com/kentucky-land-for-sale/wayne-county/acres-over-150",
+    "https://www.landwatch.com/kentucky-land-for-sale/wayne-county/acres-over-40",
     "https://www.landflip.com/land-for-sale/kentucky",
     "https://www.landflip.com/land-for-sale/alabama",
     "https://www.landflip.com/land/420517",
