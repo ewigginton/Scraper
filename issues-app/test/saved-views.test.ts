@@ -82,6 +82,11 @@ describe('saved_views migration + repo', () => {
     expect(rightOwnerResult?.id).toBe(view.id);
     expect(await savedViewsRepo.getForOwner(handle.db, 'alice', view.id)).toBeUndefined();
   });
+
+  it('REGRESSION: getForOwner/remove resolve undefined for a non-uuid id rather than throwing a raw driver error', async () => {
+    await expect(savedViewsRepo.getForOwner(handle.db, 'alice', 'not-a-uuid')).resolves.toBeUndefined();
+    await expect(savedViewsRepo.remove(handle.db, 'alice', 'not-a-uuid')).resolves.toBeUndefined();
+  });
 });
 
 describe('saved-view-service', () => {
