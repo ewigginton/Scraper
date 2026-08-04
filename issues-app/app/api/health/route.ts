@@ -33,6 +33,16 @@ export async function GET() {
       return Response.json({ ok: false, reason: "Could not determine the connecting role's privileges." }, { status: 503 });
     }
     if (row.rolsuper || row.rolbypassrls) {
+      if (process.env.ISSUES_DEMO === '1') {
+        // Demo mode runs on embedded PGlite, which only has a superuser —
+        // expected there, and .demo-db holds only fictional fixture data.
+        // The assertion stays LOUD for every real deployment below.
+        return Response.json({
+          ok: true,
+          mode: 'demo',
+          note: 'Embedded demo database (PGlite); RLS is not enforced in demo mode.',
+        });
+      }
       return Response.json(
         {
           ok: false,

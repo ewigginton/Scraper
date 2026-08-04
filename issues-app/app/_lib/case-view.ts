@@ -48,7 +48,7 @@ import * as issuesRepo from '../../lib/repositories/issues-repo.ts';
 export interface CaseData {
   issue: Issue;
   property: PropertyRef | undefined;
-  people: IssuePerson[];
+  people: issuesRepo.IssuePersonWithName[];
   holds: Hold[];
   tasks: Task[];
   currentPhase: PhaseInstance | undefined;

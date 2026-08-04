@@ -229,7 +229,7 @@ export default async function CasePage({ params, searchParams }: PageProps) {
             <thead>
               <tr>
                 <th scope="col">Role</th>
-                <th scope="col">Person ref id</th>
+                <th scope="col">Person</th>
                 <th scope="col">Notes</th>
               </tr>
             </thead>
@@ -237,7 +237,7 @@ export default async function CasePage({ params, searchParams }: PageProps) {
               {people.map((p) => (
                 <tr key={p.id}>
                   <td>{p.role}</td>
-                  <td>{p.personRefId}</td>
+                  <td>{p.personDisplayName ?? p.personRefId}</td>
                   <td>{p.notes ?? '—'}</td>
                 </tr>
               ))}
