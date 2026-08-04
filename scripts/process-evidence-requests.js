@@ -66,8 +66,16 @@ function readRequestUrls() {
 // fetch layer returns (e.g. an unresolved HTTP-200 wall) is saved as evidence;
 // a thrown fetch (HTTP-4xx wall, timeout) propagates and is logged per-URL by
 // the orchestrator, non-fatally.
+//
+// Every capture is stamped with a leading comment naming its source URL and
+// capture time, so evidence files are self-describing when read weeks later.
+// (The stale "LandWatch / 400" shell that sat in data/evidence looked like a
+// real page until its provenance was reconstructed by hand — never again.)
 function makeCaptureUrl() {
-  return (url) => browserFetch.fetchPageWithBrowser(url);
+  return async (url) => {
+    const html = await browserFetch.fetchPageWithBrowser(url);
+    return `<!-- evidence url="${url}" captured="${new Date().toISOString()}" -->\n${html}`;
+  };
 }
 
 // Commit captured files to `evidence-inbox` and force-push, WITHOUT disturbing

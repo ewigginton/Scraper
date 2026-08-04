@@ -16,12 +16,36 @@ const testCounties = [
   { county: 'Taney', state: 'MO', maxCPA: 4000 },
 ];
 
-test('LandWatch generates correct URL slugs', () => {
+test('LandWatch builds current /{state}-land-for-sale/{county}-county URLs', () => {
+  // The pre-2026 /{state}/{county}-county/land-for-sale?minAcreage=&sort=
+  // query form is 400-rejected by the site — the 2026-08-04 nightly burned
+  // 244 pages on it. Page 1 is the bare county URL; deeper pages are /page-N;
+  // the large-tract pass is an /acres-over-N path segment.
   const parser = new LandWatchParser();
   const urls = parser.buildSearchUrls(testCounties);
-  const first = urls[0].url;
-  assert.match(first, /landwatch\.com\/texas\/san-augustine-county/);
-  assert.match(first, /minAcreage=40/);
+  assert.equal(urls[0].url, 'https://www.landwatch.com/texas-land-for-sale/san-augustine-county');
+  const page2 = urls.find(u => u.county === 'San Augustine' && u.page === 2);
+  assert.equal(page2.url, 'https://www.landwatch.com/texas-land-for-sale/san-augustine-county/page-2');
+  const largeTract = urls.find(u => u.county === 'San Augustine' && u.url.includes('acres-over'));
+  assert.match(largeTract.url, /\/texas-land-for-sale\/san-augustine-county\/acres-over-\d+$/);
+  // The dead query-param form must never come back
+  assert.ok(urls.every(u => !u.url.includes('?')), 'no query params in the current scheme');
+});
+
+test('LandWatch page 1 and /page-N share one pagination series key; acres-over is its own', () => {
+  const parser = new LandWatchParser();
+  const base = 'https://www.landwatch.com/kentucky-land-for-sale/wayne-county';
+  const k1 = parser.paginationSeriesKey(base, 'Wayne', 'KY');
+  const k2 = parser.paginationSeriesKey(`${base}/page-2`, 'Wayne', 'KY');
+  const k3 = parser.paginationSeriesKey(`${base}/page-3`, 'Wayne', 'KY');
+  // Bare page 1 and /page-N collapse to ONE key so a failed page 1 skips the
+  // deeper pages (the MossyOak ?pg= bug, path-segment edition).
+  assert.equal(k1, k2);
+  assert.equal(k2, k3);
+  // The large-tract pass is a separate series — its failure must not be
+  // conflated with the main pass.
+  const kAcres = parser.paginationSeriesKey(`${base}/acres-over-150`, 'Wayne', 'KY');
+  assert.notEqual(k1, kAcres);
 });
 
 test('Land.com generates title-case state slugs', () => {
@@ -59,7 +83,10 @@ test('LivingTheDream builds per-state /land-for-sale/{state}/ URLs, only for cov
 test('all parsers generate both pass-1 and pass-2 (large tract) URLs', () => {
   const singleCounty = [{ county: 'Taney', state: 'MO', maxCPA: 4000 }];
 
-  for (const Parser of [LandWatchParser, LandComParser, LandAndFarmParser, LandsOfAmericaParser]) {
+  // LandWatch's current scheme has no 40ac filter segment (pass 1 is the bare
+  // county page; sub-40ac listings drop downstream in lib/filter.js), so its
+  // pass-1 check is bare-county-URL presence rather than a "40" marker.
+  for (const Parser of [LandComParser, LandAndFarmParser, LandsOfAmericaParser]) {
     const parser = new Parser();
     const urls = parser.buildSearchUrls(singleCounty);
     const hasSmall = urls.some(u => u.url.includes('40'));
@@ -67,6 +94,16 @@ test('all parsers generate both pass-1 and pass-2 (large tract) URLs', () => {
     assert.ok(hasSmall, `${parser.name} missing pass-1 (40ac) URLs`);
     assert.ok(hasLarge, `${parser.name} missing pass-2 (150ac) URLs`);
   }
+  const lw = new LandWatchParser();
+  const lwUrls = lw.buildSearchUrls(singleCounty);
+  assert.ok(
+    lwUrls.some(u => u.url.endsWith('/missouri-land-for-sale/taney-county')),
+    'LandWatch missing pass-1 (bare county page) URL'
+  );
+  assert.ok(
+    lwUrls.some(u => u.url.includes('acres-over-150')),
+    'LandWatch missing pass-2 (acres-over-150) URL'
+  );
 });
 
 test('LandWatch is browser-rendered — a CoStar/Imperva client-rendered SPA', () => {
@@ -190,6 +227,30 @@ test('bot-challenge pages are detected, not treated as zero listings', () => {
   assert.equal(parser.isBlockedPage(incapsula), true);
   const normal = '<html><body><div data-testid="listing-card">real content</div></body></html>';
   assert.equal(parser.isBlockedPage(normal), false);
+});
+
+test('CoStar error shells ("LandWatch / 400") count as blocked, never as markup drift', () => {
+  // Real failure from the 2026-08-04 nightly: the site 400-rejects the old
+  // URL form but renders a full React error shell (nav + footer, no cards),
+  // which the pipeline mistook for a live page with stale selectors — 122
+  // "markup drift" reports in one night. Title shape proven by the captured
+  // evidence page www.landwatch.com-kentucky-wayne-county-...-8492863d.html.
+  const { isBlockedHtml, isErrorShellHtml } = require('../lib/block-markers');
+  const shell = '<html><head><title>LandWatch / 400</title></head><body><nav>full nav here</nav></body></html>';
+  assert.equal(isBlockedHtml(shell), true, '400 shell must read as blocked');
+  assert.equal(isErrorShellHtml(shell), true, 'and as a terminal error shell (no challenge polling)');
+  assert.equal(isBlockedHtml('<html><head><title>Land.com / 503</title></head></html>'), true);
+
+  // Real pages must never be flagged: search titles, and titles containing
+  // slashes or numbers that are not "/ 4xx-5xx".
+  const realSearch = '<html><head><title>Wayne County, KY Land for Sale, 178 Properties for Sale | LandWatch</title></head></html>';
+  assert.equal(isBlockedHtml(realSearch), false);
+  assert.equal(isErrorShellHtml(realSearch), false);
+  const slashTitle = '<html><head><title>Tract 12 / 80 acres near Monticello</title></head></html>';
+  assert.equal(isBlockedHtml(slashTitle), false);
+  // A challenge page is blocked but NOT a terminal shell — polling stays on.
+  const challengeAgain = '<html><head><title>Just a moment...</title></head><body></body></html>';
+  assert.equal(isErrorShellHtml(challengeAgain), false);
 });
 
 test('scrapeAll records a blocked source issue instead of silent zero', async () => {
@@ -345,8 +406,8 @@ test('multi-state counties produce correct slugs for each state', () => {
   const urls = parser.buildSearchUrls(counties);
   const txUrls = urls.filter(u => u.state === 'TX');
   const moUrls = urls.filter(u => u.state === 'MO');
-  assert.ok(txUrls[0].url.includes('/texas/'));
-  assert.ok(moUrls[0].url.includes('/missouri/'));
+  assert.ok(txUrls[0].url.includes('/texas-land-for-sale/'));
+  assert.ok(moUrls[0].url.includes('/missouri-land-for-sale/'));
 });
 
 test('SCRAPER_MAX_PAGE limits validation runs to early pages', async () => {
