@@ -1167,3 +1167,64 @@ table.n-table {
   flex-wrap: wrap;
   gap: var(--space-xs);
 }
+
+/* ==========================================================================
+   Hover cards (spec §15) — pure-CSS popover, no client JS. Positioned
+   on :hover/:focus-within of the .n-hovercard wrapper, matching the
+   details-free idiom of .n-popover-wrap elsewhere in this stylesheet.
+   ========================================================================== */
+
+.n-hovercard {
+  position: relative;
+  display: inline-block;
+}
+
+.n-hovercard-panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 30;
+  min-width: 16rem;
+  max-width: 22rem;
+  display: none;
+  flex-direction: column;
+  gap: 4px;
+  padding: var(--space-sm) var(--space-md);
+  background-color: var(--n-bg);
+  border: 1px solid var(--n-border);
+  border-radius: var(--n-radius);
+  box-shadow: var(--n-shadow-popover);
+  font-size: var(--n-font-size);
+  color: var(--n-ink);
+  white-space: normal;
+  text-align: left;
+}
+
+.n-hovercard:hover .n-hovercard-panel,
+.n-hovercard:focus-within .n-hovercard-panel {
+  display: flex;
+}
+
+.n-hovercard-panel .n-hovercard-title {
+  font-weight: 600;
+  color: var(--n-ink);
+}
+
+.n-hovercard-panel .n-hovercard-row {
+  color: var(--n-ink-muted);
+  font-size: 12px;
+}
+
+.n-hovercard-panel .n-hovercard-links {
+  display: flex;
+  gap: var(--space-sm);
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid var(--n-border);
+}
+
+/* Inside an .n-table row, the row-spanning .n-row-link overlay (z-index 0)
+   must not sit above a hover card panel — n-property-value already gets
+   z-index 1 from the "td > *:not(.n-row-link)" rule below the table
+   styles; the hover card panel's own z-index: 30 keeps it above that too,
+   same reasoning that popover already relies on for the columns menu. */

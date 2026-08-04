@@ -128,6 +128,48 @@ export type PersonRef = typeof personRefs.$inferSelect;
 export type NewPersonRef = typeof personRefs.$inferInsert;
 
 // ---------------------------------------------------------------------
+// contract_refs — read-model cache of the canonical Sales/Transactions
+// Contract record (supabase/migrations/20260804120000_issues_contract_refs.sql).
+// Mirrors the property_refs/person_refs alias pattern EXACTLY: NOT
+// canonical (Master Vision §30.2, spec §30.2) — the Hub's Sales/
+// Transactions module + Contract workflow own the real contract facts.
+// ---------------------------------------------------------------------
+
+export const contractRefs = pgTable(
+  'contract_refs',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    createdAt: tsTz('created_at').notNull().defaultNow(),
+    updatedAt: tsTz('updated_at').notNull().defaultNow(),
+
+    sourceSystem: text('source_system').notNull(),
+    externalId: text('external_id').notNull(),
+
+    contractNumber: text('contract_number'),
+    statusCached: text('status_cached'),
+
+    propertyRefId: uuid('property_ref_id')
+      .notNull()
+      .references(() => propertyRefs.id, { onDelete: 'restrict' }),
+    buyerPersonRefId: uuid('buyer_person_ref_id').references(() => personRefs.id, { onDelete: 'set null' }),
+
+    executedDate: date('executed_date'),
+    keyDates: jsonb('key_dates').notNull().default({}),
+
+    lastSyncedAt: tsTz('last_synced_at'),
+  },
+  (t) => [
+    unique('contract_refs_source_external_unique').on(t.sourceSystem, t.externalId),
+    index('contract_refs_property_ref_id_idx').on(t.propertyRefId),
+    index('contract_refs_buyer_person_ref_id_idx').on(t.buyerPersonRefId),
+    index('contract_refs_last_synced_at_idx').on(t.lastSyncedAt),
+  ],
+);
+
+export type ContractRef = typeof contractRefs.$inferSelect;
+export type NewContractRef = typeof contractRefs.$inferInsert;
+
+// ---------------------------------------------------------------------
 // issues
 // ---------------------------------------------------------------------
 
