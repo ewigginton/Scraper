@@ -144,7 +144,11 @@ before/after/why/when for every command, including denials. The UX layer:
   demo shows the structure with seeded fictional conversations.
 
 ## Hub-integration phase — Google Chat (Emma, Aug 2026)
-CCL uses Google Chat (not Slack). Three tiers, all landing in existing seams
+CCL uses Google Chat (not Slack). Emma's priority ranking (Aug 2026):
+selective thread-capture to cases > work-from-chat > notifications. Full
+design: docs/integrations/google-chat-ingestion.md (contract draft for
+Scott; selective attach is the recommended default, inference rejected).
+Three tiers, all landing in existing seams
 (communication_events + integration_identities + idempotent consumption;
 spec §19 already names Google Workspace as a communication transport):
 1. Outbound notifications: incoming webhooks per Chat space, driven by the
