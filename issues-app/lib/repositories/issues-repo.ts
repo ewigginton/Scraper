@@ -11,6 +11,7 @@ import {
   holds,
   issuePeople,
   issues,
+  personRefs,
   tasks,
   type Hold,
   type Issue,
@@ -22,8 +23,13 @@ import {
   issueCycles,
 } from '../db/schema.ts';
 
+export interface IssuePersonWithName extends IssuePerson {
+  /** person_refs.display_name of the linked person; null if the ref row is gone. */
+  personDisplayName: string | null;
+}
+
 export interface IssueWithCaseData extends Issue {
-  people: IssuePerson[];
+  people: IssuePersonWithName[];
   holds: Hold[];
   tasks: Task[];
 }
@@ -48,11 +54,16 @@ export async function getById(db: DbHandle, id: string): Promise<IssueWithCaseDa
     return undefined;
   }
 
-  const [people, issueHolds, issueTasks] = await Promise.all([
-    db.select().from(issuePeople).where(eq(issuePeople.issueId, id)),
+  const [peopleRows, issueHolds, issueTasks] = await Promise.all([
+    db
+      .select({ link: issuePeople, personDisplayName: personRefs.displayName })
+      .from(issuePeople)
+      .leftJoin(personRefs, eq(issuePeople.personRefId, personRefs.id))
+      .where(eq(issuePeople.issueId, id)),
     db.select().from(holds).where(eq(holds.issueId, id)),
     db.select().from(tasks).where(eq(tasks.issueId, id)),
   ]);
+  const people = peopleRows.map((r) => ({ ...r.link, personDisplayName: r.personDisplayName }));
 
   return { ...issue, people, holds: issueHolds, tasks: issueTasks };
 }
