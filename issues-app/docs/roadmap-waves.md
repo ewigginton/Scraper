@@ -102,3 +102,43 @@ before/after/why/when for every command, including denials. The UX layer:
 - Every list query bounded (ORDER BY + LIMIT); URL params through strict
   allowlists; injection-fuzz on every new param surface.
 - npm run validate green before every push; screenshots as behavioral proof.
+
+## Wave 3 — the Attio layer (Emma, Aug 2026 — refined from Attio screenshots)
+
+### Person record page, Attio-style
+- Header: name + quick actions (compose email — DRAFT ONLY per spec §11, AI
+  never sends; add note; add task). Left "Record Details" panel of
+  inline-editable fields (name, emails, phones, description, company/role
+  links) — every edit routes through audited services.
+- TAB BAR with counts: Overview | Activity | Emails | Calls | Notes | Tasks
+  | Files. URL-driven (/people/[id]?tab=emails); each tab is a filtered
+  projection of canonical records (communication_events by channel, audit
+  feed, tasks, evidence). No duplicate stores.
+- Overview tab: Highlights cards (last/next interaction, linked issues,
+  company/property links, contact points) + recent Activity + recent
+  Emails. Computed indicators (e.g. interaction recency) only when honestly
+  derivable from local data, labeled as computed.
+
+### People list as a database view
+- Same engine as /issues: named views + view selector, sort chip, filter
+  chip, column show/hide, add-column. Generalize saved_views with an
+  entity_type column so saved views cover people AND issues. Columns incl.
+  last email/call interaction, linked issues, roles.
+
+### Pipeline / board views
+- Kanban board for ISSUES by phase/stage, per-view saved; click-through
+  first, drag-to-move only after inline editing lands (moves route through
+  the transition engine — a drag can be BLOCKED and must show blockers).
+- Boundary: sales/deal pipelines belong to Prospects CRM (§30.2); our
+  boards cover Property Operations phases only.
+
+### Quick-actions palette (Cmd+K)
+- Search records (issues, people, properties, contracts) + quick actions
+  (new issue, new task, go to dashboard/activity/exceptions).
+  Keyboard-first, one small client component, server-backed search reusing
+  the existing bounded search repos.
+
+### Honest-data note
+- Email/call counts and interaction recency render from
+  communication_events — rich once JustCall/Gmail wire in at Hub port;
+  demo shows the structure with seeded fictional conversations.

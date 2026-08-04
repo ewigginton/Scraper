@@ -268,6 +268,34 @@ describe('exceptions-repo', () => {
     expect(result.rows).toHaveLength(2);
   });
 
+  it('every exception queue clamps a negative/zero/absurd limit rather than passing it to SQL verbatim', async () => {
+    for (let i = 0; i < 3; i++) await makeIssue(handle.db, { summary: 'short' });
+
+    // Negative and zero limits fall back to the default (never an empty or
+    // unbounded result, never a SQL error from a negative LIMIT).
+    const negative = await missingOrShortSummaryQueue(handle.db, { today: TODAY, limit: -5 });
+    expect(negative.rows.length).toBe(3);
+    const zero = await missingOrShortSummaryQueue(handle.db, { today: TODAY, limit: 0 });
+    expect(zero.rows.length).toBe(3);
+
+    // An absurdly large limit is capped at MAX_ROW_LIMIT (200), not passed
+    // through unbounded to the database.
+    const huge = await missingOrShortSummaryQueue(handle.db, { today: TODAY, limit: 100000 });
+    expect(huge.rows.length).toBe(3); // only 3 rows exist, but the query itself must not error out on a 200-cap request
+  });
+
+  it('readyToReleaseBlockedQueue: a non-positive minBlockedDays falls back to the 14-day default rather than matching everything', async () => {
+    const tooYoung = await makeIssue(handle.db);
+    await putIssueInPhase(handle.db, tooYoung, 'relisting', 'open');
+    await makeHold(handle.db, { propertyRefId: tooYoung.propertyRefId, effectiveStart: daysAgoDate(5) });
+
+    const withZero = await readyToReleaseBlockedQueue(handle.db, { today: TODAY, minBlockedDays: 0 });
+    const withNegative = await readyToReleaseBlockedQueue(handle.db, { today: TODAY, minBlockedDays: -3 });
+    // Both fall back to the 14-day default, so a 5-day-old hold does not qualify either way.
+    expect(withZero.rows.map((r) => r.issue.id)).not.toContain(tooYoung.id);
+    expect(withNegative.rows.map((r) => r.issue.id)).not.toContain(tooYoung.id);
+  });
+
   it('missingOrShortSummaryQueue: short summary on open, non-passive issues only', async () => {
     const shortActive = await makeIssue(handle.db, { summary: 'Too short' }); // 9 chars
     await makeIssue(handle.db, { summary: 'This summary is long enough' });
@@ -349,5 +377,25 @@ describe('exceptions-repo', () => {
     expect(result.rows).toHaveLength(1);
     expect(result.rows[0]?.task.id).toBe(oldOpen.id);
     expect(result.rows[0]?.issueId).toBe(issue.id);
+  });
+
+  it('tasksOpenOverDaysQueue respects limit while reporting the true count', async () => {
+    const issue = await makeIssue(handle.db);
+    for (let i = 0; i < 4; i++) {
+      await makeTask(handle.db, { issueId: issue.id, status: 'open', createdAt: daysAgoDate(40) });
+    }
+    const result = await tasksOpenOverDaysQueue(handle.db, { today: TODAY, minOpenDays: 30, limit: 2 });
+    expect(result.count).toBe(4);
+    expect(result.rows).toHaveLength(2);
+  });
+
+  it('tasksOpenOverDaysQueue: a non-positive minOpenDays falls back to the 30-day default rather than matching everything', async () => {
+    const issue = await makeIssue(handle.db);
+    const tooYoung = await makeTask(handle.db, { issueId: issue.id, status: 'open', createdAt: daysAgoDate(10) });
+
+    const withZero = await tasksOpenOverDaysQueue(handle.db, { today: TODAY, minOpenDays: 0 });
+    const withNegative = await tasksOpenOverDaysQueue(handle.db, { today: TODAY, minOpenDays: -7 });
+    expect(withZero.rows.map((r) => r.task.id)).not.toContain(tooYoung.id);
+    expect(withNegative.rows.map((r) => r.task.id)).not.toContain(tooYoung.id);
   });
 });

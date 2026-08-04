@@ -17,10 +17,13 @@ import * as timelineRepo from '../lib/repositories/timeline-repo.ts';
 import * as auditMetricsRepo from '../lib/repositories/audit-metrics-repo.ts';
 import { createIssue } from '../lib/services/issue-service.ts';
 import { applyHold } from '../lib/services/hold-service.ts';
+import { eq } from 'drizzle-orm';
 import {
+  auditEvents,
   communicationEvents,
   communicationLinks,
   notices,
+  phaseInstances,
   type CommunicationChannel,
   type CommunicationDirection,
   type NewCommunicationEvent,
@@ -445,6 +448,25 @@ describe('timeline-repo', () => {
       expect(bogus.entries).toEqual([]);
     });
 
+    it('phase_close entries appear (a source with no dedicated create-path test yet) and are excluded when only phase_open is requested', async () => {
+      const owner = await makePerson(handle.db);
+      const { issue } = await makeIssueWithPeople(handle.db, [{ personRefId: owner.id, role: 'owner' }]);
+      // The current open phase_instance (created by createIssue) gets an ended_at, simulating a closed phase.
+      await handle.db
+        .update(phaseInstances)
+        .set({ status: 'completed', endedAt: daysAgo(0), exitOutcome: 'resolved' })
+        .where(eq(phaseInstances.issueId, issue.id));
+
+      const onlyClose = await timelineRepo.issueTimeline(handle.db, { issueId: issue.id, filters: { kinds: ['phase_close'] }, limit: 100 });
+      expect(onlyClose.entries).toHaveLength(1);
+      expect(onlyClose.entries[0]?.title).toContain('Phase closed');
+      expect(onlyClose.entries[0]?.detail).toBe('resolved');
+
+      const onlyOpen = await timelineRepo.issueTimeline(handle.db, { issueId: issue.id, filters: { kinds: ['phase_open'] }, limit: 100 });
+      expect(onlyOpen.entries.every((e) => e.kind === 'phase_open')).toBe(true);
+      expect(onlyOpen.entries.map((e) => e.kind)).not.toContain('phase_close');
+    });
+
     it('notice entries appear and can be filtered by recipient personRefIds', async () => {
       const owner = await makePerson(handle.db);
       const other = await makePerson(handle.db);
@@ -577,6 +599,55 @@ describe('timeline-repo', () => {
     it('a non-uuid personRefId returns empty rather than throwing', async () => {
       const result = await timelineRepo.personTimeline(handle.db, { personRefId: 'not-a-uuid', limit: 10 });
       expect(result.entries).toEqual([]);
+    });
+
+    it('kinds filter narrows to exactly the requested kinds; an entirely-invalid kinds array matches nothing', async () => {
+      const owner = await makePerson(handle.db);
+      await makeIssueWithPeople(handle.db, [{ personRefId: owner.id, role: 'owner' }]);
+      const comm = await insertComm(handle.db, { fromPersonRefId: owner.id, occurredAt: daysAgo(0), providerEventId: 'person-kinds-filter' });
+      await linkComm(handle.db, comm.id, { personRefId: owner.id });
+
+      const onlyLinks = await timelineRepo.personTimeline(handle.db, { personRefId: owner.id, filters: { kinds: ['issue_link'] }, limit: 100 });
+      expect(onlyLinks.entries.every((e) => e.kind === 'issue_link')).toBe(true);
+      expect(onlyLinks.entries.length).toBeGreaterThan(0);
+
+      const bogus = await timelineRepo.personTimeline(handle.db, { personRefId: owner.id, filters: { kinds: ['not-a-real-kind'] }, limit: 100 });
+      expect(bogus.entries).toEqual([]);
+    });
+
+    it('audit entries where the person is the OBJECT (object_table=person_refs) are included and can be filtered to just "audit"', async () => {
+      const owner = await makePerson(handle.db);
+      await handle.db.insert(auditEvents).values({
+        objectTable: 'person_refs',
+        objectId: owner.id,
+        action: 'merged',
+        reason: 'Duplicate person record merge',
+        occurredAt: daysAgo(0),
+      });
+
+      const onlyAudit = await timelineRepo.personTimeline(handle.db, { personRefId: owner.id, filters: { kinds: ['audit'] }, limit: 100 });
+      expect(onlyAudit.entries).toHaveLength(1);
+      expect(onlyAudit.entries[0]?.title).toBe('Person merged');
+      expect(onlyAudit.entries[0]?.sourceTable).toBe('person_refs');
+      expect(onlyAudit.entries[0]?.sourceId).toBe(owner.id);
+
+      // A different person's object-scoped audit row must not leak in.
+      const other = await makePerson(handle.db);
+      const otherResult = await timelineRepo.personTimeline(handle.db, { personRefId: other.id, filters: { kinds: ['audit'] }, limit: 100 });
+      expect(otherResult.entries).toEqual([]);
+    });
+
+    it('fromDate/toDate narrow the person audit feed to an inclusive occurred_at window', async () => {
+      const owner = await makePerson(handle.db);
+      await handle.db.insert(auditEvents).values({ objectTable: 'person_refs', objectId: owner.id, action: 'updated', occurredAt: daysAgo(10) });
+      await handle.db.insert(auditEvents).values({ objectTable: 'person_refs', objectId: owner.id, action: 'updated', occurredAt: daysAgo(1) });
+
+      const windowed = await timelineRepo.personTimeline(handle.db, {
+        personRefId: owner.id,
+        filters: { kinds: ['audit'], fromDate: daysAgo(3).toISOString() },
+        limit: 100,
+      });
+      expect(windowed.entries).toHaveLength(1);
     });
   });
 });
