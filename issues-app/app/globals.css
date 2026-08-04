@@ -371,3 +371,504 @@ fieldset.form-group legend {
   font-weight: 600;
   padding: 0 var(--space-xs);
 }
+
+/* ==========================================================================
+   Notion-style redesign (Issues UI v2) — additive tokens/classes.
+   Existing classes above are kept working; nothing here renames or removes
+   them. See docs/notion-redesign.md "Look and feel".
+   ========================================================================== */
+
+:root {
+  --n-ink: #37352f;
+  --n-ink-muted: #6b6b66;
+  --n-border: #e9e9e7;
+  --n-hover: #f7f7f5;
+  --n-bg: #ffffff;
+  --n-sidebar-bg: #fbfbfa;
+  --n-radius: 6px;
+  --n-font-size: 14px;
+  --n-shadow-popover: 0 4px 12px rgba(15, 15, 15, 0.1), 0 0 0 1px rgba(15, 15, 15, 0.05);
+
+  /* Soft pill palette — ~8% tint backgrounds, darker readable text */
+  --n-pill-gray-bg: rgba(120, 119, 116, 0.08);
+  --n-pill-gray-fg: #6b6b66;
+  --n-pill-brown-bg: rgba(140, 100, 75, 0.08);
+  --n-pill-brown-fg: #8c644b;
+  --n-pill-orange-bg: rgba(217, 115, 13, 0.08);
+  --n-pill-orange-fg: #b1590c;
+  --n-pill-yellow-bg: rgba(203, 145, 47, 0.08);
+  --n-pill-yellow-fg: #94720f;
+  --n-pill-green-bg: rgba(68, 131, 97, 0.08);
+  --n-pill-green-fg: #337355;
+  --n-pill-blue-bg: rgba(51, 126, 169, 0.08);
+  --n-pill-blue-fg: #2a6996;
+  --n-pill-purple-bg: rgba(144, 101, 176, 0.08);
+  --n-pill-purple-fg: #7c4fa3;
+  --n-pill-pink-bg: rgba(193, 76, 138, 0.08);
+  --n-pill-pink-fg: #a8386f;
+  --n-pill-red-bg: rgba(212, 76, 71, 0.08);
+  --n-pill-red-fg: #c0392b;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --n-ink: #e9e9e7;
+    --n-ink-muted: #9b9b96;
+    --n-border: #2f2f2d;
+    --n-hover: #26262380;
+    --n-bg: #191919;
+    --n-sidebar-bg: #202020;
+    --n-shadow-popover: 0 4px 12px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(255, 255, 255, 0.06);
+
+    --n-pill-gray-bg: rgba(155, 155, 150, 0.16);
+    --n-pill-gray-fg: #c9c9c4;
+    --n-pill-brown-bg: rgba(186, 141, 112, 0.16);
+    --n-pill-brown-fg: #d9b599;
+    --n-pill-orange-bg: rgba(255, 163, 68, 0.16);
+    --n-pill-orange-fg: #f2a35e;
+    --n-pill-yellow-bg: rgba(255, 220, 73, 0.16);
+    --n-pill-yellow-fg: #e3c14d;
+    --n-pill-green-bg: rgba(93, 191, 143, 0.16);
+    --n-pill-green-fg: #7cd6a8;
+    --n-pill-blue-bg: rgba(95, 173, 220, 0.16);
+    --n-pill-blue-fg: #7fc0eb;
+    --n-pill-purple-bg: rgba(179, 129, 216, 0.16);
+    --n-pill-purple-fg: #c9a4e6;
+    --n-pill-pink-bg: rgba(224, 121, 173, 0.16);
+    --n-pill-pink-fg: #e6a0c3;
+    --n-pill-red-bg: rgba(224, 105, 100, 0.16);
+    --n-pill-red-fg: #ec8079;
+  }
+}
+
+/* App shell */
+
+.n-shell {
+  display: flex;
+  min-height: 100vh;
+  align-items: stretch;
+}
+
+.n-sidebar {
+  flex: 0 0 240px;
+  width: 240px;
+  background-color: var(--n-sidebar-bg);
+  border-right: 1px solid var(--n-border);
+  padding: var(--space-md) var(--space-sm);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  font-size: var(--n-font-size);
+  color: var(--n-ink);
+}
+
+.n-sidebar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+  padding: var(--space-xs) var(--space-sm);
+}
+
+.n-sidebar-title {
+  font-weight: 600;
+  font-size: var(--n-font-size);
+  color: var(--n-ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.n-sidebar-collapse-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.75rem;
+  height: 1.75rem;
+  border: none;
+  background: transparent;
+  border-radius: var(--n-radius);
+  color: var(--n-ink-muted);
+  cursor: pointer;
+}
+
+.n-sidebar-collapse-btn:hover {
+  background-color: var(--n-hover);
+  color: var(--n-ink);
+}
+
+.n-nav-group {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.n-nav-group-label {
+  padding: var(--space-xs) var(--space-sm);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--n-ink-muted);
+}
+
+.n-nav-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: 6px var(--space-sm);
+  border-radius: var(--n-radius);
+  color: var(--n-ink);
+  font-size: var(--n-font-size);
+  text-decoration: none;
+  line-height: 1.3;
+}
+
+.n-nav-item:hover {
+  background-color: var(--n-hover);
+  text-decoration: none;
+}
+
+.n-nav-item.active {
+  background-color: var(--n-hover);
+  font-weight: 500;
+}
+
+.n-nav-item .n-nav-icon {
+  flex: 0 0 auto;
+  color: var(--n-ink-muted);
+  display: inline-flex;
+}
+
+.n-nav-item .n-nav-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1 1 auto;
+}
+
+.n-nav-item .n-nav-count {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--n-ink-muted);
+}
+
+.n-content {
+  flex: 1 1 auto;
+  min-width: 0;
+  background-color: var(--n-bg);
+}
+
+.n-content-inner {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: var(--space-xl) var(--space-lg);
+}
+
+/* Collapsible sidebar via checkbox trick — no client JS required, but the
+   Sidebar component may also toggle a class from a tiny client island. */
+.n-shell.n-sidebar-collapsed .n-sidebar {
+  flex-basis: 56px;
+  width: 56px;
+  padding-left: var(--space-xs);
+  padding-right: var(--space-xs);
+}
+
+.n-shell.n-sidebar-collapsed .n-sidebar-title,
+.n-shell.n-sidebar-collapsed .n-nav-group-label,
+.n-shell.n-sidebar-collapsed .n-nav-label,
+.n-shell.n-sidebar-collapsed .n-nav-count {
+  display: none;
+}
+
+/* Pills */
+
+.n-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.n-pill-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+
+.n-pill-gray { background-color: var(--n-pill-gray-bg); color: var(--n-pill-gray-fg); }
+.n-pill-brown { background-color: var(--n-pill-brown-bg); color: var(--n-pill-brown-fg); }
+.n-pill-orange { background-color: var(--n-pill-orange-bg); color: var(--n-pill-orange-fg); }
+.n-pill-yellow { background-color: var(--n-pill-yellow-bg); color: var(--n-pill-yellow-fg); }
+.n-pill-green { background-color: var(--n-pill-green-bg); color: var(--n-pill-green-fg); }
+.n-pill-blue { background-color: var(--n-pill-blue-bg); color: var(--n-pill-blue-fg); }
+.n-pill-purple { background-color: var(--n-pill-purple-bg); color: var(--n-pill-purple-fg); }
+.n-pill-pink { background-color: var(--n-pill-pink-bg); color: var(--n-pill-pink-fg); }
+.n-pill-red { background-color: var(--n-pill-red-bg); color: var(--n-pill-red-fg); }
+
+.n-pill-gray .n-pill-dot { background-color: var(--n-pill-gray-fg); }
+.n-pill-brown .n-pill-dot { background-color: var(--n-pill-brown-fg); }
+.n-pill-orange .n-pill-dot { background-color: var(--n-pill-orange-fg); }
+.n-pill-yellow .n-pill-dot { background-color: var(--n-pill-yellow-fg); }
+.n-pill-green .n-pill-dot { background-color: var(--n-pill-green-fg); }
+.n-pill-blue .n-pill-dot { background-color: var(--n-pill-blue-fg); }
+.n-pill-purple .n-pill-dot { background-color: var(--n-pill-purple-fg); }
+.n-pill-pink .n-pill-dot { background-color: var(--n-pill-pink-fg); }
+.n-pill-red .n-pill-dot { background-color: var(--n-pill-red-fg); }
+
+/* Tables (Notion-ish database view) */
+
+.n-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--n-border);
+  border-radius: var(--n-radius);
+}
+
+table.n-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--n-font-size);
+  color: var(--n-ink);
+  margin-bottom: 0;
+}
+
+.n-table thead {
+  background-color: var(--n-bg);
+  border-bottom: 1px solid var(--n-border);
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+.n-table th {
+  padding: 6px 10px;
+  text-align: left;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--n-ink-muted);
+  background-color: var(--n-bg);
+  white-space: nowrap;
+}
+
+.n-table td {
+  padding: 8px 10px;
+  border-top: 1px solid var(--n-border);
+  vertical-align: middle;
+}
+
+.n-table tbody tr {
+  position: relative;
+}
+
+.n-table tbody tr:hover {
+  background-color: var(--n-hover);
+}
+
+.n-table .n-row-link {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+}
+
+.n-table td > *:not(.n-row-link) {
+  position: relative;
+  z-index: 1;
+}
+
+.n-row-actions {
+  display: inline-flex;
+  gap: var(--space-xs);
+  opacity: 0;
+  transition: opacity 0.1s;
+}
+
+.n-table tbody tr:hover .n-row-actions,
+.n-table tbody tr:focus-within .n-row-actions {
+  opacity: 1;
+}
+
+/* Properties grid (case header) */
+
+.n-properties {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+  gap: 2px var(--space-lg);
+  border-bottom: 1px solid var(--n-border);
+  padding-bottom: var(--space-md);
+  margin-bottom: var(--space-md);
+}
+
+.n-property-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-sm);
+  padding: 4px 2px;
+  min-width: 0;
+}
+
+.n-property-icon {
+  flex: 0 0 auto;
+  margin-top: 2px;
+  color: var(--n-ink-muted);
+}
+
+.n-property-label {
+  flex: 0 0 8rem;
+  font-size: var(--n-font-size);
+  color: var(--n-ink-muted);
+}
+
+.n-property-value {
+  flex: 1 1 auto;
+  font-size: var(--n-font-size);
+  color: var(--n-ink);
+  min-width: 0;
+  overflow-wrap: break-word;
+}
+
+/* Cards / collapsible sections with chevrons */
+
+.n-card {
+  border: 1px solid var(--n-border);
+  border-radius: var(--n-radius);
+  background-color: var(--n-bg);
+  padding: var(--space-md) var(--space-lg);
+  margin-bottom: var(--space-md);
+}
+
+.n-section {
+  border: 1px solid var(--n-border);
+  border-radius: var(--n-radius);
+  background-color: var(--n-bg);
+  margin-bottom: var(--space-sm);
+  overflow: hidden;
+}
+
+.n-section summary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  cursor: pointer;
+  list-style: none;
+  padding: var(--space-sm) var(--space-md);
+  font-weight: 500;
+  font-size: var(--n-font-size);
+  color: var(--n-ink);
+}
+
+.n-section summary::-webkit-details-marker {
+  display: none;
+}
+
+.n-section .n-chevron {
+  flex: 0 0 auto;
+  color: var(--n-ink-muted);
+  transition: transform 0.12s;
+  display: inline-flex;
+}
+
+.n-section[open] .n-chevron {
+  transform: rotate(90deg);
+}
+
+.n-section summary:hover {
+  background-color: var(--n-hover);
+}
+
+.n-section-body {
+  padding: 0 var(--space-md) var(--space-md);
+  border-top: 1px solid var(--n-border);
+  padding-top: var(--space-md);
+}
+
+/* Quiet Notion-idiom buttons/inputs */
+
+.n-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border: 1px solid var(--n-border);
+  border-radius: var(--n-radius);
+  background-color: var(--n-bg);
+  color: var(--n-ink);
+  font-size: var(--n-font-size);
+  font-family: var(--font-family);
+  cursor: pointer;
+  line-height: 1.4;
+}
+
+.n-btn:hover {
+  background-color: var(--n-hover);
+}
+
+.n-btn-primary {
+  background-color: var(--n-ink);
+  border-color: var(--n-ink);
+  color: var(--n-bg);
+}
+
+.n-btn-primary:hover {
+  opacity: 0.85;
+}
+
+.n-btn-quiet {
+  border-color: transparent;
+  background-color: transparent;
+}
+
+.n-btn-quiet:hover {
+  background-color: var(--n-hover);
+}
+
+.n-input,
+.n-select {
+  padding: 5px 8px;
+  border: 1px solid var(--n-border);
+  border-radius: var(--n-radius);
+  background-color: var(--n-bg);
+  color: var(--n-ink);
+  font-size: var(--n-font-size);
+  font-family: var(--font-family);
+}
+
+.n-input:focus,
+.n-select:focus {
+  outline: none;
+  border-color: var(--n-ink-muted);
+  box-shadow: 0 0 0 1px var(--n-ink-muted);
+}
+
+.n-filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-sm);
+  padding-bottom: var(--space-md);
+  margin-bottom: var(--space-md);
+  border-bottom: 1px solid var(--n-border);
+}
+
+.n-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-md);
+  margin-bottom: var(--space-md);
+}
+
+.n-count-chip {
+  font-size: 12px;
+  color: var(--n-ink-muted);
+  padding: 2px 8px;
+  border-radius: 999px;
+  background-color: var(--n-hover);
+}

@@ -1,5 +1,6 @@
 import type { Metadata } from 'next';
 import './globals.css';
+import { Sidebar } from './_components/Sidebar.tsx';
 
 export const metadata: Metadata = {
   title: 'CCL Hub — Issues',
@@ -14,20 +15,12 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body>
-        <header style={{ borderBottom: '1px solid var(--color-border)', padding: 'var(--space-lg)' }}>
-          <div className="container">
-            <h1 style={{ marginBottom: 'var(--space-md)' }}>CCL Hub — Issues</h1>
-            <nav style={{ display: 'flex', gap: 'var(--space-lg)' }}>
-              <a href="/">My Work</a>
-              <a href="/issues/new">New Issue</a>
-            </nav>
+        <div className="n-shell">
+          <Sidebar />
+          <div className="n-content">
+            <main className="n-content-inner">{children}</main>
           </div>
-        </header>
-        <main style={{ padding: 'var(--space-lg)' }}>
-          <div className="container">
-            {children}
-          </div>
-        </main>
+        </div>
       </body>
     </html>
   );

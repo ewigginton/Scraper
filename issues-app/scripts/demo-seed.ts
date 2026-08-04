@@ -7,6 +7,10 @@
  * Run via `npm run demo` (scripts/demo.mjs invokes this with
  * node --experimental-strip-types). Dev/demo only — never part of the Hub
  * port (PORTING.md) and never pointed at a real database.
+ *
+ * Volume mode (default): ~300 issues across all types/states with realistic
+ * dates, varied priorities, holds, and possession records. Deterministic
+ * seeded PRNG for reproducibility.
  */
 
 import { readdirSync, readFileSync, rmSync, existsSync } from 'node:fs';
@@ -27,6 +31,41 @@ function isoDate(daysFromNow: number): string {
   const d = new Date();
   d.setDate(d.getDate() + daysFromNow);
   return d.toISOString().slice(0, 10);
+}
+
+/**
+ * Seeded PRNG (mulberry32 style) for deterministic pseudo-random generation.
+ * Seed with a fixed value so reseeds are reproducible.
+ */
+class SeededRandom {
+  private a: number;
+
+  constructor(seed: number = 42) {
+    this.a = seed;
+  }
+
+  next(): number {
+    this.a |= 0;
+    this.a = (this.a + 0x6d2b79f5) | 0;
+    let t = Math.imul(this.a ^ (this.a >>> 15), 1 | this.a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  }
+
+  /** Return random integer in [0, max) */
+  int(max: number): number {
+    return Math.floor(this.next() * max);
+  }
+
+  /** Return random element from array */
+  pick<T>(arr: T[]): T {
+    return arr[this.int(arr.length)];
+  }
+
+  /** Return random boolean with given probability (0 to 1) */
+  bool(prob: number = 0.5): boolean {
+    return this.next() < prob;
+  }
 }
 
 async function main() {
