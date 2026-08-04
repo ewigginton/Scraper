@@ -195,5 +195,10 @@ All tiers require real credentials → Hub-integration phase, after porting.
   lifecycle, subtle outline/soft variants, consistent sizing — mapped onto
   the existing single-source pill color system (app/_lib/pills.ts) so one
   change restyles every badge app-wide.
+- Callouts in Tremor's idiom (Emma, Aug 2026): a shared Callout component
+  (info / warning / error / success variants) replacing ad-hoc banners —
+  used for blocked-transition panels, restricted-content indicators, stale-
+  case prompts, demo-mode notes, and exception rows. One component, themed
+  by the pill color tokens, light+dark.
 - Design language only from Tremor — no new npm dependencies; built in the
   existing plain-React/CSS system.
