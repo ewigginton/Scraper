@@ -168,3 +168,39 @@ The port session should treat this section + the recon report as controlling.
 
 Scott sign-offs needed before PR 1: table naming (item 2), event
 names/schemas (item 3), refs swap-or-keep (item 4), role alignment (item 8).
+
+## Definitive ops_ rename map (Emma approved, 2026-08-04)
+
+Applied by the port session as a scripted pass (SQL + schema + code
+identifiers) before PR 1. Names follow Scott's short-literal-prefix style.
+
+Renamed (28):
+issues→ops_issues · issue_people→ops_issue_people ·
+issue_cycles→ops_issue_cycles · issue_relationships→ops_issue_relationships
+· phase_instances→ops_phase_instances · tasks→ops_tasks · holds→ops_holds ·
+possession_records→ops_possession_records ·
+personal_property_items→ops_personal_property_items ·
+stale_acknowledgments→ops_stale_acknowledgments · deadlines→ops_deadlines ·
+vendors→ops_vendors · bids→ops_bids · vendor_jobs→ops_vendor_jobs ·
+change_orders→ops_change_orders · cost_entries→ops_cost_entries ·
+payment_requests→ops_payment_requests · approvals→ops_approvals ·
+evidence_files→ops_evidence_files · notices→ops_notices ·
+checklist_items→ops_checklist_items · config_versions→ops_config_versions ·
+config_entries→ops_config_entries ·
+integration_identities→ops_integration_identities ·
+audit_events→ops_audit_events · saved_views→ops_saved_views ·
+communication_links→ops_communication_links (becomes the join table
+linking cadence_communications rows to ops_issues/ops_tasks — the one
+piece Cadence doesn't model) · consumed_events→ops_consumed_events ONLY if
+the Hub's domain_event_jobs doesn't already provide consumer-side
+idempotency for Issues subscribers (check at port; drop if covered).
+
+Dropped at port (replaced by Hub canonical tables per Emma's decision):
+person_refs (→ core_persons + satellites) · property_refs (→ site_tracts +
+site_developments) · contract_refs (→ cadence_contracts / lsp_accounts) ·
+communication_events (→ cadence_communications / cadence_timeline_events) ·
+domain_events (→ governed Hub domain_events + domain_event_jobs).
+
+Index/trigger/policy names inherit the prefix mechanically
+(issues_lifecycle_idx→ops_issues_lifecycle_idx pattern). RLS policies
+re-anchor to hub.actor_email (hub_staff decision) in the same pass.

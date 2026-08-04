@@ -834,3 +834,74 @@ describe('NUL byte (U+0000) in free-text filters never reaches the driver', () =
     expect(decodeCursor(encodeCursor(goodAt, 'tie -1'))).toBeNull();
   });
 });
+
+
+// -----------------------------------------------------------------------
+// PARSE-COMPATIBILITY FUZZ (round 2): Date.parse() accepts far more string
+// formats than Postgres's timestamptz parser. A cursor carrying a
+// JS-parseable-but-Postgres-unparseable `at` value used to pass
+// decodeCursor's `Number.isNaN(Date.parse(at))` guard and then throw a raw
+// driver error (SQLSTATE 22007) at the `::timestamptz` cast, instead of the
+// documented "malformed cursor -> page 1" contract. Fix: canonicalize `at`
+// to `new Date(Date.parse(at)).toISOString()` inside the decoder -- a
+// canonical ISO string always parses in Postgres, and this never changes a
+// legitimate cursor's value (encodeCursor always mints from `.toISOString()`
+// in the first place).
+// -----------------------------------------------------------------------
+describe('PARSE-COMPATIBILITY FUZZ (round 2): a Date.parse-but-not-Postgres-parseable cursor timestamp never reaches the driver', () => {
+  // Date.parse() accepts this (JS's permissive toString()-echo format);
+  // Postgres's timestamptz parser rejects it outright.
+  const WEIRD_BUT_JS_PARSEABLE_AT = 'Sat, 01 Jan 2024 00:00:00 GMT+0000 (Coordinated Universal Time)';
+
+  let handle: TestDbHandle;
+
+  beforeEach(async () => {
+    handle = await createTestDb();
+  });
+
+  afterEach(async () => {
+    await closeTestDb(handle);
+  });
+
+  it('sanity check: the fixture string is Date.parse-able (this is what makes the old guard insufficient)', () => {
+    expect(Number.isNaN(Date.parse(WEIRD_BUT_JS_PARSEABLE_AT))).toBe(false);
+  });
+
+  it('keyset-cursor.decodeCursor canonicalizes the weird `at` to a real ISO string rather than passing it through verbatim', async () => {
+    const { decodeCursor, encodeCursor } = await import('../lib/repositories/keyset-cursor.ts');
+    const poisoned = encodeCursor(WEIRD_BUT_JS_PARSEABLE_AT, '00000000-0000-0000-0000-000000000000');
+    const decoded = decodeCursor(poisoned);
+    expect(decoded).not.toBeNull();
+    expect(decoded!.at).toBe(new Date(Date.parse(WEIRD_BUT_JS_PARSEABLE_AT)).toISOString());
+  });
+
+  it('issues-query-repo.decodeCursor + validCursorForSort: listIssues does not throw a raw driver error on the weird cursor', async () => {
+    const { listIssues, encodeCursor: encodeIssuesCursor } = await import('../lib/repositories/issues-query-repo.ts');
+    const poisoned = encodeIssuesCursor(WEIRD_BUT_JS_PARSEABLE_AT, '00000000-0000-0000-0000-000000000000');
+    await expect(listIssues(handle.db, { cursor: poisoned, sort: { key: 'updated_at', direction: 'desc' } })).resolves.not.toThrow();
+  });
+
+  it('comms-repo.listForPerson does not throw a raw driver error on the weird cursor', async () => {
+    const { encodeCursor } = await import('../lib/repositories/keyset-cursor.ts');
+    const person = await makePerson(handle.db);
+    await insertComm(handle.db, { fromPersonRefId: person.id, occurredAt: daysAgo(1), providerEventId: 'weird-cursor-1' });
+    const poisoned = encodeCursor(WEIRD_BUT_JS_PARSEABLE_AT, '00000000-0000-0000-0000-000000000000');
+    await expect(commsRepo.listForPerson(handle.db, { personRefId: person.id, cursor: poisoned, limit: 10 })).resolves.not.toThrow();
+  });
+
+  it('comms-repo.listForIssue does not throw a raw driver error on the weird cursor', async () => {
+    const { encodeCursor } = await import('../lib/repositories/keyset-cursor.ts');
+    const owner = await makePerson(handle.db);
+    const { issue } = await makeIssueWithPeople(handle.db, [{ personRefId: owner.id, role: 'owner' }]);
+    const poisoned = encodeCursor(WEIRD_BUT_JS_PARSEABLE_AT, '00000000-0000-0000-0000-000000000000');
+    await expect(
+      commsRepo.listForIssue(handle.db, { issueId: issue.id, includeLinkedPeople: false, cursor: poisoned, limit: 10 }),
+    ).resolves.not.toThrow();
+  });
+
+  it('audit-metrics-repo.recentActivity does not throw a raw driver error on the weird cursor', async () => {
+    const { encodeCursor } = await import('../lib/repositories/keyset-cursor.ts');
+    const poisoned = encodeCursor(WEIRD_BUT_JS_PARSEABLE_AT, '00000000-0000-0000-0000-000000000000');
+    await expect(auditMetricsRepo.recentActivity(handle.db, { cursor: poisoned, limit: 10 })).resolves.not.toThrow();
+  });
+});
