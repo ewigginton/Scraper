@@ -1506,6 +1506,14 @@ export const auditEvents = pgTable(
     index('audit_events_object_table_object_id_idx').on(t.objectTable, t.objectId),
     index('audit_events_occurred_at_idx').on(t.occurredAt),
     index('audit_events_correlation_id_idx').on(t.correlationId),
+    // 20260804110000_issues_audit_feed_indexes.sql — timeline-repo.ts /
+    // audit-metrics-repo.ts feed queries. (Column order mirrors the SQL;
+    // like every other composite index in this file, the DESC direction on
+    // the trailing occurred_at column is a SQL-only detail this typed
+    // mirror doesn't encode — see issues_lifecycle_status_updated_at_id_idx
+    // above for the same convention.)
+    index('audit_events_object_table_object_id_occurred_at_idx').on(t.objectTable, t.objectId, t.occurredAt),
+    index('audit_events_actor_external_id_occurred_at_idx').on(t.actorExternalId, t.occurredAt),
   ],
 );
 
