@@ -45,7 +45,7 @@
  *    re-trim the same batch next time — is the correct fix.
  */
 
-import { and, desc, eq, inArray, or, sql, type SQL } from 'drizzle-orm';
+import { and, desc, eq, gte, inArray, lte, or, sql, type SQL } from 'drizzle-orm';
 import type { DbHandle } from './db-handle.ts';
 import { auditEvents, holds, issuePeople, notices, phaseInstances, tasks } from '../db/schema.ts';
 import * as commsRepo from './comms-repo.ts';
@@ -69,6 +69,16 @@ export interface TimelineEntry {
   sourceId: string;
   /** True when this entry is ALSO linked to a DIFFERENT issue/matter than the one being viewed (spec §29.1). Only ever set on 'communication' entries — the only source that can be cross-linked today. */
   crossMatter?: boolean;
+  /**
+   * Raw audit_events.before/after jsonb (Wave 2b "readable change-log feed",
+   * spec §29.2/§31.4) — undefined for every non-'audit' kind, and for 'audit'
+   * entries whenever the underlying row's before/after was null. Consumers
+   * compute a plain-English field diff from these via app/_lib/audit-diff.ts
+   * rather than this module rendering any UI itself (DESIGN.md §6: no
+   * presentation logic in a repository).
+   */
+  before?: unknown;
+  after?: unknown;
 }
 
 const VALID_KINDS = new Set<TimelineKind>(['communication', 'audit', 'phase_open', 'phase_close', 'notice', 'issue_link']);
@@ -82,6 +92,16 @@ export interface TimelineFilters {
   personRefIds?: string[];
   direction?: string | null;
   participantQuery?: string | null;
+  /**
+   * Inclusive `at` lower/upper bounds (roadmap "Timeline filters ... date
+   * range"). Precise ISO instants, NOT calendar days — a caller driven by a
+   * `<input type=date>` field resolves that to an inclusive end-of-day
+   * instant (e.g. `${date}T23:59:59.999Z`) before it reaches this module,
+   * same convention lib/repositories/people-repo.ts's personTimelinePage
+   * established. Invalid/absent values are dropped rather than throwing.
+   */
+  fromDate?: string | null;
+  toDate?: string | null;
 }
 
 interface NormalizedFilters {
@@ -90,6 +110,17 @@ interface NormalizedFilters {
   personRefIdsRequested: boolean;
   direction: string | null;
   participantQuery: string | null;
+  fromDate: Date | null;
+  toDate: Date | null;
+}
+
+/** Same "parse, drop if invalid, never throw" contract as comms-repo.ts's/audit-metrics-repo.ts's sanitizeDateBound (duplicated rather than imported — this module already treats comms-repo as an external collaborator it calls through, not a shared-internals dependency). */
+function sanitizeDateBound(input: unknown): Date | null {
+  if (typeof input !== 'string') return null;
+  const trimmed = input.trim().slice(0, MAX_STRING_LEN);
+  if (trimmed.length === 0) return null;
+  const ms = Date.parse(trimmed);
+  return Number.isNaN(ms) ? null : new Date(ms);
 }
 
 function normalizeFilters(filters: TimelineFilters | undefined): NormalizedFilters {
@@ -103,7 +134,16 @@ function normalizeFilters(filters: TimelineFilters | undefined): NormalizedFilte
     personRefIdsRequested: Array.isArray(filters?.personRefIds) && filters.personRefIds.length > 0,
     direction,
     participantQuery: participantQueryRaw.length > 0 ? participantQueryRaw : null,
+    fromDate: sanitizeDateBound(filters?.fromDate ?? null),
+    toDate: sanitizeDateBound(filters?.toDate ?? null),
   };
+}
+
+/** Shared date-range test for the "small" sources (phase/notice/issue-link), which are fetched in full and filtered in memory rather than via SQL gte/lte — see this module's header doc comment on why those sources skip SQL pushdown entirely. */
+function inDateRange(at: Date, filters: NormalizedFilters): boolean {
+  if (filters.fromDate && at.getTime() < filters.fromDate.getTime()) return false;
+  if (filters.toDate && at.getTime() > filters.toDate.getTime()) return false;
+  return true;
 }
 
 /** Total order every source-fetch, sort, and cursor comparison in this file agrees on: newest `at` first; ties broken ascending by `sourceTable:sourceId:kind`. */
@@ -289,6 +329,8 @@ async function fetchCommsBatch(db: DbHandle, issueId: string, filters: Normalize
     personRefIds: filters.personRefIdsRequested ? filters.personRefIds : undefined,
     direction: filters.direction,
     participantQuery: filters.participantQuery,
+    fromDate: filters.fromDate?.toISOString() ?? null,
+    toDate: filters.toDate?.toISOString() ?? null,
     limit: fetchLimit,
     cursor: sourceCursor,
   });
@@ -314,6 +356,8 @@ async function fetchPersonCommsBatch(db: DbHandle, personRefId: string, filters:
     personRefId,
     direction: filters.direction,
     participantQuery: filters.participantQuery,
+    fromDate: filters.fromDate?.toISOString() ?? null,
+    toDate: filters.toDate?.toISOString() ?? null,
     limit: fetchLimit,
     cursor: sourceCursor,
   });
@@ -349,11 +393,13 @@ function auditEntryFrom(row: typeof auditEvents.$inferSelect): TimelineEntry {
     actor: row.actorExternalId ?? row.actorId ?? 'unattributed',
     sourceTable: row.objectTable,
     sourceId: row.objectId,
+    before: row.before,
+    after: row.after,
   };
 }
 
 /** ONE combined audit_events query across the issue's whole object graph (issue + its tasks/holds/phase_instances ids, each id set fetched in its own single bounded query first). Fetches fetchLimit+1 to know whether more remain, same convention as every other keyset query in this codebase. */
-async function fetchIssueObjectGraphAuditBatch(db: DbHandle, issueId: string, sourceCursor: string | undefined, fetchLimit: number): Promise<PaginatedBatch> {
+async function fetchIssueObjectGraphAuditBatch(db: DbHandle, issueId: string, filters: NormalizedFilters, sourceCursor: string | undefined, fetchLimit: number): Promise<PaginatedBatch> {
   if (sourceCursor === SOURCE_DONE) return { key: 'audit', entries: [], repoNextCursor: null, fetchedCount: 0, cursorUsed: sourceCursor };
 
   const [taskIds, holdIds, phaseIds] = await Promise.all([
@@ -368,6 +414,8 @@ async function fetchIssueObjectGraphAuditBatch(db: DbHandle, issueId: string, so
   if (phaseIds.length > 0) branches.push(and(eq(auditEvents.objectTable, 'phase_instances'), inArray(auditEvents.objectId, phaseIds))!);
 
   const conditions: SQL[] = [or(...branches)!];
+  if (filters.fromDate) conditions.push(gte(auditEvents.occurredAt, filters.fromDate));
+  if (filters.toDate) conditions.push(lte(auditEvents.occurredAt, filters.toDate));
   const decoded = sourceCursor ? decodeSimpleCursor(sourceCursor) : null;
   if (decoded && isUuid(decoded.tie)) conditions.push(auditKeysetBefore(decoded));
 
@@ -394,8 +442,8 @@ function auditKeysetBefore(decoded: { at: string; tie: string }): SQL {
   )`;
 }
 
-/** Direct read of phase_instances (NOT via audit_events — see this module's header comment). Small per-issue cardinality: fetched in full every page, bounded defensively. */
-async function fetchPhaseEntries(db: DbHandle, issueId: string): Promise<TimelineEntry[]> {
+/** Direct read of phase_instances (NOT via audit_events — see this module's header comment). Small per-issue cardinality: fetched in full every page, bounded defensively, then filtered in memory (kinds + date range) — see NormalizedFilters.fromDate/toDate's doc comment on why these "small" sources skip SQL pushdown. */
+async function fetchPhaseEntries(db: DbHandle, issueId: string, filters: NormalizedFilters): Promise<TimelineEntry[]> {
   const rows = await db.select().from(phaseInstances).where(eq(phaseInstances.issueId, issueId)).limit(PHASE_NOTICE_LIMIT);
   const entries: TimelineEntry[] = [];
   for (const p of rows) {
@@ -422,7 +470,7 @@ async function fetchPhaseEntries(db: DbHandle, issueId: string): Promise<Timelin
       });
     }
   }
-  return entries;
+  return entries.filter((e) => inDateRange(e.at, filters));
 }
 
 /** Direct read of notices. Small per-issue cardinality, same treatment as phase entries. */
@@ -438,15 +486,19 @@ async function fetchNoticeEntries(db: DbHandle, issueId: string, filters: Normal
     .from(notices)
     .where(and(...conditions))
     .limit(PHASE_NOTICE_LIMIT);
-  return rows.map((n) => ({
-    at: n.sentAt ?? n.createdAt,
-    kind: 'notice' as const,
-    title: `Notice ${n.status}`,
-    detail: n.cureDeadline ? `Cure deadline ${n.cureDeadline}` : null,
-    actor: null,
-    sourceTable: 'notices',
-    sourceId: n.id,
-  }));
+  return rows
+    .map(
+      (n): TimelineEntry => ({
+        at: n.sentAt ?? n.createdAt,
+        kind: 'notice' as const,
+        title: `Notice ${n.status}`,
+        detail: n.cureDeadline ? `Cure deadline ${n.cureDeadline}` : null,
+        actor: null,
+        sourceTable: 'notices',
+        sourceId: n.id,
+      }),
+    )
+    .filter((e) => inDateRange(e.at, filters));
 }
 
 // ---------------------------------------------------------------------
@@ -481,9 +533,9 @@ export async function issueTimeline(db: DbHandle, params: IssueTimelineParams): 
       ? fetchCommsBatch(db, params.issueId, filters, cursor?.comms, fetchLimit)
       : Promise.resolve<PaginatedBatch>({ key: 'comms', entries: [], repoNextCursor: null, fetchedCount: 0, cursorUsed: cursor?.comms }),
     wants('audit')
-      ? fetchIssueObjectGraphAuditBatch(db, params.issueId, cursor?.audit, fetchLimit)
+      ? fetchIssueObjectGraphAuditBatch(db, params.issueId, filters, cursor?.audit, fetchLimit)
       : Promise.resolve<PaginatedBatch>({ key: 'audit', entries: [], repoNextCursor: null, fetchedCount: 0, cursorUsed: cursor?.audit }),
-    wants('phase_open') || wants('phase_close') ? fetchPhaseEntries(db, params.issueId) : Promise.resolve([]),
+    wants('phase_open') || wants('phase_close') ? fetchPhaseEntries(db, params.issueId, filters) : Promise.resolve([]),
     wants('notice') ? fetchNoticeEntries(db, params.issueId, filters) : Promise.resolve([]),
   ]);
 
@@ -526,16 +578,16 @@ export async function personTimeline(db: DbHandle, params: PersonTimelineParams)
     wants('communication')
       ? fetchPersonCommsBatch(db, params.personRefId, filters, cursor?.comms, fetchLimit)
       : Promise.resolve<PaginatedBatch>({ key: 'comms', entries: [], repoNextCursor: null, fetchedCount: 0, cursorUsed: cursor?.comms }),
-    wants('issue_link') ? fetchIssueLinkEntries(db, params.personRefId) : Promise.resolve([]),
+    wants('issue_link') ? fetchIssueLinkEntries(db, params.personRefId, filters) : Promise.resolve([]),
     wants('audit')
-      ? fetchPersonObjectAuditBatch(db, params.personRefId, cursor?.audit, fetchLimit)
+      ? fetchPersonObjectAuditBatch(db, params.personRefId, filters, cursor?.audit, fetchLimit)
       : Promise.resolve<PaginatedBatch>({ key: 'audit', entries: [], repoNextCursor: null, fetchedCount: 0, cursorUsed: cursor?.audit }),
   ]);
 
   return mergeAndPaginate(linkEntries, [commsBatch, auditBatch], cursor, limit);
 }
 
-async function fetchIssueLinkEntries(db: DbHandle, personRefId: string): Promise<TimelineEntry[]> {
+async function fetchIssueLinkEntries(db: DbHandle, personRefId: string, filters: NormalizedFilters): Promise<TimelineEntry[]> {
   const rows = await db.select().from(issuePeople).where(eq(issuePeople.personRefId, personRefId)).limit(PHASE_NOTICE_LIMIT);
   const entries: TimelineEntry[] = [];
   for (const link of rows) {
@@ -560,13 +612,15 @@ async function fetchIssueLinkEntries(db: DbHandle, personRefId: string): Promise
       });
     }
   }
-  return entries;
+  return entries.filter((e) => inDateRange(e.at, filters));
 }
 
-async function fetchPersonObjectAuditBatch(db: DbHandle, personRefId: string, sourceCursor: string | undefined, fetchLimit: number): Promise<PaginatedBatch> {
+async function fetchPersonObjectAuditBatch(db: DbHandle, personRefId: string, filters: NormalizedFilters, sourceCursor: string | undefined, fetchLimit: number): Promise<PaginatedBatch> {
   if (sourceCursor === SOURCE_DONE) return { key: 'audit', entries: [], repoNextCursor: null, fetchedCount: 0, cursorUsed: sourceCursor };
 
   const conditions: SQL[] = [eq(auditEvents.objectTable, 'person_refs'), eq(auditEvents.objectId, personRefId)];
+  if (filters.fromDate) conditions.push(gte(auditEvents.occurredAt, filters.fromDate));
+  if (filters.toDate) conditions.push(lte(auditEvents.occurredAt, filters.toDate));
   const decoded = sourceCursor ? decodeSimpleCursor(sourceCursor) : null;
   if (decoded && isUuid(decoded.tie)) conditions.push(auditKeysetBefore(decoded));
 

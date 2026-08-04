@@ -17,7 +17,7 @@
  * No business rules live here (DESIGN.md §6) — just reads.
  */
 
-import { and, desc, eq, inArray, or, sql, type SQL } from 'drizzle-orm';
+import { and, desc, eq, gte, inArray, lte, or, sql, type SQL } from 'drizzle-orm';
 import type { DbHandle } from './db-handle.ts';
 import {
   communicationEvents,
@@ -70,6 +70,15 @@ function sanitizeParticipantQuery(input: unknown): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
+/** Same "parse, drop if invalid, never throw" contract as audit-metrics-repo.ts's sanitizeDateBound — a precise ISO instant, NOT a calendar day; callers owning day-boundary semantics (e.g. a `<input type=date>` UI field) resolve that to an inclusive end-of-day instant BEFORE it reaches this repo. */
+function sanitizeDateBound(input: unknown): Date | null {
+  if (typeof input !== 'string') return null;
+  const trimmed = input.trim().slice(0, MAX_STRING_LEN);
+  if (trimmed.length === 0) return null;
+  const ms = Date.parse(trimmed);
+  return Number.isNaN(ms) ? null : new Date(ms);
+}
+
 function impossibleIfEmpty<T extends string>(field: SanitizedArrayFilter<T>): SQL | undefined {
   return field.requested && field.values.length === 0 ? sql`false` : undefined;
 }
@@ -112,6 +121,9 @@ export interface ListForPersonParams {
   direction?: string | null;
   /** Free-text match against the OTHER party's person_refs.display_name + contact_snapshot phone/email (this person's own identity is already fixed by personRefId). */
   participantQuery?: string | null;
+  /** Inclusive occurred_at lower/upper bounds (roadmap "Timeline filters ... date range"); invalid/absent values are dropped rather than throwing — see sanitizeDateBound. */
+  fromDate?: string | null;
+  toDate?: string | null;
   limit?: number | null;
   /** Opaque cursor from a previous page's nextCursor, or null/undefined for page 1. */
   cursor?: string | null;
@@ -129,6 +141,8 @@ export async function listForPerson(db: DbHandle, params: ListForPersonParams): 
   const types = sanitizeChannels(params.types);
   const direction = sanitizeDirection(params.direction ?? null);
   const participantQuery = sanitizeParticipantQuery(params.participantQuery ?? null);
+  const fromDate = sanitizeDateBound(params.fromDate ?? null);
+  const toDate = sanitizeDateBound(params.toDate ?? null);
   const limit = clampLimit(params.limit);
   const cursor = validCommsCursor(params.cursor);
 
@@ -138,6 +152,8 @@ export async function listForPerson(db: DbHandle, params: ListForPersonParams): 
   if (types.requested) conditions.push(impossibleIfEmpty(types) ?? inArray(communicationEvents.channel, types.values));
   if (direction) conditions.push(eq(communicationEvents.direction, direction));
   if (participantQuery) conditions.push(participantSearchCondition(participantQuery));
+  if (fromDate) conditions.push(gte(communicationEvents.occurredAt, fromDate));
+  if (toDate) conditions.push(lte(communicationEvents.occurredAt, toDate));
   if (cursor) conditions.push(keysetPredicate(cursor));
 
   const rows = await db
@@ -182,6 +198,9 @@ export interface ListForIssueParams {
   direction?: string | null;
   /** Free-text match against from/to person_refs.display_name + contact_snapshot phone/email. */
   participantQuery?: string | null;
+  /** Inclusive occurred_at lower/upper bounds (roadmap "Timeline filters ... date range"); invalid/absent values are dropped rather than throwing — see sanitizeDateBound. */
+  fromDate?: string | null;
+  toDate?: string | null;
   limit?: number | null;
   cursor?: string | null;
 }
@@ -209,6 +228,8 @@ export async function listForIssue(db: DbHandle, params: ListForIssueParams): Pr
   const types = sanitizeChannels(params.types);
   const direction = sanitizeDirection(params.direction ?? null);
   const participantQuery = sanitizeParticipantQuery(params.participantQuery ?? null);
+  const fromDate = sanitizeDateBound(params.fromDate ?? null);
+  const toDate = sanitizeDateBound(params.toDate ?? null);
   const limit = clampLimit(params.limit);
   const cursor = validCommsCursor(params.cursor);
   const requestedPersonIds = sanitizeUuidArray(params.personRefIds);
@@ -261,6 +282,8 @@ export async function listForIssue(db: DbHandle, params: ListForIssueParams): Pr
   if (types.requested) conditions.push(impossibleIfEmpty(types) ?? inArray(communicationEvents.channel, types.values));
   if (direction) conditions.push(eq(communicationEvents.direction, direction));
   if (participantQuery) conditions.push(participantSearchCondition(participantQuery));
+  if (fromDate) conditions.push(gte(communicationEvents.occurredAt, fromDate));
+  if (toDate) conditions.push(lte(communicationEvents.occurredAt, toDate));
   if (cursor) conditions.push(keysetPredicate(cursor));
 
   const rows = await db

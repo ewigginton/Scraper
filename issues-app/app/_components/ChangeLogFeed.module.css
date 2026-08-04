@@ -1,0 +1,62 @@
+/* ChangeLogFeed — readable change-log feed rows (Wave 2b, roadmap "Change
+   log everywhere"). Page-specific styling only; colors/spacing inherit from
+   app/globals.css's :root variables so this stays theme-aware without
+   redefining any global class — same convention as
+   app/people/[id]/timeline.module.css. */
+
+.feed {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm, 0.5rem);
+}
+
+.entryRow {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0 var(--space-sm, 0.6rem);
+  align-items: start;
+  padding: var(--space-sm, 0.6rem) var(--space-sm, 0.6rem);
+  border: 1px solid var(--n-border, rgba(120, 120, 120, 0.18));
+  border-radius: var(--n-radius, 6px);
+  background: var(--n-bg, transparent);
+}
+
+.entryBody {
+  min-width: 0;
+}
+
+.diffLine {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.primary {
+  line-height: 1.4;
+}
+
+.meta {
+  opacity: 0.7;
+  font-size: 0.9em;
+}
+
+.subList {
+  margin: 0.2rem 0 0 0;
+  padding-left: 1.1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  font-size: 0.95em;
+  opacity: 0.9;
+}
+
+.reasonLine {
+  font-size: 0.9em;
+  opacity: 0.75;
+  font-style: italic;
+}
+
+.detailLine {
+  font-size: 0.85em;
+  opacity: 0.6;
+}

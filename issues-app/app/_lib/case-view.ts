@@ -141,8 +141,13 @@ export interface HistoryEntry {
   category: HistoryCategory;
   action: string;
   actorRole: string | null;
+  /** Best-effort identity string (Wave 2b readable change-log feed) — actor_external_id, else actor_id, else the phase's ownerId, else 'unattributed'. Same resolution order as timeline-repo.ts's auditEntryFrom. */
+  actor: string;
   reason: string | null;
   detail: string;
+  /** Raw audit_events.before/after jsonb, null for phase-derived entries (phase_instances carries no before/after of its own). app/_lib/audit-diff.ts computes the field-level diff a change-log UI renders — this module stays presentation-free (DESIGN.md §6). */
+  before: unknown;
+  after: unknown;
 }
 
 const ACTION_CATEGORY: Record<string, HistoryCategory> = {
@@ -172,8 +177,11 @@ function auditToHistory(row: AuditEvent): HistoryEntry {
     category: categorize(row.action),
     action: row.action,
     actorRole: row.actorRole,
+    actor: row.actorExternalId ?? row.actorId ?? 'unattributed',
     reason: row.reason,
     detail: `${row.objectTable} ${row.objectId.slice(0, 8)}`,
+    before: row.before,
+    after: row.after,
   };
 }
 
@@ -184,7 +192,10 @@ function phaseToHistory(row: PhaseInstance): HistoryEntry {
     category: 'workflow_transition',
     action: row.status === 'open' || row.status === 'in_progress' ? 'phase_opened' : `phase_${row.status}`,
     actorRole: row.ownerId,
+    actor: row.ownerId ?? 'unattributed',
     reason: row.entryReason ?? row.exitOutcome ?? null,
+    before: null,
+    after: null,
     detail: row.phaseKey,
   };
 }

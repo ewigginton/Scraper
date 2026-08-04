@@ -37,6 +37,16 @@ const LIFECYCLE_COLOR: Record<string, PillColor> = {
   closed: 'green',
 };
 
+/** app/_lib/case-view.ts's HistoryCategory -> pill color, for the change-log feed (Wave 2b). Keys are duplicated as plain strings rather than importing HistoryCategory to avoid a circular app/_lib import; historyCategoryPillColor's `?? 'gray'` fallback keeps that safe. */
+const HISTORY_CATEGORY_COLOR: Record<string, PillColor> = {
+  business_event: 'blue',
+  workflow_transition: 'purple',
+  tasks: 'green',
+  holds_releases: 'orange',
+  vendor_cost: 'yellow',
+  field_edit: 'gray',
+};
+
 const HOLD_TYPE_COLOR: Record<string, PillColor> = {
   legal: 'red',
   safety: 'red',
@@ -64,6 +74,24 @@ export function lifecyclePillColor(lifecycleStatus: string): PillColor {
 
 export function holdTypePillColor(holdType: string): PillColor {
   return HOLD_TYPE_COLOR[holdType] ?? 'gray';
+}
+
+export function historyCategoryPillColor(category: string): PillColor {
+  return HISTORY_CATEGORY_COLOR[category] ?? 'gray';
+}
+
+/** lib/repositories/timeline-repo.ts's TimelineKind -> pill color, for the case Timeline view (Wave 2b). */
+const TIMELINE_KIND_COLOR: Record<string, PillColor> = {
+  communication: 'green',
+  audit: 'gray',
+  phase_open: 'blue',
+  phase_close: 'purple',
+  notice: 'orange',
+  issue_link: 'blue',
+};
+
+export function timelineKindPillColor(kind: string): PillColor {
+  return TIMELINE_KIND_COLOR[kind] ?? 'gray';
 }
 
 /** Turns a snake_case enum value into "Title Case" for pill/label text. */

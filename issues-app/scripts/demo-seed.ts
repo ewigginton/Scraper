@@ -382,6 +382,48 @@ async function main() {
   await db.execute(sql`update issues set created_at = now() - (interval '1 day' * (5 + (('x'||substr(md5(id::text),1,4))::bit(16)::int % 120))) where lifecycle_status <> 'closed' and md5(id::text) < '8'`);
   console.log('  Varied lifecycle stages and aged a slice of cases for realistic demo data.');
 
+  // ---------------------------------------------------------------------
+  // Wave 2b append-only section: contract_refs demo data (roadmap "Case
+  // left-panel contract/transaction overview + CRM links"). Appended at
+  // the end rather than woven into the per-case blocks above so this
+  // section can be extended without touching the wave-1/2a seeding logic
+  // above it. Guarded on a row-count check even though DEMO_DIR is wiped
+  // at the top of main() on every run (so duplication cannot actually
+  // happen today) — the guard documents the intent for whenever this
+  // script stops doing a full rebuild.
+  // ---------------------------------------------------------------------
+  const existingContracts = await db.select({ id: schema.contractRefs.id }).from(schema.contractRefs).limit(1);
+  if (existingContracts.length === 0) {
+    const allDemoProps = [cedarRidge, pineHollow, kyBluff, ozarkView, ...volumeProps];
+    const contractStatuses = ['Draft', 'Under Contract', 'Executed', 'Pending Closing', 'Closed', 'Cancelled'];
+    const buyers = [bWhitfield, ...volumePeople];
+    let contractCount = 0;
+    let contractSeq = 1;
+    for (const prop of allDemoProps) {
+      // ~60% of properties get a contract_refs row.
+      if (!rng.bool(0.6)) continue;
+      const status = rng.pick(contractStatuses);
+      const executed = status === 'Draft' || status === 'Under Contract' ? null : isoDate(-rng.int(180));
+      const closing = status === 'Closed' ? isoDate(-rng.int(60)) : isoDate(rng.int(90));
+      await db.insert(schema.contractRefs).values({
+        sourceSystem: 'demo',
+        externalId: `demo-contract-${contractSeq}`,
+        contractNumber: `CCL-${2025 + rng.int(2)}-${String(contractSeq).padStart(5, '0')}`,
+        statusCached: status,
+        propertyRefId: prop.id,
+        buyerPersonRefId: rng.bool(0.8) ? rng.pick(buyers).id : null,
+        executedDate: executed,
+        keyDates: { closing_deadline: closing, ...(rng.bool(0.4) ? { inspection_deadline: isoDate(rng.int(30)) } : {}) },
+        lastSyncedAt: new Date(),
+      });
+      contractSeq += 1;
+      contractCount += 1;
+    }
+    console.log(`  Contract refs (demo, Wave 2b): ${contractCount} (${allDemoProps.length} properties eligible)`);
+  } else {
+    console.log('  Contract refs (demo, Wave 2b): skipped, already present.');
+  }
+
   const elapsedMs = Date.now() - startTime;
 
   await client.close();

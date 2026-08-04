@@ -6,6 +6,7 @@ import { propertyLabel } from '../../_lib/reference-data.ts';
 import { classifyDueDate, formatDate, formatDateTime } from '../../_lib/dates.ts';
 import { issueTypePillColor, lifecyclePillColor, priorityPillColor, holdTypePillColor, humanize } from '../../_lib/pills.ts';
 import { Pill } from '../../_components/Pill.tsx';
+import ChangeLogFeed from '../../_components/ChangeLogFeed.tsx';
 import { DatabaseUnavailable } from '../../_components/EmptyState.tsx';
 import { PersonHoverCard, PropertyHoverCard } from '../../_components/HoverCard.tsx';
 import { PinIcon, TagIcon, FlowIcon, PersonIcon, FlagIcon, ShieldIcon, CheckSquareIcon, ActivityIcon, WarningIcon, ChevronRightIcon, DocumentIcon } from '../../_components/icons.tsx';
@@ -110,6 +111,9 @@ export default async function CasePage({ params, searchParams }: PageProps) {
       <header className="n-card case-header">
         <div className="flex justify-between items-center">
           <h1 className="n-page-title">{propertyLabel(property)}</h1>
+          <a className="n-btn" href={`/issues/${issue.id}/timeline`}>
+            Timeline
+          </a>
         </div>
         <p className="muted" style={{ marginBottom: 'var(--space-md)' }}>
           {issue.summary}
@@ -725,30 +729,7 @@ export default async function CasePage({ params, searchParams }: PageProps) {
             <p className="muted">No history entries for this filter.</p>
           ) : (
             <>
-              <div className="n-table-wrap">
-                <table className="n-table">
-                  <thead>
-                    <tr>
-                      <th scope="col">When</th>
-                      <th scope="col">Category</th>
-                      <th scope="col">Action</th>
-                      <th scope="col">Detail</th>
-                      <th scope="col">Reason</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {pagedHistory.map((h) => (
-                      <tr key={h.id}>
-                        <td>{formatDateTime(h.occurredAt)}</td>
-                        <td>{HISTORY_CATEGORY_LABELS[h.category]}</td>
-                        <td>{humanize(h.action)}</td>
-                        <td>{h.detail}</td>
-                        <td>{h.reason ?? '—'}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+              <ChangeLogFeed entries={pagedHistory} />
               {hasMoreHistory && (
                 <a className="n-load-more" href={`/issues/${issue.id}?${historyQuery}historyOffset=${pageEnd}#history`}>
                   Load next {Math.min(HISTORY_PAGE_SIZE, filteredHistory.length - pageEnd)} &darr;
