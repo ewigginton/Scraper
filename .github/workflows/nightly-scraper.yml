@@ -73,7 +73,23 @@ jobs:
             echo "No scraper report file was created." >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      - name: Upload scraper report and failed-write queue
+      # Deterministic health check over the run that just finished. Informational
+      # here (continue-on-error): the scraper recorded this run to
+      # data/run-history, so the check has a single run to classify — CI has no
+      # persisted baseline, so this is single-run checks only. Hard scraper
+      # failures still open an issue via the step below.
+      - name: Run scraper health check
+        if: always()
+        continue-on-error: true
+        run: |
+          {
+            echo "## Scraper Health Check"
+            echo '```text'
+            node scripts/health-check.js || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload scraper report, run history, and failed-write queue
         if: always()
         uses: actions/upload-artifact@v5
         with:
@@ -81,6 +97,7 @@ jobs:
           path: |
             reports/
             data/failed-writes/
+            data/run-history/
           if-no-files-found: ignore
 
       - name: Open GitHub issue on failed run
