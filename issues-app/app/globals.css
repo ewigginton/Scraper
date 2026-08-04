@@ -630,6 +630,19 @@ fieldset.form-group legend {
   border-radius: var(--n-radius);
 }
 
+/* Hover-card unclipping (Wave 2b verify Defect A): overflow-x:auto forces
+   overflow-y to 'auto' per the CSS overflow spec, which clips the
+   absolutely-positioned .n-hovercard-panel inside table wrappers. While a
+   hover card inside the wrapper is active, relax the wrapper's overflow so
+   the panel can escape. Tradeoff (accepted for Phase 1): if the table was
+   horizontally scrolled, its scroll position resets for the duration of
+   the hover — visible jank only on tables wide enough to scroll, in
+   exchange for keeping HoverCard pure CSS (no portal/client JS). */
+.n-table-wrap:has(.n-hovercard:hover),
+.n-table-wrap:has(.n-hovercard:focus-within) {
+  overflow: visible;
+}
+
 table.n-table {
   width: 100%;
   border-collapse: collapse;

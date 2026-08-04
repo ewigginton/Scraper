@@ -143,6 +143,31 @@ describe('comms-repo', () => {
       expect(result.nextCursor).toBeNull();
     });
 
+    it('fromDate/toDate narrow to an inclusive occurred_at window', async () => {
+      const person = await makePerson(handle.db);
+      const old = await insertComm(handle.db, { fromPersonRefId: person.id, occurredAt: daysAgo(10), providerEventId: 'range-old' });
+      const mid = await insertComm(handle.db, { fromPersonRefId: person.id, occurredAt: daysAgo(5), providerEventId: 'range-mid' });
+      const recent = await insertComm(handle.db, { fromPersonRefId: person.id, occurredAt: daysAgo(1), providerEventId: 'range-recent' });
+
+      const windowed = await commsRepo.listForPerson(handle.db, {
+        personRefId: person.id,
+        fromDate: daysAgo(6).toISOString(),
+        toDate: daysAgo(2).toISOString(),
+        limit: 10,
+      });
+      expect(windowed.rows.map((r) => r.id)).toEqual([mid.id]);
+      expect(windowed.rows.map((r) => r.id)).not.toContain(old.id);
+      expect(windowed.rows.map((r) => r.id)).not.toContain(recent.id);
+    });
+
+    it('an invalid fromDate/toDate is dropped rather than throwing (falls back to no bound)', async () => {
+      const person = await makePerson(handle.db);
+      await insertComm(handle.db, { fromPersonRefId: person.id, occurredAt: daysAgo(1), providerEventId: 'range-bogus' });
+
+      const result = await commsRepo.listForPerson(handle.db, { personRefId: person.id, fromDate: 'not-a-date', toDate: 'also-not-a-date', limit: 10 });
+      expect(result.rows).toHaveLength(1);
+    });
+
     it('keyset pagination is stable: paging with a small limit returns exactly what a single large-limit call returns, in the same order', async () => {
       const person = await makePerson(handle.db);
       for (let i = 0; i < 11; i++) {
@@ -309,6 +334,24 @@ describe('comms-repo', () => {
       expect(result.rows).toEqual([]);
     });
 
+    it('fromDate/toDate narrow the issue feed to an inclusive occurred_at window', async () => {
+      const owner = await makePerson(handle.db);
+      const { issue } = await makeIssueWithPeople(handle.db, [{ personRefId: owner.id, role: 'owner' }]);
+      const old = await insertComm(handle.db, { fromPersonRefId: owner.id, occurredAt: daysAgo(10), providerEventId: 'issue-range-old' });
+      await linkComm(handle.db, old.id, { issueId: issue.id });
+      const mid = await insertComm(handle.db, { fromPersonRefId: owner.id, occurredAt: daysAgo(5), providerEventId: 'issue-range-mid' });
+      await linkComm(handle.db, mid.id, { issueId: issue.id });
+
+      const windowed = await commsRepo.listForIssue(handle.db, {
+        issueId: issue.id,
+        includeLinkedPeople: false,
+        fromDate: daysAgo(6).toISOString(),
+        toDate: daysAgo(4).toISOString(),
+        limit: 10,
+      });
+      expect(windowed.rows.map((r) => r.event.id)).toEqual([mid.id]);
+    });
+
     it('keyset pagination across direct + folded-in comms is stable under a small page size', async () => {
       const owner = await makePerson(handle.db);
       const { issue } = await makeIssueWithPeople(handle.db, [{ personRefId: owner.id, role: 'owner' }]);
@@ -430,6 +473,54 @@ describe('timeline-repo', () => {
       const result = await timelineRepo.issueTimeline(handle.db, { issueId: 'not-a-uuid', limit: 10 });
       expect(result.entries).toEqual([]);
       expect(result.nextCursor).toBeNull();
+    });
+
+    it('an audit entry carries before/after through for change-log field diffing (Wave 2b)', async () => {
+      const owner = await makePerson(handle.db);
+      const { issue, property } = await makeIssueWithPeople(handle.db, [{ personRefId: owner.id, role: 'owner' }]);
+      await applyHold(handle.db, {
+        propertyRefId: property.id,
+        issueId: issue.id,
+        holdType: 'cleanup',
+        reason: 'Diff coverage hold',
+        actorExternalId: 'test-coordinator',
+        actorRole: 'coordinator',
+      });
+
+      const result = await timelineRepo.issueTimeline(handle.db, { issueId: issue.id, filters: { kinds: ['audit'] }, limit: 100 });
+      const holdApplied = result.entries.find((e) => e.title === 'Hold hold_applied');
+      expect(holdApplied).toBeDefined();
+      expect(holdApplied?.after).toBeDefined();
+    });
+
+    it('fromDate/toDate narrow the timeline to an inclusive date window, across every source', async () => {
+      const owner = await makePerson(handle.db);
+      const { issue } = await makeIssueWithPeople(handle.db, [{ personRefId: owner.id, role: 'owner' }]);
+      const old = await insertComm(handle.db, { fromPersonRefId: owner.id, occurredAt: daysAgo(10), providerEventId: 'timeline-range-old' });
+      await linkComm(handle.db, old.id, { issueId: issue.id });
+      const recent = await insertComm(handle.db, { fromPersonRefId: owner.id, occurredAt: daysAgo(1), providerEventId: 'timeline-range-recent' });
+      await linkComm(handle.db, recent.id, { issueId: issue.id });
+      await handle.db.insert(notices).values({ issueId: issue.id, templateVersion: 'v1', recipientPersonRefId: owner.id, status: 'sent', sentAt: daysAgo(10) });
+
+      const windowed = await timelineRepo.issueTimeline(handle.db, {
+        issueId: issue.id,
+        filters: { kinds: ['communication', 'notice'], fromDate: daysAgo(3).toISOString() },
+        limit: 100,
+      });
+      const sourceIds = windowed.entries.map((e) => e.sourceId);
+      expect(sourceIds).toContain(recent.id);
+      expect(sourceIds).not.toContain(old.id);
+    });
+
+    it('an invalid fromDate/toDate is dropped rather than throwing', async () => {
+      const owner = await makePerson(handle.db);
+      const { issue } = await makeIssueWithPeople(handle.db, [{ personRefId: owner.id, role: 'owner' }]);
+      const result = await timelineRepo.issueTimeline(handle.db, {
+        issueId: issue.id,
+        filters: { fromDate: 'not-a-date', toDate: 'also-not-a-date' },
+        limit: 100,
+      });
+      expect(result.entries.length).toBeGreaterThan(0);
     });
 
     it('keyset pagination across heterogeneous sources is stable: no drops, no duplicates, exact chronological order preserved', async () => {

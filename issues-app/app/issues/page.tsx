@@ -229,7 +229,7 @@ function FilterBar({ sp, view }: { sp: IssuesSearchParams; view: ReturnType<type
         name="q"
         className="n-input"
         style={{ minWidth: '12rem' }}
-        placeholder="Search summary or property..."
+        placeholder="Search issues, people, phone, tract..."
         defaultValue={view.filters.searchText ?? ''}
         aria-label="Search"
       />

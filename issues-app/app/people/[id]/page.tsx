@@ -22,6 +22,7 @@ import { formatDateTime } from '../../_lib/dates.ts';
 import { humanize } from '../../_lib/pills.ts';
 import { propertyLabel } from '../../_lib/reference-data.ts';
 import { Pill } from '../../_components/Pill.tsx';
+import { AuditDiffLine } from '../../_components/ChangeLogFeed.tsx';
 import { DatabaseUnavailable } from '../../_components/EmptyState.tsx';
 import { ActivityIcon, PersonIcon, FlowIcon } from '../../_components/icons.tsx';
 import { commIconFor } from '../_lib/comm-icons.tsx';
@@ -328,15 +329,35 @@ function TimelineRow({ entry, enrichment }: { entry: TimelineEntry; enrichment: 
   if (entry.kind === 'communication') {
     return <CommunicationRow entry={entry} enrichment={enrichment} />;
   }
-  const Icon = entry.kind === 'issue_link' ? PersonIcon : ActivityIcon;
+  if (entry.kind === 'audit') {
+    // Reuses ChangeLogFeed's plain-English diff renderer (Wave 2b) instead of
+    // this page re-deriving its own — see that module's header doc comment.
+    // TimelineEntry.detail for an 'audit' kind is already the audit row's
+    // `reason` (timeline-repo.ts's auditEntryFrom), so it's passed as
+    // `reason`, not `detail`.
+    return (
+      <div className={styles.row}>
+        <span className={styles.iconWrap}>
+          <ActivityIcon size={14} />
+        </span>
+        <div>
+          <div className={styles.title}>
+            <Pill color="gray">Change</Pill>
+          </div>
+          <AuditDiffLine fallbackLabel={entry.title} before={entry.before} after={entry.after} reason={entry.detail} actor={entry.actor} at={entry.at} showMeta={false} />
+        </div>
+        <span className={styles.time}>{formatDateTime(entry.at)}</span>
+      </div>
+    );
+  }
   return (
     <div className={styles.row}>
       <span className={styles.iconWrap}>
-        <Icon size={14} />
+        <PersonIcon size={14} />
       </span>
       <div>
         <div className={styles.title}>
-          <Pill color={entry.kind === 'issue_link' ? 'blue' : 'gray'}>{entry.kind === 'issue_link' ? 'Case link' : 'Change'}</Pill>
+          <Pill color="blue">Case link</Pill>
           {entry.title}
         </div>
         {entry.detail && <div className={styles.snippet}>{entry.detail}</div>}

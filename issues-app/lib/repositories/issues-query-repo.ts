@@ -38,6 +38,12 @@ export interface IssuesQueryFilters {
   coordinatorOrQueue?: string | null;
   /** True if the issue has an open/in_progress task whose due_date has passed. */
   overdueOnly?: boolean;
+  /**
+   * Free text (spec §15 "context-aware search"): matches issues.summary
+   * (full-text), property_refs.display_name/development/tract (ILIKE
+   * prefix), and any linked person's display_name/phone/email (ILIKE
+   * substring, via issue_people -> person_refs) — see buildFilterConditions.
+   */
   searchText?: string | null;
 }
 
@@ -169,9 +175,35 @@ function buildFilterConditions(filters: NormalizedFilters, today: string): SQL[]
   }
 
   if (filters.searchText) {
-    const prefix = `${filters.searchText}%`;
+    const q = filters.searchText;
+    const prefix = `${q}%`;
+    const like = `%${q}%`;
+    // Person match (spec §15 "search by person, phone/email"): a
+    // correlated EXISTS over issue_people -> person_refs, never a real
+    // join — keeps this a single query with no N+1 and no effect on the
+    // property_refs join cardinality (same pattern as the overdueOnly
+    // EXISTS above and comms-repo.ts's participantSearchCondition).
+    // Unaliased subquery against the real issue_people/person_refs table
+    // objects, correlated to the outer issues row via issues.id.
+    const personMatch = sql`exists (
+      select 1
+      from issue_people
+      join person_refs on person_refs.id = issue_people.person_ref_id
+      where issue_people.issue_id = ${issues.id}
+        and (
+          person_refs.display_name ilike ${like}
+          or person_refs.contact_snapshot ->> 'phone' ilike ${like}
+          or person_refs.contact_snapshot ->> 'email' ilike ${like}
+        )
+    )`;
     conditions.push(
-      sql`(${issues.summaryTsv} @@ plainto_tsquery('simple', ${filters.searchText}) OR ${propertyRefs.displayName} ilike ${prefix})`,
+      sql`(
+        ${issues.summaryTsv} @@ plainto_tsquery('simple', ${q})
+        OR ${propertyRefs.displayName} ilike ${prefix}
+        OR ${propertyRefs.development} ilike ${prefix}
+        OR ${propertyRefs.tract} ilike ${prefix}
+        OR ${personMatch}
+      )`,
     );
   }
 

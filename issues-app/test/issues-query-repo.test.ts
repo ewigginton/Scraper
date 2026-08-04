@@ -12,9 +12,9 @@ import {
   listIssues,
   type IssueListRow,
 } from '../lib/repositories/issues-query-repo.ts';
-import { issues, type Issue, type NewIssue, type NewPropertyRef } from '../lib/db/schema.ts';
+import { issuePeople, issues, type Issue, type NewIssue, type NewPropertyRef } from '../lib/db/schema.ts';
 import { closeTestDb, createTestDb, type TestDb, type TestDbHandle } from './helpers/pglite.ts';
-import { makeProperty } from './helpers/fixtures.ts';
+import { makePerson, makeProperty } from './helpers/fixtures.ts';
 
 let counter = 0;
 
@@ -150,6 +150,70 @@ describe('issues-query-repo', () => {
         listIssues(handle.db, { filters: { searchText: "'; drop table issues; --" } }),
       ).resolves.toBeDefined();
       const result = await listIssues(handle.db, { filters: { searchText: "'; drop table issues; --" } });
+      expect(result.rows).toHaveLength(0);
+    });
+  });
+
+  describe('search expansion (spec §15: person, phone/email, development/tract)', () => {
+    it('matches via a linked person\'s display_name', async () => {
+      const owner = await makePerson(handle.db, { displayName: 'Reginald Ashworth-Pemberton' });
+      const withPerson = await makeIssue(handle.db, { summary: 'Unrelated summary text' });
+      await handle.db.insert(issuePeople).values({ issueId: withPerson.id, personRefId: owner.id, role: 'owner' });
+      await makeIssue(handle.db, { summary: 'A different case entirely' });
+
+      const result = await listIssues(handle.db, { filters: { searchText: 'ashworth-pemberton' } });
+      expect(result.rows.map((r) => r.issue.id)).toEqual([withPerson.id]);
+    });
+
+    it('matches via a linked person\'s contact_snapshot phone', async () => {
+      const buyer = await makePerson(handle.db, { displayName: 'Someone Else', contactSnapshot: { phone: '555-0199-unique' } });
+      const withPhone = await makeIssue(handle.db, { summary: 'Case with a buyer' });
+      await handle.db.insert(issuePeople).values({ issueId: withPhone.id, personRefId: buyer.id, role: 'buyer' });
+      await makeIssue(handle.db, { summary: 'Case without a linked buyer' });
+
+      const result = await listIssues(handle.db, { filters: { searchText: '555-0199' } });
+      expect(result.rows.map((r) => r.issue.id)).toEqual([withPhone.id]);
+    });
+
+    it('matches via a linked person\'s contact_snapshot email', async () => {
+      const vendor = await makePerson(handle.db, { displayName: 'Vendor Co', kind: 'org', contactSnapshot: { email: 'unique-vendor@example.com' } });
+      const withEmail = await makeIssue(handle.db, { summary: 'Case with a vendor' });
+      await handle.db.insert(issuePeople).values({ issueId: withEmail.id, personRefId: vendor.id, role: 'vendor' });
+      await makeIssue(handle.db, { summary: 'Case without a linked vendor' });
+
+      const result = await listIssues(handle.db, { filters: { searchText: 'unique-vendor@example.com' } });
+      expect(result.rows.map((r) => r.issue.id)).toEqual([withEmail.id]);
+    });
+
+    it('matches via property development/tract ILIKE prefix', async () => {
+      const viaDevelopment = await makeIssue(handle.db, { propertyOverrides: { development: 'Whispering Pines Estates' } });
+      const viaTract = await makeIssue(handle.db, { propertyOverrides: { tract: 'Tractwood Ridge 7' } });
+      await makeIssue(handle.db, { propertyOverrides: { development: 'Unrelated Development', tract: 'Unrelated Tract' } });
+
+      const byDevelopment = await listIssues(handle.db, { filters: { searchText: 'Whispering' } });
+      expect(byDevelopment.rows.map((r) => r.issue.id)).toEqual([viaDevelopment.id]);
+
+      const byTract = await listIssues(handle.db, { filters: { searchText: 'Tractwood' } });
+      expect(byTract.rows.map((r) => r.issue.id)).toEqual([viaTract.id]);
+    });
+
+    it('stays bounded (LIMIT respected) even when the search matches via the person EXISTS subquery', async () => {
+      const shared = await makePerson(handle.db, { displayName: 'Prolific Caller', contactSnapshot: { phone: '555-shared' } });
+      for (let i = 0; i < 5; i += 1) {
+        const issue = await makeIssue(handle.db, { summary: `Case ${i}` });
+        await handle.db.insert(issuePeople).values({ issueId: issue.id, personRefId: shared.id, role: 'other' });
+      }
+
+      const result = await listIssues(handle.db, { filters: { searchText: '555-shared' }, limit: 2 });
+      expect(result.rows).toHaveLength(2);
+      expect(result.nextCursor).not.toBeNull();
+    });
+
+    it('a hostile search string against the person/phone/email/tract match is safely parameterized (no throw, no match)', async () => {
+      await makeIssue(handle.db, { propertyOverrides: { development: 'Safe Development', tract: 'Safe Tract' } });
+      const hostile = "'; drop table person_refs; --";
+      await expect(listIssues(handle.db, { filters: { searchText: hostile } })).resolves.toBeDefined();
+      const result = await listIssues(handle.db, { filters: { searchText: hostile } });
       expect(result.rows).toHaveLength(0);
     });
   });

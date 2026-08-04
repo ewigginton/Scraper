@@ -11,7 +11,7 @@
  * them. No business rules live here (DESIGN.md §6) — reads only.
  */
 
-import { and, asc, count, desc, eq, ilike, inArray, sql, type SQL } from 'drizzle-orm';
+import { and, asc, count, desc, eq, inArray, sql, type SQL } from 'drizzle-orm';
 import type { DbHandle } from './db-handle.ts';
 import {
   communicationEvents,
@@ -39,7 +39,7 @@ const ENRICH_ID_LIMIT = 250;
 // ---------------------------------------------------------------------
 
 export interface SearchPeopleParams {
-  /** Free-text, matched via ILIKE against display_name (prefix+substring — see buildSearchCondition). */
+  /** Free-text (spec §15 "search by person, phone/email"), matched via ILIKE substring against display_name and contact_snapshot's phone/email fields. */
   q?: string | null;
   cursor?: string | null;
   limit?: number | null;
@@ -87,7 +87,16 @@ export async function searchPeople(db: DbHandle, params: SearchPeopleParams = {}
   const cursor = decodePeopleCursor(params.cursor);
 
   const conditions: SQL[] = [];
-  if (q) conditions.push(ilike(personRefs.displayName, `%${q}%`));
+  if (q) {
+    const like = `%${q}%`;
+    conditions.push(
+      sql`(
+        ${personRefs.displayName} ilike ${like}
+        or ${personRefs.contactSnapshot} ->> 'phone' ilike ${like}
+        or ${personRefs.contactSnapshot} ->> 'email' ilike ${like}
+      )`,
+    );
+  }
   if (cursor) {
     conditions.push(
       sql`((${personRefs.displayName} > ${cursor.sortValue}) OR (${personRefs.displayName} = ${cursor.sortValue} AND ${personRefs.id} > ${cursor.id}::uuid))`,
