@@ -67,6 +67,15 @@ function decodePeopleCursor(raw: string | null | undefined): { sortValue: string
     if (!Array.isArray(parsed) || parsed.length !== 2) return null;
     const [sortValue, id] = parsed as [unknown, unknown];
     if (typeof sortValue !== 'string' || typeof id !== 'string' || !isUuid(id)) return null;
+    // INJECTION FUZZ finding (round 2): sortValue is bound directly as a
+    // text parameter (searchPeople's keyset predicate compares it against
+    // display_name) — a crafted `after=` cursor carrying a NUL byte here
+    // would reach the wire as a bound parameter's value and 500 with a
+    // raw Postgres "invalid byte sequence" error. Reject outright (treat
+    // as an invalid/stale cursor -> page 1) rather than silently
+    // stripping, since altering a cursor's sort value could otherwise
+    // reorder/skip rows.
+    if (containsNulByte(sortValue)) return null;
     return { sortValue, id };
   } catch {
     return null;
