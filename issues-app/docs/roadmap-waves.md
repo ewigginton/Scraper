@@ -142,3 +142,20 @@ before/after/why/when for every command, including denials. The UX layer:
 - Email/call counts and interaction recency render from
   communication_events — rich once JustCall/Gmail wire in at Hub port;
   demo shows the structure with seeded fictional conversations.
+
+## Hub-integration phase — Google Chat (Emma, Aug 2026)
+CCL uses Google Chat (not Slack). Three tiers, all landing in existing seams
+(communication_events + integration_identities + idempotent consumption;
+spec §19 already names Google Workspace as a communication transport):
+1. Outbound notifications: incoming webhooks per Chat space, driven by the
+   configurable notification rules (spec §8.3) — urgent holds, overdue
+   escalations, payment requests. Webhook URLs are config, never code.
+2. Interactive Chat app: card messages with case/task links + actions,
+   slash commands, personal DM reminders. Needs a Google Cloud project +
+   Chat API under CCL's Workspace.
+3. Message ingestion (the Attio-Slack equivalent): Workspace Events API
+   subscriptions feed space/DM messages into communication_events with
+   provider IDs, surfacing on case/person timelines beside calls/emails.
+   Requires workspace-admin consent + an integration contract per spec §22
+   with Scott's sign-off (same governance as JustCall/Gmail).
+All tiers require real credentials → Hub-integration phase, after porting.
