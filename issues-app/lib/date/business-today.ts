@@ -16,14 +16,47 @@
 
 const DEFAULT_BUSINESS_TZ = 'America/Chicago';
 
-export const BUSINESS_TZ = process.env.ISSUES_BUSINESS_TZ?.trim() || DEFAULT_BUSINESS_TZ;
+const REQUESTED_BUSINESS_TZ = process.env.ISSUES_BUSINESS_TZ?.trim() || DEFAULT_BUSINESS_TZ;
 
-const formatter = new Intl.DateTimeFormat('en-CA', {
-  timeZone: BUSINESS_TZ,
-  year: 'numeric',
-  month: '2-digit',
-  day: '2-digit',
-});
+function buildFormatter(timeZone: string): Intl.DateTimeFormat {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  });
+}
+
+/**
+ * ROUND-2 FIX (P2): this formatter used to be built directly from
+ * ISSUES_BUSINESS_TZ at module load with no validation — an operator typo
+ * (e.g. "America/Chicagoo") threw a RangeError at IMPORT time, which is
+ * transitively every page and every command in the package, since this
+ * module is this codebase's one chokepoint for "what day is it". A single
+ * bad env var should degrade like every other misconfiguration in this
+ * package (see tryGetDb()/DatabaseUnavailable) — fall back to the documented
+ * default and keep running — not brick the entire application with an
+ * opaque error that never names the offending value.
+ */
+let effectiveBusinessTz = REQUESTED_BUSINESS_TZ;
+let formatter: Intl.DateTimeFormat;
+/** Set to the rejected value + reason when ISSUES_BUSINESS_TZ was invalid and the default was substituted; null otherwise. Exported so a health/diagnostics endpoint can surface a silently-applied fallback instead of it going unnoticed. */
+export let BUSINESS_TZ_FALLBACK_REASON: string | null = null;
+
+try {
+  formatter = buildFormatter(REQUESTED_BUSINESS_TZ);
+} catch (err) {
+  if (!(err instanceof RangeError)) throw err;
+  const message = err instanceof Error ? err.message : String(err);
+  BUSINESS_TZ_FALLBACK_REASON = `ISSUES_BUSINESS_TZ="${REQUESTED_BUSINESS_TZ}" is not a valid IANA timezone (${message}); using default ${DEFAULT_BUSINESS_TZ} instead.`;
+  // eslint-disable-next-line no-console
+  console.error(`lib/date/business-today.ts: ${BUSINESS_TZ_FALLBACK_REASON}`);
+  effectiveBusinessTz = DEFAULT_BUSINESS_TZ;
+  formatter = buildFormatter(DEFAULT_BUSINESS_TZ);
+}
+
+/** The business timezone actually in effect — REQUESTED_BUSINESS_TZ unless it was invalid, in which case DEFAULT_BUSINESS_TZ (see BUSINESS_TZ_FALLBACK_REASON). */
+export const BUSINESS_TZ = effectiveBusinessTz;
 
 /** Returns the current calendar date (YYYY-MM-DD) in the business's configured timezone. */
 export function businessTodayIso(now: Date = new Date()): string {
