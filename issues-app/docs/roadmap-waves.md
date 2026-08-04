@@ -53,7 +53,18 @@ pagination + composite indexes · 300-case volume seed · Notion visual idiom.
 - Exception / data-quality queue (§13): no-future-due-date, missing summary,
   ready-not-released, stale cases, invalid combos — with owner + next action.
 
-## Wave 3 — the Attio layer
+- Case left-panel: contract/transaction overview + CRM links (Emma, Aug
+  2026): the case page's properties panel shows an overview of the
+  contract #/transaction for the property (number, status, key dates —
+  READ-ONLY: Sales/Transactions and the Contract workflow own those facts,
+  §30.2), linking to the contract/transaction record in the CRM. Every
+  linked person is clickable through to their CRM people page. Navigation
+  stays in-ecosystem: in-app routes/side-peek within the Hub shell, never a
+  full redirect out of context. Until the Hub's canonical contract tables
+  and the Prospects person pages exist, links target this package's
+  /people/[id] stand-in and a contract_refs read-model seam (same alias
+  pattern as property_refs/person_refs); at porting they retarget to the
+  Hub's canonical routes with no data rework.
 - Inline editing from tables and case page (priority, coordinator, queue,
   summary, business-priority label). EVERY inline edit routes through the
   audited services — no direct writes; stage/phase changes stay exclusively
