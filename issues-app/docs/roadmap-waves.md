@@ -28,6 +28,16 @@ pagination + composite indexes · 300-case volume seed · Notion visual idiom.
   released, phase transitions, notices, and material edits from the
   canonical records (§29.11 shared record-timeline). Same data as the
   change-log feed but story-ordered and including communications; paginated.
+- Cleanup-timeline people scope (Emma, Aug 2026): the timeline on a cleanup
+  (and any case) includes the messages of EVERY person linked to it — owner,
+  vendor, neighbor, reporter, buyer — per spec §9.1 ("all communication
+  history for linked people, not only the current coordinator's activity").
+  Sourcing: communications linked to the issue directly, plus each linked
+  person's communication_events. A message that belongs exclusively to a
+  DIFFERENT matter is shown labeled with its context rather than blended in
+  silently (spec §29.1's matter-context rule), and restricted-classification
+  content follows the §29.11 policy (neutral indicator for unauthorized
+  viewers, never the content).
 - Search expansion: person name / phone / email, development / tract,
   case id — context-aware per spec §15.
 - Hover cards on every linked person/property (key info + quick links).
