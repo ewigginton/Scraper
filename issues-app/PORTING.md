@@ -79,3 +79,74 @@ Suggested series, each independently reviewable:
   exist in the Hub (they are read-model references by design; if canonical
   `core_*` person/property tables exist, swap the FKs to point at them and delete
   the refs tables).
+
+## Hub reconnaissance findings (2026-08-04, CCL-scoped session) — SUPERSEDES older guesses above where they conflict
+
+A read-only recon of the actual Hub repo produced these port requirements.
+The port session should treat this section + the recon report as controlling.
+
+1. **Migrations:** newest Hub timestamp at recon time was
+   `20260804130000_add_action_execution_owner_recorder.sql`; TWO incoming
+   files collide exactly (`20260804100000_issues_scale_indexes_search_views`
+   and `20260804130000_issues_search_expansion_indexes`). Re-check the
+   newest timestamp AT PORT TIME (multiple migrations land per day) and
+   rename ALL incoming files later. Verify via the Hub's
+   `check:migrations-replay`.
+2. **Table naming (needs Scott's decision before PR 1):** Hub convention is
+   domain prefixes (`cadence_*`, `lsp_*`, `site_*`, `core_*`) or a
+   dedicated Postgres schema (`messages.*`). Bare `issues`/`tasks`/`holds`/
+   `audit_events`/`saved_views`/`config_versions` break it — `audit_events`
+   worst (five per-domain audit tables already exist). Options: `issues_`
+   prefix or an `issues.` schema. The rename is a scripted pass over the
+   SQL + schema + code identifiers — mechanical, but do it before PR 1.
+3. **domain_events:** the Hub already promoted `cadence_events` →
+   `domain_events` (stage 1, with `domain_event_jobs` and
+   `domain_event_subscriptions`). Drop our outbox table entirely; retarget
+   publishes at the governed tables; event names/schemas need Scott's
+   sign-off (as already stated above).
+4. **Refs reconciliation:** canonical person spine EXISTS (`core_persons` +
+   emails/phones/alt_names/external_ids). Point `person_refs.person_id` at
+   `core_persons` (or replace the ref table — Scott's call). Property spine:
+   `site_tracts` (+ developments/phases/states); contracts:
+   `cadence_contracts`/`lsp_accounts`. Same swap-or-keep decision each.
+5. **Auth:** replace `lib/auth/current-user.ts` with the Hub's
+   `currentUser()` from `lib/session` + `canAccess(user, "<dashboard-id>")`,
+   with a `page-access.ts` guard per the loans-app pattern (guard at layout
+   AND per-page — Next can render a child before the layout guard).
+6. **Routes:** nest EVERYTHING under one subtree (`app/issues/...`) per the
+   loans-app full-page-app pattern. Our top-level `/people`, `/activity`,
+   `/dashboard`, `/exceptions`, `/contracts` must move (`/issues/people`,
+   etc.) — they'd squat shared Hub namespace otherwise.
+7. **Tile registration (three touches):** dashboards entry in
+   `lib/config.ts` (`source: "static"`), id in `TOP_LEVEL_DASHBOARD_IDS`
+   in `lib/access.ts`, label in `lib/dashboard-app/constants.ts`.
+8. **RLS role:** the Hub's RLS program already provisions `hub_staff`
+   (LOGIN, NOSUPERUSER, NOBYPASSRLS, drift-checked) with
+   `HUB_STAFF_DATABASE_URL` + `hub-staff-tx.ts` setting a transaction-local
+   `hub.actor_email` GUC — currently dark. Align our `issues_app` role +
+   `app.actor_id`/`app.roles` GUCs with that program (reuse `hub_staff` or
+   register `issues_app` as a phase-0 sibling). Keep our `/api/health`
+   rolbypassrls assertion — no Hub health route exists; it's net-new value.
+   WARNING: the Hub's default `DATABASE_URL` (`postgres`) and
+   `service_role` are both BYPASSRLS — Issues paths must not use them.
+9. **Drizzle schema:** the Hub's `lib/db/schema.ts` is generated via
+   `npm run db:introspect` — do NOT hand-merge ours; apply migrations then
+   introspect (keep ours only as a reference/re-export if Scott prefers).
+10. **Comms:** the Hub normalizes telephony in `cadence_communications` +
+    `cadence_timeline_events` (JustCall/CloudTalk/PandaDoc land there
+    TODAY). Our `communication_events` must consume from Cadence — never a
+    second writer for the same facts. This accelerates timelines: real
+    comms data exists already.
+11. **UI conventions:** `formatAppDate()`/`formatAppDateTime()` (MM-DD-YY)
+    from `lib/date-format.ts` — no toLocaleDateString; CSS into the
+    `app/styles` lazy-chunk system (never globals.css); shadcn components
+    are the Hub default; light+dark.
+12. **Validation:** fold into the Hub's `npm run validate` (lint, knip,
+    `check:script-imports` — our seed scripts already use relative `.ts`
+    imports, verify anyway; merge our replay test into
+    `check:migrations-replay` rather than a parallel harness).
+13. **Foreclosure boundary:** the public foreclosure marketing page is
+    manually curated and decoupled — nothing in Issues auto-publishes to it.
+
+Scott sign-offs needed before PR 1: table naming (item 2), event
+names/schemas (item 3), refs swap-or-keep (item 4), role alignment (item 8).
