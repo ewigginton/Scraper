@@ -227,3 +227,13 @@ export function WarningIcon(props: IconProps) {
     </IconBase>
   );
 }
+
+export function DocumentIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="M4.5 2h5l3 3v8a1 1 0 0 1-1 1h-7a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z" />
+      <path d="M9.2 2v3h3" />
+      <path d="M6 8.5h4M6 10.8h4" />
+    </IconBase>
+  );
+}

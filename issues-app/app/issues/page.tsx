@@ -20,6 +20,7 @@ import { issueTypePillColor, lifecyclePillColor, priorityPillColor, humanize } f
 import { propertyLabel } from '../_lib/reference-data.ts';
 import { Pill } from '../_components/Pill.tsx';
 import { DatabaseUnavailable, NoIssuesFound } from '../_components/EmptyState.tsx';
+import { PropertyHoverCard } from '../_components/HoverCard.tsx';
 import { ColumnsIcon } from '../_components/icons.tsx';
 import { saveIssuesViewAction } from '../actions.ts';
 import {
@@ -355,7 +356,7 @@ function ColumnHeader({ col, sp, resolvedSort }: { col: ColumnDef; sp: IssuesSea
 function renderCell(colKey: ColumnKey, row: IssueListRow) {
   switch (colKey) {
     case 'property':
-      return propertyLabel(row.property);
+      return <PropertyHoverCard property={row.property} label={propertyLabel(row.property)} />;
     case 'type':
       return <Pill color={issueTypePillColor(row.issue.issueType)}>{humanize(row.issue.issueType)}</Pill>;
     case 'stage':

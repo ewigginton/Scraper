@@ -7,7 +7,8 @@ import { classifyDueDate, formatDate, formatDateTime } from '../../_lib/dates.ts
 import { issueTypePillColor, lifecyclePillColor, priorityPillColor, holdTypePillColor, humanize } from '../../_lib/pills.ts';
 import { Pill } from '../../_components/Pill.tsx';
 import { DatabaseUnavailable } from '../../_components/EmptyState.tsx';
-import { PinIcon, TagIcon, FlowIcon, PersonIcon, FlagIcon, ShieldIcon, CheckSquareIcon, ActivityIcon, WarningIcon, ChevronRightIcon } from '../../_components/icons.tsx';
+import { PersonHoverCard, PropertyHoverCard } from '../../_components/HoverCard.tsx';
+import { PinIcon, TagIcon, FlowIcon, PersonIcon, FlagIcon, ShieldIcon, CheckSquareIcon, ActivityIcon, WarningIcon, ChevronRightIcon, DocumentIcon } from '../../_components/icons.tsx';
 import {
   completeTaskAction,
   rescheduleTaskAction,
@@ -85,7 +86,8 @@ export default async function CasePage({ params, searchParams }: PageProps) {
     );
   }
 
-  const { issue, property, people, holds, tasks, currentPhase, allowedNextPhases, history } = caseData;
+  const { issue, property, people, peopleRefsById, contracts, holds, tasks, currentPhase, allowedNextPhases, history } = caseData;
+  const primaryContract = contracts[0];
   const next = nextTaskOf(tasks);
   const missingHandoff = !next || !next.dueDate;
   const activeHolds = holds.filter((h) => !h.releasedAt);
@@ -120,8 +122,38 @@ export default async function CasePage({ params, searchParams }: PageProps) {
             </span>
             <span className="n-property-label">Property</span>
             <span className="n-property-value">
-              {propertyLabel(property)}
-              {property?.state ? `, ${property.state}` : ''}
+              {property ? (
+                <PropertyHoverCard
+                  property={property}
+                  label={
+                    <>
+                      {propertyLabel(property)}
+                      {property.state ? `, ${property.state}` : ''}
+                    </>
+                  }
+                />
+              ) : (
+                propertyLabel(property)
+              )}
+            </span>
+          </div>
+
+          <div className="n-property-row">
+            <span className="n-property-icon">
+              <DocumentIcon size={15} />
+            </span>
+            <span className="n-property-label">Contract</span>
+            <span className="n-property-value">
+              {!primaryContract ? (
+                '— no contract on file'
+              ) : (
+                <>
+                  <a href={`/contracts/${primaryContract.id}`}>{primaryContract.contractNumber ?? 'View contract'}</a>{' '}
+                  {primaryContract.statusCached && <Pill color="blue">{humanize(primaryContract.statusCached)}</Pill>}{' '}
+                  {primaryContract.executedDate && <span className="muted">executed {formatDate(primaryContract.executedDate)}</span>}
+                  {contracts.length > 1 && <span className="muted"> · {contracts.length} contracts on file</span>}
+                </>
+              )}
             </span>
           </div>
 
@@ -320,13 +352,22 @@ export default async function CasePage({ params, searchParams }: PageProps) {
                   </tr>
                 </thead>
                 <tbody>
-                  {people.map((p) => (
-                    <tr key={p.id}>
-                      <td>{humanize(p.role)}</td>
-                      <td>{p.personDisplayName ?? p.personRefId}</td>
-                      <td>{p.notes ?? '—'}</td>
-                    </tr>
-                  ))}
+                  {people.map((p) => {
+                    const personRef = peopleRefsById.get(p.personRefId);
+                    return (
+                      <tr key={p.id}>
+                        <td>{humanize(p.role)}</td>
+                        <td>
+                          {personRef ? (
+                            <PersonHoverCard person={personRef} role={p.role} />
+                          ) : (
+                            (p.personDisplayName ?? p.personRefId)
+                          )}
+                        </td>
+                        <td>{p.notes ?? '—'}</td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>

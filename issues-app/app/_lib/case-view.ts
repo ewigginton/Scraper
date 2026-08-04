@@ -15,6 +15,8 @@ import type { DbHandle } from '../../lib/repositories/db-handle.ts';
 import * as auditRepo from '../../lib/repositories/audit-repo.ts';
 import * as configRepo from '../../lib/repositories/config-repo.ts';
 import * as paymentsRepo from '../../lib/repositories/payments-repo.ts';
+import * as contractRefsRepo from '../../lib/repositories/contract-refs-repo.ts';
+import { sanitizeUuidArray } from '../../lib/repositories/id-guard.ts';
 import {
   auditEvents,
   bids,
@@ -23,6 +25,7 @@ import {
   costEntries,
   evidenceFiles,
   notices,
+  personRefs,
   phaseInstances,
   propertyRefs,
   vendorJobs,
@@ -30,6 +33,7 @@ import {
   type Bid,
   type ChangeOrder,
   type ChecklistItem,
+  type ContractRef,
   type CostEntry,
   type EvidenceFile,
   type Hold,
@@ -37,6 +41,7 @@ import {
   type Issue,
   type Notice,
   type PaymentRequest,
+  type PersonRef,
   type PhaseInstance,
   type PropertyRef,
   type Task,
@@ -66,6 +71,10 @@ export interface CaseData {
   notices: Notice[];
   checklistItems: ChecklistItem[];
   history: HistoryEntry[];
+  /** Full person_refs rows (contact_snapshot etc.) for every person linked to this case, keyed by id — for the People section's hover cards (spec §15). issuesRepo.getById's people join only selects display_name, not the whole row. */
+  peopleRefsById: Map<string, PersonRef>;
+  /** contract_refs rows for this case's property (roadmap Wave 2b "Case left-panel contract/transaction overview"). NOT canonical (§30.2) — read-model cache, empty when Sales/Transactions has no contract synced yet for this property. */
+  contracts: ContractRef[];
 }
 
 /**
@@ -205,6 +214,13 @@ export async function loadCaseData(db: DbHandle, issueId: string, roles: string[
       auditRepo.listForObject(db, 'issues', issueId, { limit: HISTORY_FETCH_CAP }),
     ]);
 
+  const personRefIds = sanitizeUuidArray(base.people.map((p) => p.personRefId));
+  const [peopleRefRows, contracts] = await Promise.all([
+    personRefIds.length > 0 ? db.select().from(personRefs).where(inArray(personRefs.id, personRefIds)) : Promise.resolve([]),
+    contractRefsRepo.getForProperty(db, base.propertyRefId),
+  ]);
+  const peopleRefsById = new Map(peopleRefRows.map((p) => [p.id, p]));
+
   const vendorJobIds = issueVendorJobs.map((j) => j.id);
   const issueChangeOrders = vendorJobIds.length > 0 ? await db.select().from(changeOrders).where(inArray(changeOrders.vendorJobId, vendorJobIds)) : [];
 
@@ -245,6 +261,8 @@ export async function loadCaseData(db: DbHandle, issueId: string, roles: string[
     issue: base,
     property,
     people: base.people,
+    peopleRefsById,
+    contracts,
     holds: base.holds,
     tasks: base.tasks,
     currentPhase,
