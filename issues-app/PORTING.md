@@ -96,7 +96,13 @@ The port session should treat this section + the recon report as controlling.
    domain prefixes (`cadence_*`, `lsp_*`, `site_*`, `core_*`) or a
    dedicated Postgres schema (`messages.*`). Bare `issues`/`tasks`/`holds`/
    `audit_events`/`saved_views`/`config_versions` break it — `audit_events`
-   worst (five per-domain audit tables already exist). Options: `issues_`
+   worst (five per-domain audit tables already exist). Naming analysis
+   against Scott's actual style (short literal app prefixes dominate ~10:1
+   over the one `messages.*` schema exception) — RECOMMENDED: `ops_`
+   prefix (Property Operations): `ops_issues`, `ops_tasks`, `ops_holds`,
+   `ops_audit_events`, ... — no `issues_issues` stutter, 3 chars like
+   `lsp_`, literal like `site_`/`pto_`, and `ops_audit_events` lines up
+   with the five existing per-domain audit tables. Alternative: `issues_`
    prefix or an `issues.` schema. The rename is a scripted pass over the
    SQL + schema + code identifiers — mechanical, but do it before PR 1.
 3. **domain_events:** the Hub already promoted `cadence_events` →
@@ -108,7 +114,15 @@ The port session should treat this section + the recon report as controlling.
    emails/phones/alt_names/external_ids). Point `person_refs.person_id` at
    `core_persons` (or replace the ref table — Scott's call). Property spine:
    `site_tracts` (+ developments/phases/states); contracts:
-   `cadence_contracts`/`lsp_accounts`. Same swap-or-keep decision each.
+   `cadence_contracts`/`lsp_accounts`. DECIDED (Emma, 2026-08-04): use
+   the Hub's existing tables wherever possible — REPLACE the ref tables
+   with direct reads of `core_persons` (+ emails/phones/external_ids),
+   `site_tracts` (+ developments), and `cadence_contracts`/`lsp_accounts`;
+   drop `person_refs`/`property_refs`/`contract_refs` at port, rewriting
+   FKs and repos to the canonical spines. Where a canonical spine lacks a
+   field Issues needs, propose the column/table to Scott rather than
+   resurrecting a ref cache. Same principle for comms: consume
+   `cadence_communications`/`cadence_timeline_events` directly.
 5. **Auth:** replace `lib/auth/current-user.ts` with the Hub's
    `currentUser()` from `lib/session` + `canAccess(user, "<dashboard-id>")`,
    with a `page-access.ts` guard per the loans-app pattern (guard at layout
@@ -124,8 +138,12 @@ The port session should treat this section + the recon report as controlling.
    (LOGIN, NOSUPERUSER, NOBYPASSRLS, drift-checked) with
    `HUB_STAFF_DATABASE_URL` + `hub-staff-tx.ts` setting a transaction-local
    `hub.actor_email` GUC — currently dark. Align our `issues_app` role +
-   `app.actor_id`/`app.roles` GUCs with that program (reuse `hub_staff` or
-   register `issues_app` as a phase-0 sibling). Keep our `/api/health`
+   `app.actor_id`/`app.roles` GUCs with that program. DECIDED (Emma,
+   2026-08-04): REUSE `hub_staff` — connect Issues paths via
+   `HUB_STAFF_DATABASE_URL`/`hub-staff-tx.ts`, migrate our RLS policies to
+   read the Hub's `hub.actor_email` GUC (+ role resolution through the
+   Hub's access model) and drop the standalone `issues_app` role at port.
+   Keep our `/api/health`
    rolbypassrls assertion — no Hub health route exists; it's net-new value.
    WARNING: the Hub's default `DATABASE_URL` (`postgres`) and
    `service_role` are both BYPASSRLS — Issues paths must not use them.
