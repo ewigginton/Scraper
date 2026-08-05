@@ -235,10 +235,27 @@ interface SortColumnSpec {
 // due-date-of-next-task is deliberately OUT of scope (docs/notion-redesign.md
 // "Scale work" §1) — there is no single "next task" column on issues to sort
 // by without a per-row subquery/join this allowlist doesn't provide.
+/**
+ * ROUND-4 FIX (P2): `priority`'s sort column used to be the bare
+ * `issues.priority` text column, which sorts LEXICOGRAPHICALLY, not by
+ * business importance — VALID_PRIORITIES is {low, normal, high, urgent},
+ * and ASCII-wise 'high' < 'low' < 'normal' < 'urgent', so a descending
+ * "most urgent first" sort on the /issues work-queue actually returned
+ * `urgent, normal, low, high` — every `high`-priority issue silently
+ * buried at the very bottom, under `low`. Mapping each value to its
+ * CHECK-constrained business rank (urgent=4 > high=3 > normal=2 > low=1)
+ * here — instead of at the JS/UI layer — keeps this a single ORDER BY/
+ * keyset expression pair, so the cursor (minted from this SAME expression
+ * via cursorValueExprFor) and the WHERE predicate (keysetPredicate, which
+ * also reads this same expr) automatically agree with the ORDER BY on page
+ * 2+, exactly like every other sort key in this allowlist.
+ */
+const PRIORITY_RANK_EXPR = sql`case ${issues.priority} when 'urgent' then '4' when 'high' then '3' when 'normal' then '2' else '1' end`;
+
 const SORT_ALLOWLIST: Record<SortKey, SortColumnSpec> = {
   updated_at: { expr: sql`${issues.updatedAt}`, nullable: false, valueType: 'timestamp' },
   created_at: { expr: sql`${issues.createdAt}`, nullable: false, valueType: 'timestamp' },
-  priority: { expr: sql`${issues.priority}`, nullable: false, valueType: 'text' },
+  priority: { expr: PRIORITY_RANK_EXPR, nullable: false, valueType: 'text' },
   issue_type: { expr: sql`${issues.issueType}`, nullable: false, valueType: 'text' },
   lifecycle_status: { expr: sql`${issues.lifecycleStatus}`, nullable: false, valueType: 'text' },
   property_display_name: { expr: sql`${propertyRefs.displayName}`, nullable: true, valueType: 'text' },

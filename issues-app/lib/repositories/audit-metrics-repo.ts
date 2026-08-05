@@ -21,7 +21,7 @@
 import { and, desc, eq, getTableColumns, gte, inArray, lte, sql, type SQL } from 'drizzle-orm';
 import type { DbHandle } from './db-handle.ts';
 import { auditEvents, type AuditEvent } from '../db/schema.ts';
-import { clampLimit, cursorTimestampExpr, decodeCursor, encodeCursor } from './keyset-cursor.ts';
+import { clampLimit, cursorTimestampExpr, decodeCursor, encodeCursor, sanitizeDateBound } from './keyset-cursor.ts';
 import { isUuid, sanitizeText } from './id-guard.ts';
 
 /**
@@ -50,13 +50,6 @@ const ACTOR_EXPR = sql<string>`coalesce(${auditEvents.actorExternalId}, ${auditE
 
 const MAX_STRING_LEN = 200;
 const MAX_ACTOR_ROWS = 500;
-
-function sanitizeDateBound(input: unknown): Date | null {
-  if (typeof input !== 'string') return null;
-  const trimmed = input.trim().slice(0, MAX_STRING_LEN);
-  const parsed = Date.parse(trimmed);
-  return Number.isNaN(parsed) ? null : new Date(parsed);
-}
 
 function sanitizeCategory(input: unknown): string | null {
   return typeof input === 'string' && VALID_OBJECT_TABLES.has(input) ? input : null;

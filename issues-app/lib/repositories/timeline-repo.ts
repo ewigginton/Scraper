@@ -49,7 +49,14 @@ import { and, desc, eq, getTableColumns, gte, inArray, lte, or, sql, type SQL } 
 import type { DbHandle } from './db-handle.ts';
 import { auditEvents, holds, issuePeople, notices, phaseInstances, tasks } from '../db/schema.ts';
 import * as commsRepo from './comms-repo.ts';
-import { clampLimit, cursorTimestampExpr, decodeCursor as decodeSimpleCursor, encodeCursor as encodeSimpleCursor } from './keyset-cursor.ts';
+import {
+  clampLimit,
+  cursorTimestampExpr,
+  decodeCursor as decodeSimpleCursor,
+  encodeCursor as encodeSimpleCursor,
+  isValidCursorTimestamp,
+  sanitizeDateBound,
+} from './keyset-cursor.ts';
 import { isUuid, sanitizeText, sanitizeUuidArray } from './id-guard.ts';
 
 // ---------------------------------------------------------------------
@@ -60,6 +67,22 @@ export type TimelineKind = 'communication' | 'audit' | 'phase_open' | 'phase_clo
 
 export interface TimelineEntry {
   at: Date;
+  /**
+   * P1 FIX (round 4): the SAME microsecond-precision string every
+   * SQL-paginated source's ORDER BY actually sorted this row by —
+   * comms/audit entries carry Postgres's own `cursorAt` rendering
+   * (keyset-cursor.cursorTimestampExpr) through unchanged from the query
+   * that fetched them; "small" sources (phase/notice/issue_link), which
+   * have no SQL cursor to match, synthesize the same fixed-width shape from
+   * their JS `at` Date via `exactFromDate`. Fixed-width + always UTC means
+   * plain string comparison on this field IS chronological comparison, so
+   * every merge/sort/cursor step below can use it directly instead of
+   * `at.getTime()` (millisecond resolution — the precision loss that let a
+   * paginated source's SQL order silently diverge from this module's
+   * in-memory merge order, the exact class of bug this field closes; see
+   * compareEntries/isPastCursor/mergeAndPaginate's doc comments).
+   */
+  atExact: string;
   kind: TimelineKind;
   title: string;
   detail: string | null;
@@ -131,15 +154,6 @@ interface NormalizedFilters {
   toDate: Date | null;
 }
 
-/** Same "parse, drop if invalid, never throw" contract as comms-repo.ts's/audit-metrics-repo.ts's sanitizeDateBound (duplicated rather than imported — this module already treats comms-repo as an external collaborator it calls through, not a shared-internals dependency). */
-function sanitizeDateBound(input: unknown): Date | null {
-  if (typeof input !== 'string') return null;
-  const trimmed = input.trim().slice(0, MAX_STRING_LEN);
-  if (trimmed.length === 0) return null;
-  const ms = Date.parse(trimmed);
-  return Number.isNaN(ms) ? null : new Date(ms);
-}
-
 function normalizeFilters(filters: TimelineFilters | undefined): NormalizedFilters {
   const kindsInput = filters?.kinds;
   const kindValues = Array.isArray(kindsInput) ? kindsInput.filter((k): k is TimelineKind => typeof k === 'string' && VALID_KINDS.has(k as TimelineKind)) : [];
@@ -169,53 +183,81 @@ function inDateRange(at: Date, filters: NormalizedFilters): boolean {
 }
 
 /**
- * Total order every source-fetch, sort, and cursor comparison in this file
- * agrees on: newest `at` first; ties broken by
- * `sourceTable:sourceId:kind`, PLUS `auditEventId` for 'audit' entries
- * (see its doc comment on TimelineEntry) — omitted for every other kind so
- * this produces byte-identical strings to before for them.
+ * P1 FIX (round 4): every fixed-width millisecond-to-microsecond padding
+ * needed to give a "small" source (phase/notice/issue_link — no SQL cursor
+ * of its own) an `atExact` value in the SAME shape and precision class as
+ * the paginated sources' Postgres-rendered `cursorAt` (see TimelineEntry's
+ * doc comment) — a plain zero-pad, not a real microsecond reading (a JS
+ * Date cannot carry one), but that's fine: these sources have no SQL order
+ * of their own to stay byte-identical with, they only need to sort
+ * correctly AGAINST the other sources' true-microsecond values, and a
+ * millisecond value zero-padded into the microsecond field does that
+ * (".123000" sorts exactly where ".123" chronologically belongs relative to
+ * ".123456" or ".123900"). `toISOString()` always produces exactly 3
+ * fractional digits before the `Z`, so the replace below is unconditional.
  */
-function tieOf(e: TimelineEntry): string {
-  const base = `${e.sourceTable}:${e.sourceId}:${e.kind}`;
-  return e.kind === 'audit' && e.auditEventId ? `${base}:${e.auditEventId}` : base;
+function exactFromDate(d: Date): string {
+  return d.toISOString().replace(/\.(\d{3})Z$/, (_all, ms: string) => `.${ms}000Z`);
 }
 
 /**
- * P1 regression fix (round 3, discovered writing this finding's own
- * regression test): ties are broken DESCENDING by `tieOf`, not ascending.
- * This has to match the tie-break direction every paginated source's SQL
- * query actually fetches rows in — `ORDER BY occurred_at DESC, id DESC` in
- * comms-repo.ts/fetchIssueObjectGraphAuditBatch/fetchPersonObjectAuditBatch
- * — because `tieOf` embeds that same row id (comms: the communication
- * event's own id via sourceId; audit: auditEventId). An ascending tie-break
- * here was silently INCOMPATIBLE with that descending SQL order: once this
- * function's tie-break emitted the row with the lexicographically SMALLEST
- * id from a same-timestamp group, the combined cursor's `tie` watermark
- * became that smallest id — and isPastCursor's `tieOf(e) > cursor.tie`
- * check then permanently excluded every row with a SMALLER id in that same
- * group, even though the SQL side hadn't delivered them yet (it fetches
- * LARGEST id first). Reproduced directly: 5 audit rows sharing one
- * microsecond-precision occurred_at, paginated at limit 2, silently lost 3
- * of the 5. Descending tie-break (matching the SQL order) closes this for
- * every paginated source uniformly — the "small" sources (phase/notice/
- * issue_link) have no SQL-side pagination to match, so the direction is a
- * free (and now consistent) choice for them.
+ * Total order every source-fetch, sort, and cursor comparison in this file
+ * agrees on: newest `atExact` first; ties broken by the SQL tie-break
+ * column for the two paginated kinds — bare `auditEventId` for 'audit', bare
+ * `sourceId` (the communication_events row's own id) for 'communication' —
+ * and by `sourceTable:sourceId:kind` for every other (non-paginated) kind,
+ * which has no SQL order of its own to match.
+ *
+ * P1 FIX (round 4): this used to prefix EVERY kind's tie (including
+ * 'audit'/'communication') with `sourceTable:sourceId:kind` before the row
+ * id. That was WRONG for the two paginated sources: their SQL query
+ * (`ORDER BY occurred_at DESC, id DESC`) breaks ties on the row's own id
+ * ALONE, but for 'audit' entries `sourceId` is the AUDITED OBJECT's id
+ * (issue/task/hold — see auditEntryFrom's doc comment), not the audit row's
+ * id, so the old tie prefix put every 'tasks:...' audit row before every
+ * 'issues:...' audit row regardless of which one the SQL actually fetched
+ * first. Whenever an issue and one of its tasks/holds shared one audit
+ * batch's exact `occurred_at` (routine: `now()` is the transaction
+ * timestamp, and one command commonly audits an issue AND a child object in
+ * the same transaction), the in-memory merge order disagreed with the SQL
+ * fetch order — and once that batch became fullyConsumed, the per-source
+ * cursor advanced past whichever row this module's merge emitted last,
+ * silently excluding every row the SQL side had NOT actually delivered yet.
+ * Reproduced directly: an issue-object and a task-object audit row sharing
+ * one microsecond-precision `occurred_at`, paginated at limit 1, permanently
+ * dropped the task row. Matching the SQL's bare-id tie-break for these two
+ * kinds closes this.
+ */
+function tieOf(e: TimelineEntry): string {
+  if (e.kind === 'audit') return e.auditEventId ?? `${e.sourceTable}:${e.sourceId}:${e.kind}`;
+  if (e.kind === 'communication') return e.sourceId;
+  return `${e.sourceTable}:${e.sourceId}:${e.kind}`;
+}
+
+/**
+ * Ties are broken DESCENDING by `tieOf`, matching `ORDER BY occurred_at
+ * DESC, id DESC` — the SQL order every paginated source actually fetches
+ * rows in. An ascending tie-break here is silently INCOMPATIBLE with that:
+ * once this function emitted the row with the lexicographically SMALLEST id
+ * from a same-timestamp group, the combined cursor's `tie` watermark became
+ * that smallest id, and isPastCursor's `tieOf(e) > cursor.tie` check then
+ * permanently excluded every row with a SMALLER id in that same group, even
+ * though the SQL side hadn't delivered them yet (it fetches LARGEST id
+ * first). `atExact` (not `at`) is the primary key — see TimelineEntry's doc
+ * comment on why millisecond-resolution `at` is not precise enough to stay
+ * byte-identical to the SQL order.
  */
 function compareEntries(a: TimelineEntry, b: TimelineEntry): number {
-  const byTime = b.at.getTime() - a.at.getTime();
-  if (byTime !== 0) return byTime;
+  if (a.atExact !== b.atExact) return a.atExact < b.atExact ? 1 : -1;
   const ta = tieOf(a);
   const tb = tieOf(b);
   return ta < tb ? 1 : ta > tb ? -1 : 0;
 }
 
-/** True when `e` belongs strictly AFTER `{at, tie}` in the total order above (i.e. is eligible for the next page). No cursor means every entry qualifies (page 1). Tie direction matches compareEntries's descending tie-break (see its doc comment) — "after" in descending order means a STRICTLY SMALLER tie value. */
+/** True when `e` belongs strictly AFTER `{at, tie}` in the total order above (i.e. is eligible for the next page). No cursor means every entry qualifies (page 1). Tie direction matches compareEntries's descending tie-break (see its doc comment) — "after" in descending order means a STRICTLY SMALLER tie value. Compares `atExact` (fixed-width, always UTC, so plain string comparison IS chronological comparison) rather than `at.getTime()` — see TimelineEntry's doc comment. */
 function isPastCursor(e: TimelineEntry, cursor: { at: string; tie: string } | null): boolean {
   if (!cursor) return true;
-  const cursorAtMs = Date.parse(cursor.at);
-  const eAtMs = e.at.getTime();
-  if (eAtMs < cursorAtMs) return true;
-  if (eAtMs > cursorAtMs) return false;
+  if (e.atExact !== cursor.at) return e.atExact < cursor.at;
   return tieOf(e) < cursor.tie;
 }
 
@@ -249,7 +291,15 @@ function decodeCombinedCursor(raw: string | null | undefined): CombinedCursorPay
     const parsed: unknown = JSON.parse(json);
     if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null;
     const p = parsed as Record<string, unknown>;
-    if (typeof p.at !== 'string' || Number.isNaN(Date.parse(p.at))) return null;
+    // P1 FIX (round 4): `at` is now always minted from `atExact` — the same
+    // fixed-width microsecond shape keyset-cursor.cursorTimestampExpr
+    // produces (see mergeAndPaginate's nextPayload) — so validate against
+    // that EXACT shape (isValidCursorTimestamp) rather than the looser
+    // `Date.parse`, same reasoning as keyset-cursor.decodeCursor's own
+    // round-3 P2 fix: `Date.parse`/`toISOString` is a no-op for hostile
+    // extended-year/year-0000 strings that would otherwise round-trip here
+    // unrejected.
+    if (typeof p.at !== 'string' || !isValidCursorTimestamp(p.at)) return null;
     if (typeof p.tie !== 'string' || p.tie.length === 0 || p.tie.length > 300) return null;
     const comms = typeof p.comms === 'string' && p.comms.length <= 500 ? p.comms : undefined;
     const audit = typeof p.audit === 'string' && p.audit.length <= 500 ? p.audit : undefined;
@@ -338,14 +388,22 @@ function mergeAndPaginate(smallEntries: TimelineEntry[], paginated: PaginatedBat
   // safeWatermark: the newest ("shallowest") explored-boundary among every
   // paginated source that still has more data (repoNextCursor !== null).
   // Undefined (no source is a threat) means no candidate needs withholding.
-  let safeWatermarkMs: number | undefined;
+  // P1 FIX (round 4): compared on `atExact` (fixed-width string), not
+  // `at.getTime()` — two rows sharing a millisecond but differing at
+  // microsecond resolution used to collapse onto the same boundary/compare
+  // value here, which could let a candidate through that a shallow source's
+  // TRUE (microsecond-precision) explored boundary had not actually reached
+  // yet, or withhold one it had. `atExact`'s precision matches exactly what
+  // each paginated source's SQL ORDER BY used, closing that gap.
+  let safeWatermark: string | undefined;
   for (const source of paginated) {
     if (source.repoNextCursor === null || source.entries.length === 0) continue;
-    const boundaryMs = Math.min(...source.entries.map((e) => e.at.getTime()));
-    safeWatermarkMs = safeWatermarkMs === undefined ? boundaryMs : Math.max(safeWatermarkMs, boundaryMs);
+    let boundary = source.entries[0]!.atExact;
+    for (const e of source.entries) if (e.atExact < boundary) boundary = e.atExact;
+    safeWatermark = safeWatermark === undefined || boundary > safeWatermark ? boundary : safeWatermark;
   }
 
-  const emittable = (safeWatermarkMs === undefined ? eligible : eligible.filter((e) => e.at.getTime() >= safeWatermarkMs!)).sort(compareEntries);
+  const emittable = (safeWatermark === undefined ? eligible : eligible.filter((e) => e.atExact >= safeWatermark!)).sort(compareEntries);
   const withheldByWatermark = eligible.length > emittable.length;
 
   const anySourceHasMoreBeyondFetch = paginated.some((p) => p.repoNextCursor !== null);
@@ -355,7 +413,10 @@ function mergeAndPaginate(smallEntries: TimelineEntry[], paginated: PaginatedBat
 
   if (!hasMore || !last) return { entries: page, nextCursor: null };
 
-  const nextPayload: CombinedCursorPayload = { at: last.at.toISOString(), tie: tieOf(last) };
+  // P1 FIX (round 4): `atExact`, not `last.at.toISOString()` — see
+  // TimelineEntry's doc comment on why the millisecond-resolution `at`
+  // Date is not precise enough to stay byte-identical to the SQL order.
+  const nextPayload: CombinedCursorPayload = { at: last.atExact, tie: tieOf(last) };
   for (const source of paginated) {
     // How many of THIS fetch's rows are still "new" this round (not
     // already emitted on an earlier page) — comparing against the raw
@@ -395,6 +456,7 @@ async function fetchCommsBatch(db: DbHandle, issueId: string, filters: Normalize
   const entries = result.rows.map(
     (row): TimelineEntry => ({
       at: row.event.occurredAt,
+      atExact: row.event.cursorAt,
       kind: 'communication',
       title: `${capitalize(row.event.channel)} (${row.event.direction})`,
       detail: row.event.summary ?? null,
@@ -422,6 +484,7 @@ async function fetchPersonCommsBatch(db: DbHandle, personRefId: string, filters:
   const entries = result.rows.map(
     (event): TimelineEntry => ({
       at: event.occurredAt,
+      atExact: event.cursorAt,
       kind: 'communication',
       title: `${capitalize(event.channel)} (${event.direction})`,
       detail: event.summary ?? null,
@@ -441,10 +504,11 @@ const OBJECT_TABLE_LABEL: Record<string, string> = {
   person_refs: 'Person',
 };
 
-function auditEntryFrom(row: typeof auditEvents.$inferSelect): TimelineEntry {
+function auditEntryFrom(row: typeof auditEvents.$inferSelect & { cursorAt: string }): TimelineEntry {
   const label = OBJECT_TABLE_LABEL[row.objectTable] ?? row.objectTable;
   return {
     at: row.occurredAt,
+    atExact: row.cursorAt,
     kind: 'audit',
     title: `${label} ${row.action}`,
     detail: row.reason ?? null,
@@ -509,6 +573,7 @@ async function fetchPhaseEntries(db: DbHandle, issueId: string, filters: Normali
     if (p.startedAt) {
       entries.push({
         at: p.startedAt,
+        atExact: exactFromDate(p.startedAt),
         kind: 'phase_open',
         title: `Phase opened — ${p.phaseKey}`,
         detail: p.entryReason ?? null,
@@ -520,6 +585,7 @@ async function fetchPhaseEntries(db: DbHandle, issueId: string, filters: Normali
     if (p.endedAt) {
       entries.push({
         at: p.endedAt,
+        atExact: exactFromDate(p.endedAt),
         kind: 'phase_close',
         title: `Phase closed — ${p.phaseKey}`,
         detail: p.exitOutcome ?? null,
@@ -549,6 +615,7 @@ async function fetchNoticeEntries(db: DbHandle, issueId: string, filters: Normal
     .map(
       (n): TimelineEntry => ({
         at: n.sentAt ?? n.createdAt,
+        atExact: exactFromDate(n.sentAt ?? n.createdAt),
         kind: 'notice' as const,
         title: `Notice ${n.status}`,
         detail: n.cureDeadline ? `Cure deadline ${n.cureDeadline}` : null,
@@ -650,8 +717,10 @@ async function fetchIssueLinkEntries(db: DbHandle, personRefId: string, filters:
   const rows = await db.select().from(issuePeople).where(eq(issuePeople.personRefId, personRefId)).limit(PHASE_NOTICE_LIMIT);
   const entries: TimelineEntry[] = [];
   for (const link of rows) {
+    const startAt = new Date(`${link.startDate}T00:00:00.000Z`);
     entries.push({
-      at: new Date(`${link.startDate}T00:00:00.000Z`),
+      at: startAt,
+      atExact: exactFromDate(startAt),
       kind: 'issue_link',
       title: `Linked to issue as ${link.role}`,
       detail: link.notes ?? null,
@@ -660,8 +729,10 @@ async function fetchIssueLinkEntries(db: DbHandle, personRefId: string, filters:
       sourceId: link.id,
     });
     if (link.endDate) {
+      const endAt = new Date(`${link.endDate}T00:00:00.000Z`);
       entries.push({
-        at: new Date(`${link.endDate}T00:00:00.000Z`),
+        at: endAt,
+        atExact: exactFromDate(endAt),
         kind: 'issue_link',
         title: `Unlinked from issue (was ${link.role})`,
         detail: link.notes ?? null,

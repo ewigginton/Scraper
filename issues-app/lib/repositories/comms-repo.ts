@@ -28,7 +28,7 @@ import {
   type CommunicationDirection,
   type CommunicationEvent,
 } from '../db/schema.ts';
-import { clampLimit, cursorTimestampExpr, decodeCursor, encodeCursor } from './keyset-cursor.ts';
+import { clampLimit, cursorTimestampExpr, decodeCursor, encodeCursor, sanitizeDateBound } from './keyset-cursor.ts';
 import { isUuid, sanitizeText, sanitizeUuidArray } from './id-guard.ts';
 
 // ---------------------------------------------------------------------
@@ -74,15 +74,6 @@ function sanitizeDirection(input: unknown): CommunicationDirection | null {
  */
 function sanitizeParticipantQuery(input: unknown): string | null {
   return sanitizeText(input, MAX_STRING_LEN);
-}
-
-/** Same "parse, drop if invalid, never throw" contract as audit-metrics-repo.ts's sanitizeDateBound — a precise ISO instant, NOT a calendar day; callers owning day-boundary semantics (e.g. a `<input type=date>` UI field) resolve that to an inclusive end-of-day instant BEFORE it reaches this repo. */
-function sanitizeDateBound(input: unknown): Date | null {
-  if (typeof input !== 'string') return null;
-  const trimmed = input.trim().slice(0, MAX_STRING_LEN);
-  if (trimmed.length === 0) return null;
-  const ms = Date.parse(trimmed);
-  return Number.isNaN(ms) ? null : new Date(ms);
 }
 
 function impossibleIfEmpty<T extends string>(field: SanitizedArrayFilter<T>): SQL | undefined {
@@ -136,7 +127,17 @@ export interface ListForPersonParams {
 }
 
 export interface ListForPersonResult {
-  rows: CommunicationEvent[];
+  /**
+   * `cursorAt` is Postgres's own microsecond-precision rendering of
+   * occurred_at (keyset-cursor.cursorTimestampExpr) — present on every row
+   * alongside the ordinary CommunicationEvent columns so callers that need
+   * to merge these rows against another source's SQL order in memory
+   * (timeline-repo.ts) can use the SAME precision the SQL ORDER BY used,
+   * rather than round-tripping through `occurredAt` (a JS Date, millisecond
+   * resolution — see keyset-cursor.cursorTimestampExpr's doc comment on why
+   * that round-trip silently reorders/drops same-millisecond rows).
+   */
+  rows: Array<CommunicationEvent & { cursorAt: string }>;
   nextCursor: string | null;
 }
 
@@ -190,7 +191,8 @@ export async function listForPerson(db: DbHandle, params: ListForPersonParams): 
 export type CommsLinkage = 'direct' | 'via-person' | 'both';
 
 export interface CommsIssueRow {
-  event: CommunicationEvent;
+  /** See ListForPersonResult's doc comment on `cursorAt` — same field, same reason. */
+  event: CommunicationEvent & { cursorAt: string };
   /** How this communication surfaced on the issue's timeline. */
   linkage: CommsLinkage;
   /** issue_people.person_ref_id values (of THIS issue) this comm is also linked to via communication_links, if any. */

@@ -141,6 +141,44 @@ export function decodeCursor(raw: string | null | undefined): DecodedCursor | nu
   }
 }
 
+const DEFAULT_DATE_BOUND_MAX_LEN = 200;
+
+/**
+ * ROUND-4 FIX (P2): shared "parse a date-range filter bound, drop if
+ * invalid, never throw" implementation — was duplicated three times
+ * (comms-repo.ts, timeline-repo.ts, audit-metrics-repo.ts), and every copy
+ * only did `Date.parse` + `new Date(...)` with no shape/range validation.
+ * The round-3 P2 fix hardened the CURSOR path (decodeCursor above) against
+ * ISO extended-year (`+010000-01-01T...`) and year-0000 (`0000-01-01T...`)
+ * strings reaching a `::timestamptz` cast — both parse fine in JS and
+ * round-trip byte-for-byte through `toISOString()`, but Postgres's
+ * timestamptz parser rejects them outright with a raw driver error. The
+ * three `sanitizeDateBound` copies fed the IDENTICAL hostile strings to the
+ * IDENTICAL cast via `gte`/`lte` on a date-range filter — the exact same
+ * crash, reached through the one seam the round-3 fix didn't cover, live on
+ * four user-reachable GET routes (`/people/[id]`, `/issues/[id]/timeline`,
+ * `/activity`, `/admin/activity`).
+ *
+ * Reuses `isValidCursorTimestamp`'s structural-shape + calendar-correctness
+ * + year>=1 checks rather than re-deriving them: a real `Date` has no
+ * genuine microsecond precision to lose, so padding `toISOString()`'s fixed
+ * 3-digit millisecond field out to the 6-digit microsecond shape that
+ * function validates is exact, not approximate — and it makes the
+ * extended-year rejection free (a `+`/`-` prefixed year can never match
+ * `isValidCursorTimestamp`'s fully-anchored 4-digit-year regex at all) and
+ * the year-0000 rejection free (that function already checks `year < 1`).
+ */
+export function sanitizeDateBound(input: unknown, max = DEFAULT_DATE_BOUND_MAX_LEN): Date | null {
+  if (typeof input !== 'string') return null;
+  const trimmed = input.trim().slice(0, max);
+  if (trimmed.length === 0) return null;
+  const ms = Date.parse(trimmed);
+  if (Number.isNaN(ms)) return null;
+  const date = new Date(ms);
+  const padded = date.toISOString().replace(/\.(\d{3})Z$/, (_all, msPart: string) => `.${msPart}000Z`);
+  return isValidCursorTimestamp(padded) ? date : null;
+}
+
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
 

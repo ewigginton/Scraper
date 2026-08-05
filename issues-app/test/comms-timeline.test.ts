@@ -24,6 +24,7 @@ import {
   communicationLinks,
   notices,
   phaseInstances,
+  tasks,
   type CommunicationChannel,
   type CommunicationDirection,
   type NewCommunicationEvent,
@@ -683,6 +684,52 @@ describe('timeline-repo', () => {
       }
       expect(paged.filter(isMicroEntry)).toHaveLength(5);
     });
+
+    // P1 regression (round 4): the round-3 P1 fix above (audit rows sharing
+    // ONE object's occurred_at) is the case where the old in-memory merge's
+    // tie-break happened to AGREE with the SQL fetch order (both single
+    // object => same sourceTable prefix in every tie string). This test
+    // exercises the ACTUAL finding: audit rows about DIFFERENT objects in
+    // the SAME object graph (the module's own documented routine case --
+    // `now()` is the transaction timestamp, and one command commonly audits
+    // an issue AND a child task/hold in the same transaction) sharing one
+    // microsecond-precision occurred_at. The old tie-break prefixed every
+    // tie with `sourceTable:sourceId:kind` BEFORE the row id, so it ordered
+    // ties by object_table name ('tasks' > 'issues' lexicographically) --
+    // NOT by the audit_events row's own id, which is what
+    // `ORDER BY occurred_at DESC, id DESC` actually uses. Once the
+    // millisecond-truncated combined-cursor `at` collapsed both rows onto
+    // one bucket (same millisecond -- see this suite's other P1 regression
+    // tests on why that truncation is the routine case, not an edge case),
+    // that mismatched tie-break permanently dropped whichever row didn't
+    // match its object-table-name ordering, independent of the rows' real
+    // (random) ids -- reproduced deterministically every run, not
+    // probabilistically.
+    it('P1 regression (round 4): audit entries about DIFFERENT objects (an issue and its own task) sharing one microsecond-precision occurred_at are ALL returned across pages, in exact SQL fetch order', async () => {
+      const owner = await makePerson(handle.db);
+      const { issue } = await makeIssueWithPeople(handle.db, [{ personRefId: owner.id, role: 'owner' }]);
+      const [taskRow] = await handle.db.select({ id: tasks.id }).from(tasks).where(eq(tasks.issueId, issue.id)).limit(1);
+      if (!taskRow) throw new Error('expected an initial task from makeIssueWithPeople');
+
+      await insertAuditEventAt(handle.db, { objectTable: 'issues', objectId: issue.id, action: 'hetero_test' }, '2026-08-04T12:00:00.123456Z');
+      await insertAuditEventAt(handle.db, { objectTable: 'tasks', objectId: taskRow.id, action: 'hetero_test' }, '2026-08-04T12:00:00.123456Z');
+
+      type TimelineEntry = Awaited<ReturnType<typeof timelineRepo.issueTimeline>>['entries'][number];
+      const heteroTitlesOf = (entries: TimelineEntry[]) => new Set(entries.filter((e) => e.title.endsWith('hetero_test')).map((e) => e.title));
+
+      const full = await timelineRepo.issueTimeline(handle.db, { issueId: issue.id, filters: { kinds: ['audit'] }, limit: 1000 });
+      expect(heteroTitlesOf(full.entries)).toEqual(new Set(['Issue hetero_test', 'Task hetero_test']));
+
+      let cursor: string | null = null;
+      const paged: TimelineEntry[] = [];
+      for (let guard = 0; guard < 20; guard++) {
+        const page = await timelineRepo.issueTimeline(handle.db, { issueId: issue.id, filters: { kinds: ['audit'] }, limit: 1, cursor });
+        paged.push(...page.entries);
+        cursor = page.nextCursor;
+        if (!cursor) break;
+      }
+      expect(heteroTitlesOf(paged)).toEqual(new Set(['Issue hetero_test', 'Task hetero_test']));
+    });
   });
 
   describe('personTimeline', () => {
@@ -752,6 +799,43 @@ describe('timeline-repo', () => {
         limit: 100,
       });
       expect(windowed.entries).toHaveLength(1);
+    });
+
+    // P1 regression (round 4): the OTHER trigger from this finding -- no
+    // heterogeneous object graph needed, just three rows from ONE source
+    // (communication_events) sharing a millisecond but differing at
+    // microsecond resolution. comms-repo's own SQL cursor is already
+    // microsecond-exact (round-3 fix), but timeline-repo's TimelineEntry.at
+    // is a JS Date (millisecond resolution): the old merge/cursor logic
+    // compared THAT, collapsing all three onto one `at` bucket and then
+    // ordering/advancing by row id (unrelated to the real occurred_at
+    // order) instead of the true microsecond order, which silently
+    // reordered and dropped rows at a page boundary.
+    it('P1 regression (round 4): communication entries differing only sub-millisecond stay in exact chronological order and none are dropped when paginated', async () => {
+      const person = await makePerson(handle.db);
+      const commA = await insertComm(handle.db, { fromPersonRefId: person.id, occurredAt: new Date(), providerEventId: 'sub-ms-a' });
+      const commB = await insertComm(handle.db, { fromPersonRefId: person.id, occurredAt: new Date(), providerEventId: 'sub-ms-b' });
+      const commC = await insertComm(handle.db, { fromPersonRefId: person.id, occurredAt: new Date(), providerEventId: 'sub-ms-c' });
+      // Force all three onto the SAME millisecond, differing only at
+      // microsecond resolution -- a JS Date cannot represent this, so this
+      // can only be set via a raw SQL literal.
+      await handle.db.execute(sql`update communication_events set occurred_at = '2026-08-04T12:00:00.123900Z'::timestamptz where id = ${commA.id}::uuid`);
+      await handle.db.execute(sql`update communication_events set occurred_at = '2026-08-04T12:00:00.123500Z'::timestamptz where id = ${commB.id}::uuid`);
+      await handle.db.execute(sql`update communication_events set occurred_at = '2026-08-04T12:00:00.123100Z'::timestamptz where id = ${commC.id}::uuid`);
+
+      const full = await timelineRepo.personTimeline(handle.db, { personRefId: person.id, filters: { kinds: ['communication'] }, limit: 1000 });
+      expect(full.entries.map((e) => e.sourceId)).toEqual([commA.id, commB.id, commC.id]);
+
+      let cursor: string | null = null;
+      type TimelineEntry = Awaited<ReturnType<typeof timelineRepo.personTimeline>>['entries'][number];
+      const paged: TimelineEntry[] = [];
+      for (let guard = 0; guard < 20; guard++) {
+        const page = await timelineRepo.personTimeline(handle.db, { personRefId: person.id, filters: { kinds: ['communication'] }, limit: 1, cursor });
+        paged.push(...page.entries);
+        cursor = page.nextCursor;
+        if (!cursor) break;
+      }
+      expect(paged.map((e) => e.sourceId)).toEqual([commA.id, commB.id, commC.id]);
     });
   });
 });
@@ -919,14 +1003,14 @@ describe('NUL byte (U+0000) in free-text filters never reaches the driver', () =
 
   it('comms-repo.listForPerson participantQuery', async () => {
     const person = await makePerson(handle.db);
-    await expect(commsRepo.listForPerson(handle.db, { personRefId: person.id, participantQuery: ' ', limit: 10 })).resolves.not.toThrow();
+    await expect(commsRepo.listForPerson(handle.db, { personRefId: person.id, participantQuery: '\u0000', limit: 10 })).resolves.not.toThrow();
   });
 
   it('comms-repo.listForIssue participantQuery', async () => {
     const owner = await makePerson(handle.db);
     const { issue } = await makeIssueWithPeople(handle.db, [{ personRefId: owner.id, role: 'owner' }]);
     await expect(
-      commsRepo.listForIssue(handle.db, { issueId: issue.id, includeLinkedPeople: false, participantQuery: ' ', limit: 10 }),
+      commsRepo.listForIssue(handle.db, { issueId: issue.id, includeLinkedPeople: false, participantQuery: '\u0000', limit: 10 }),
     ).resolves.not.toThrow();
   });
 
@@ -934,42 +1018,42 @@ describe('NUL byte (U+0000) in free-text filters never reaches the driver', () =
     const owner = await makePerson(handle.db);
     const { issue } = await makeIssueWithPeople(handle.db, [{ personRefId: owner.id, role: 'owner' }]);
     await expect(
-      timelineRepo.issueTimeline(handle.db, { issueId: issue.id, filters: { participantQuery: ' ' }, limit: 10 }),
+      timelineRepo.issueTimeline(handle.db, { issueId: issue.id, filters: { participantQuery: '\u0000' }, limit: 10 }),
     ).resolves.not.toThrow();
   });
 
   it('timeline-repo.personTimeline filters.participantQuery', async () => {
     const person = await makePerson(handle.db);
     await expect(
-      timelineRepo.personTimeline(handle.db, { personRefId: person.id, filters: { participantQuery: ' ' }, limit: 10 }),
+      timelineRepo.personTimeline(handle.db, { personRefId: person.id, filters: { participantQuery: '\u0000' }, limit: 10 }),
     ).resolves.not.toThrow();
   });
 
   it('audit-metrics-repo.recentActivity filters.actor', async () => {
-    await expect(auditMetricsRepo.recentActivity(handle.db, { filters: { actor: ' ' }, limit: 10 })).resolves.not.toThrow();
+    await expect(auditMetricsRepo.recentActivity(handle.db, { filters: { actor: '\u0000' }, limit: 10 })).resolves.not.toThrow();
   });
 
   it('people-repo.searchPeople q (already-hardened baseline, guards against regression)', async () => {
     const { searchPeople } = await import('../lib/repositories/people-repo.ts');
-    await expect(searchPeople(handle.db, { q: ' ' })).resolves.not.toThrow();
+    await expect(searchPeople(handle.db, { q: '\u0000' })).resolves.not.toThrow();
   });
 
   it('issues-query-repo listIssues searchText (already-hardened baseline, guards against regression)', async () => {
     const { listIssues } = await import('../lib/repositories/issues-query-repo.ts');
-    await expect(listIssues(handle.db, { filters: { searchText: ' ' } })).resolves.not.toThrow();
+    await expect(listIssues(handle.db, { filters: { searchText: '\u0000' } })).resolves.not.toThrow();
   });
 
   it('a cursor whose decoded sortValue contains a NUL byte is treated as invalid (page 1), not thrown', async () => {
     const { decodeCursor: decodeIssuesCursor, encodeCursor: encodeIssuesCursor } = await import('../lib/repositories/issues-query-repo.ts');
-    const poisoned = encodeIssuesCursor('abc def', '00000000-0000-0000-0000-000000000000');
+    const poisoned = encodeIssuesCursor('abc\u0000def', '00000000-0000-0000-0000-000000000000');
     expect(decodeIssuesCursor(poisoned)).toBeNull();
   });
 
   it('keyset-cursor.decodeCursor rejects a NUL byte in `at` or `tie`', async () => {
     const { decodeCursor, encodeCursor } = await import('../lib/repositories/keyset-cursor.ts');
     const goodAt = new Date().toISOString();
-    expect(decodeCursor(encodeCursor(`${goodAt} `, 'tie-1'))).toBeNull();
-    expect(decodeCursor(encodeCursor(goodAt, 'tie -1'))).toBeNull();
+    expect(decodeCursor(encodeCursor(`${goodAt}\u0000`, 'tie-1'))).toBeNull();
+    expect(decodeCursor(encodeCursor(goodAt, 'tie\u0000-1'))).toBeNull();
   });
 });
 
@@ -1128,6 +1212,101 @@ describe('P2 regression (round 3): extended-year and year-0000 cursor timestamps
     for (const at of BAD_TIMESTAMPS) {
       const poisoned = encodeCursor(at, '00000000-0000-0000-0000-000000000000');
       await expect(auditMetricsRepo.recentActivity(handle.db, { cursor: poisoned, limit: 10 })).resolves.not.toThrow();
+    }
+  });
+});
+
+// -----------------------------------------------------------------------
+// P2 regression (round 4): the round-3 P2 fix above hardened the CURSOR
+// path (decodeCursor) against these exact payloads, but left the THREE
+// duplicated `sanitizeDateBound` copies (comms-repo.ts, timeline-repo.ts,
+// audit-metrics-repo.ts) — the date-RANGE-FILTER path (fromDate/toDate/
+// from/to) — completely unguarded. `Date.parse('0000-01-01')` and
+// `Date.parse('+275760-09-13T00:00:00.000Z')` both parse fine in JS and
+// round-trip byte-for-byte through `toISOString()`, then reach `gte`/`lte`
+// against a `timestamptz` column and blow up as the identical raw driver
+// error the round-3 fix closed one seam over. This is that gap's coverage,
+// reachable un-authenticated from `/people/<uuid>?from=0000-01-01`,
+// `/issues/<uuid>/timeline?from=0000-01-01`, `/activity?from=0000-01-01`,
+// and `/admin/activity?range=custom&from=0000-01-01`.
+// -----------------------------------------------------------------------
+describe('P2 regression (round 4): extended-year and year-0000 date-RANGE-FILTER bounds never reach the ::timestamptz cast', () => {
+  const YEAR_0000 = '0000-01-01T00:00:00.000Z';
+  const EXTENDED_YEAR_MIN = '+010000-01-01T00:00:00.000Z';
+  const EXTENDED_YEAR_MAX = '+275760-09-13T00:00:00.000Z';
+  const BAD_DATE_BOUNDS = [YEAR_0000, EXTENDED_YEAR_MIN, EXTENDED_YEAR_MAX, '0000-01-01'];
+
+  let handle: TestDbHandle;
+
+  beforeEach(async () => {
+    handle = await createTestDb();
+  });
+
+  afterEach(async () => {
+    await closeTestDb(handle);
+  });
+
+  it('sanity check: every payload is still Date.parse-able (this is what makes the naive `Date.parse` + `new Date()` guard insufficient)', () => {
+    for (const bound of BAD_DATE_BOUNDS) {
+      expect(Number.isNaN(Date.parse(bound))).toBe(false);
+    }
+  });
+
+  it('keyset-cursor.sanitizeDateBound drops every payload (null) rather than a Date that would still reach the ::timestamptz cast', async () => {
+    const { sanitizeDateBound } = await import('../lib/repositories/keyset-cursor.ts');
+    for (const bound of BAD_DATE_BOUNDS) {
+      expect(sanitizeDateBound(bound)).toBeNull();
+    }
+    // A genuinely valid bound still round-trips to a real Date — the fix
+    // only tightens rejection, it does not turn this into "reject everything".
+    expect(sanitizeDateBound('2026-08-04T12:00:00.000Z')).toBeInstanceOf(Date);
+  });
+
+  it('comms-repo.listForPerson: fromDate/toDate never reach the driver (/people/[id])', async () => {
+    const person = await makePerson(handle.db);
+    for (const bound of BAD_DATE_BOUNDS) {
+      await expect(commsRepo.listForPerson(handle.db, { personRefId: person.id, fromDate: bound, limit: 10 })).resolves.not.toThrow();
+      await expect(commsRepo.listForPerson(handle.db, { personRefId: person.id, toDate: bound, limit: 10 })).resolves.not.toThrow();
+    }
+  });
+
+  it('comms-repo.listForIssue: fromDate/toDate never reach the driver', async () => {
+    const owner = await makePerson(handle.db);
+    const { issue } = await makeIssueWithPeople(handle.db, [{ personRefId: owner.id, role: 'owner' }]);
+    for (const bound of BAD_DATE_BOUNDS) {
+      await expect(
+        commsRepo.listForIssue(handle.db, { issueId: issue.id, includeLinkedPeople: false, fromDate: bound, limit: 10 }),
+      ).resolves.not.toThrow();
+    }
+  });
+
+  it('timeline-repo.issueTimeline: filters.fromDate/toDate never reach the driver (/issues/[id]/timeline)', async () => {
+    const owner = await makePerson(handle.db);
+    const { issue } = await makeIssueWithPeople(handle.db, [{ personRefId: owner.id, role: 'owner' }]);
+    for (const bound of BAD_DATE_BOUNDS) {
+      await expect(timelineRepo.issueTimeline(handle.db, { issueId: issue.id, filters: { fromDate: bound }, limit: 10 })).resolves.not.toThrow();
+      await expect(timelineRepo.issueTimeline(handle.db, { issueId: issue.id, filters: { toDate: bound }, limit: 10 })).resolves.not.toThrow();
+    }
+  });
+
+  it('timeline-repo.personTimeline: filters.fromDate/toDate never reach the driver (/people/[id])', async () => {
+    const person = await makePerson(handle.db);
+    for (const bound of BAD_DATE_BOUNDS) {
+      await expect(timelineRepo.personTimeline(handle.db, { personRefId: person.id, filters: { fromDate: bound }, limit: 10 })).resolves.not.toThrow();
+    }
+  });
+
+  it('audit-metrics-repo.activitiesByActor: from/to never reach the driver (/admin/activity)', async () => {
+    for (const bound of BAD_DATE_BOUNDS) {
+      await expect(auditMetricsRepo.activitiesByActor(handle.db, { from: bound })).resolves.not.toThrow();
+      await expect(auditMetricsRepo.activitiesByActor(handle.db, { to: bound })).resolves.not.toThrow();
+    }
+  });
+
+  it('audit-metrics-repo.recentActivity: filters.from/to never reach the driver (/activity)', async () => {
+    for (const bound of BAD_DATE_BOUNDS) {
+      await expect(auditMetricsRepo.recentActivity(handle.db, { filters: { from: bound }, limit: 10 })).resolves.not.toThrow();
+      await expect(auditMetricsRepo.recentActivity(handle.db, { filters: { to: bound }, limit: 10 })).resolves.not.toThrow();
     }
   });
 });

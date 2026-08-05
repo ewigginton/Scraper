@@ -237,8 +237,53 @@ describe('issues-query-repo', () => {
 
       const result = await listIssues(handle.db, { sort: { key: 'priority', direction: 'asc' } });
       const order = result.rows.map((r) => r.issue.id);
-      // Plain text ascending: 'low' < 'normal' < 'urgent'.
+      // Business-rank ascending: low < normal < urgent — coincidentally the
+      // SAME relative order lexicographic comparison would also give for
+      // this particular three-value subset (which is exactly why the round-3
+      // finding's omission of 'high' let the lexicographic-sort bug land;
+      // see the dedicated 'high' regression test below).
       expect(order).toEqual([b.id, c.id, a.id]);
+    });
+
+    // P2 regression (round 4): the round-3 finding's seed set only used
+    // low/normal/urgent — the one three-value subset where lexicographic
+    // ('high' < 'low' < 'normal' < 'urgent') and business-rank order happen
+    // to produce the same relative order for the OTHER three values, so it
+    // never exercised the value that actually broke: 'high' collates
+    // between 'created' and 'low' lexicographically and landed at the
+    // bottom of a descending sort, below 'low'. All four priorities here,
+    // both directions, is what would have caught it.
+    it('priority sorts by business rank (urgent > high > normal > low), not lexicographically', async () => {
+      const low = await makeIssue(handle.db, { priority: 'low' });
+      const normal = await makeIssue(handle.db, { priority: 'normal' });
+      const high = await makeIssue(handle.db, { priority: 'high' });
+      const urgent = await makeIssue(handle.db, { priority: 'urgent' });
+
+      const desc = await listIssues(handle.db, { sort: { key: 'priority', direction: 'desc' } });
+      expect(desc.rows.map((r) => r.issue.id)).toEqual([urgent.id, high.id, normal.id, low.id]);
+
+      const asc = await listIssues(handle.db, { sort: { key: 'priority', direction: 'asc' } });
+      expect(asc.rows.map((r) => r.issue.id)).toEqual([low.id, normal.id, high.id, urgent.id]);
+    });
+
+    // P2 regression (round 4): the keyset cursor for `priority` is minted
+    // from the SAME rank expression the ORDER BY uses (cursorValueExprFor),
+    // so page 2+ must preserve business-rank order too, not just page 1.
+    it('priority sort keyset pagination preserves business-rank order across pages', async () => {
+      const low = await makeIssue(handle.db, { priority: 'low' });
+      const normal = await makeIssue(handle.db, { priority: 'normal' });
+      const high = await makeIssue(handle.db, { priority: 'high' });
+      const urgent = await makeIssue(handle.db, { priority: 'urgent' });
+
+      let cursor: string | null = null;
+      const paged: string[] = [];
+      for (let guard = 0; guard < 10; guard++) {
+        const page = await listIssues(handle.db, { sort: { key: 'priority', direction: 'desc' }, limit: 1, cursor });
+        paged.push(...page.rows.map((r) => r.issue.id));
+        cursor = page.nextCursor;
+        if (!cursor) break;
+      }
+      expect(paged).toEqual([urgent.id, high.id, normal.id, low.id]);
     });
 
     it('sorts by the nullable property_display_name key without erroring on NULL display names', async () => {
