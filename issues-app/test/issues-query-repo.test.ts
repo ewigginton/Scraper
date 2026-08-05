@@ -286,6 +286,43 @@ describe('issues-query-repo', () => {
       expect(paged).toEqual([urgent.id, high.id, normal.id, low.id]);
     });
 
+    // P3 regression (round 5): a cursor minted under one sort, replayed
+    // under a DIFFERENT sort (e.g. a hand-edited/bookmarked/shared /issues
+    // URL that changed `sort=` but kept the old `after=`), must fall back
+    // to page 1 rather than affirmatively returning an EMPTY page.
+    // validCursorForSort's old valueType-shape check only caught this when
+    // the two sorts disagreed on valueType; two TEXT sorts (priority vs
+    // lifecycle_status here) both passed that check, so the stale
+    // `sortValue` -- a PRIORITY_RANK_EXPR digit rank ('4'..'1') -- got
+    // bound as-is into lifecycle_status's keysetPredicate, where every real
+    // lifecycle_status value sorts ABOVE the digit '4', producing zero
+    // rows on a desc replay. See validCursorForSort's doc comment.
+    it('a cursor minted under sort=priority, replayed under sort=lifecycle_status, falls back to the first page rather than returning zero rows', async () => {
+      const low = await makeIssue(handle.db, { priority: 'low', lifecycleStatus: 'intake' });
+      const normal = await makeIssue(handle.db, { priority: 'normal', lifecycleStatus: 'active', coordinatorId: 'alice' });
+      const high = await makeIssue(handle.db, { priority: 'high', lifecycleStatus: 'waiting' });
+      const urgent = await makeIssue(handle.db, { priority: 'urgent', lifecycleStatus: 'blocked' });
+
+      // Mint a real cursor under sort=priority (limit 1, so nextCursor is
+      // guaranteed to be set as long as more than one row matches).
+      const mintedUnderPriority = await listIssues(handle.db, { sort: { key: 'priority', direction: 'desc' }, limit: 1 });
+      expect(mintedUnderPriority.nextCursor).not.toBeNull();
+
+      // Replay that SAME cursor string, but with the URL's sort now
+      // resolved to a different key.
+      const replayedUnderLifecycleStatus = await listIssues(handle.db, {
+        sort: { key: 'lifecycle_status', direction: 'desc' },
+        cursor: mintedUnderPriority.nextCursor,
+      });
+
+      // Must equal an honest, cursor-less first page under lifecycle_status
+      // -- NOT an empty page.
+      const freshFirstPage = await listIssues(handle.db, { sort: { key: 'lifecycle_status', direction: 'desc' } });
+      expect(replayedUnderLifecycleStatus.rows.map((r) => r.issue.id)).toEqual(freshFirstPage.rows.map((r) => r.issue.id));
+      expect(replayedUnderLifecycleStatus.rows.length).toBeGreaterThan(0);
+      expect(replayedUnderLifecycleStatus.rows.map((r) => r.issue.id).sort()).toEqual([low.id, normal.id, high.id, urgent.id].sort());
+    });
+
     it('sorts by the nullable property_display_name key without erroring on NULL display names', async () => {
       const withName = await makeIssue(handle.db, { propertyOverrides: { displayName: 'Zephyr Tract' } });
       const withoutName = await makeIssue(handle.db, { propertyOverrides: { displayName: null } });
@@ -304,6 +341,60 @@ describe('issues-query-repo', () => {
       await makeIssue(handle.db);
       const result = await listIssues(handle.db, { sort: { key: 'priority', direction: 'sideways' } });
       expect(result.sort.direction).toBe('desc');
+    });
+  });
+
+  // P3 regression (round 5): the round-4 priority-rank ORDER BY
+  // (PRIORITY_RANK_EXPR) is correct but made the pre-existing
+  // issues_priority_idx (a plain index on the bare `priority` column)
+  // completely unusable for this sort, forcing a full scan + full sort on
+  // EVERY page (including page 2+ via the keyset predicate, which reads
+  // the same expression). supabase/migrations/20260805100000_issues_
+  // priority_rank_index.sql adds a matching expression index. Verified via
+  // EXPLAIN with `enable_seqscan = off` (the same technique round-4's
+  // adversarial probe Q used): forcing the planner away from a seq scan
+  // proves whether a usable index exists at all — if the plan still shows
+  // "Seq Scan on issues (Disabled: true)", no index matches; if it shows
+  // an Index Scan on issues_priority_rank_idx, the fix is index-assisted.
+  describe('priority sort index (round 5 P3)', () => {
+    it('the priority-rank ORDER BY is satisfied by an Index Scan on issues_priority_rank_idx, not a seq scan + full sort', async () => {
+      await makeIssue(handle.db, { priority: 'low' });
+      await makeIssue(handle.db, { priority: 'normal' });
+      await makeIssue(handle.db, { priority: 'high' });
+      await makeIssue(handle.db, { priority: 'urgent' });
+
+      await handle.client.exec('set enable_seqscan = off;');
+      const [explainResult] = await handle.client.exec(`
+        explain select id, priority
+        from issues
+        order by (case priority when 'urgent' then '4' when 'high' then '3' when 'normal' then '2' else '1' end) desc, id desc
+        limit 1;
+      `);
+      const plan = (explainResult?.rows ?? []).map((row) => Object.values(row as Record<string, unknown>)[0]).join('\n');
+
+      expect(plan).toContain('issues_priority_rank_idx');
+      expect(plan).toMatch(/Index.*Scan/);
+      expect(plan).not.toContain('Seq Scan');
+    });
+
+    it('the keyset predicate for page 2+ of the priority sort is ALSO index-assisted, not just the first page ORDER BY', async () => {
+      await makeIssue(handle.db, { priority: 'low' });
+      await makeIssue(handle.db, { priority: 'normal' });
+      await makeIssue(handle.db, { priority: 'high' });
+      await makeIssue(handle.db, { priority: 'urgent' });
+
+      await handle.client.exec('set enable_seqscan = off;');
+      const [explainResult] = await handle.client.exec(`
+        explain select id, priority
+        from issues
+        where (case priority when 'urgent' then '4' when 'high' then '3' when 'normal' then '2' else '1' end) < '4'
+        order by (case priority when 'urgent' then '4' when 'high' then '3' when 'normal' then '2' else '1' end) desc, id desc
+        limit 1;
+      `);
+      const plan = (explainResult?.rows ?? []).map((row) => Object.values(row as Record<string, unknown>)[0]).join('\n');
+
+      expect(plan).toContain('issues_priority_rank_idx');
+      expect(plan).not.toContain('Seq Scan');
     });
   });
 
@@ -431,10 +522,12 @@ describe('issues-query-repo', () => {
     it('a structurally-valid cursor whose sortValue does not fit the current sort falls back to the first page', async () => {
       await makeIssue(handle.db);
       // A cursor minted for a text sort key (garbage as a timestamp) reused
-      // against the default (timestamp) sort.
-      const bogusTimestampCursor = Buffer.from(JSON.stringify(['not-a-timestamp', '11111111-1111-1111-1111-111111111111'])).toString(
-        'base64url',
-      );
+      // against the default (timestamp) sort. sortKey matches the default
+      // ('updated_at') so this exercises the valueType shape check, not the
+      // round-5 sortKey-mismatch guard (covered separately below).
+      const bogusTimestampCursor = Buffer.from(
+        JSON.stringify(['updated_at', 'not-a-timestamp', '11111111-1111-1111-1111-111111111111']),
+      ).toString('base64url');
       await expect(listIssues(handle.db, { cursor: bogusTimestampCursor })).resolves.toBeDefined();
     });
 
@@ -456,7 +549,7 @@ describe('issues-query-repo', () => {
         '2026-02-30T00:00:00.123456Z',
       ];
       for (const at of badTimestamps) {
-        const poisoned = Buffer.from(JSON.stringify([at, '11111111-1111-1111-1111-111111111111'])).toString('base64url');
+        const poisoned = Buffer.from(JSON.stringify(['updated_at', at, '11111111-1111-1111-1111-111111111111'])).toString('base64url');
         await expect(
           listIssues(handle.db, { cursor: poisoned, sort: { key: 'updated_at', direction: 'desc' } }),
           `expected no throw for sortValue=${at}`,

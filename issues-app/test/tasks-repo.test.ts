@@ -139,4 +139,75 @@ describe('tasks-repo: inboxForUser', () => {
     // without an ORDER BY), and never a row-order-dependent mix.
     expect(inbox.overdue.map((t) => t.dueDate)).toEqual(['2000-01-01', '2000-01-02', '2000-01-03']);
   });
+
+  // P2 regression (round 5): the round-2 fix above made the LIMIT
+  // truncation deterministic by ORDER BY due_date, but the SECOND
+  // ORDER BY column — the due-date tie-break — was the bare
+  // `asc(tasks.priority)` TEXT column, which sorts LEXICOGRAPHICALLY on
+  // the SAME {low, normal, high, urgent} CHECK domain as issues.priority.
+  // ASCII-wise 'high' < 'low' < 'normal' < 'urgent', so within one
+  // due-date group the real order came back `high, low, normal, urgent`
+  // — urgent tasks sorted LAST and would be the first rows a tight
+  // `queueLimit` truncates away. Seeding all FOUR priorities on one due
+  // date (not just three) is what catches this — the finding's own root
+  // cause was a test suite that only ever seeded three.
+  it('P2 regression (round 5): within a due-date tie, queues order by business priority rank (urgent > high > normal > low), not lexicographically', async () => {
+    const property = await makeProperty(handle.db);
+    const sameDueDate = '2030-06-15'; // future date -> lands in `upcoming`, not `overdue`
+    const priorities: Array<'low' | 'normal' | 'high' | 'urgent'> = ['high', 'low', 'normal', 'urgent'];
+    for (const priority of priorities) {
+      await handle.db.insert(tasks).values({
+        propertyRefId: property.id,
+        assigneeId: 'priority-tie-user',
+        title: `task priority=${priority}`,
+        status: 'open',
+        dueDate: sameDueDate,
+        priority,
+      });
+    }
+
+    const inbox = await inboxForUser(handle.db, { assigneeId: 'priority-tie-user', today: '2030-06-01' });
+    expect(inbox.upcoming.map((t) => t.priority)).toEqual(['urgent', 'high', 'normal', 'low']);
+  });
+
+  it('P2 regression (round 5): the SAME business-rank tie-break applies to the overdue queue, where the finding\'s own harm lands (limit truncation dropping urgent tasks first)', async () => {
+    const property = await makeProperty(handle.db);
+    const sameDueDate = '2000-06-15';
+    const priorities: Array<'low' | 'normal' | 'high' | 'urgent'> = ['high', 'low', 'normal', 'urgent'];
+    for (const priority of priorities) {
+      await handle.db.insert(tasks).values({
+        propertyRefId: property.id,
+        assigneeId: 'priority-tie-user-3',
+        title: `overdue task priority=${priority}`,
+        status: 'open',
+        dueDate: sameDueDate,
+        priority,
+      });
+    }
+
+    // A tight limit of 2 -- with the old lexicographic tie-break this would
+    // keep 'high' and 'low' and silently drop 'urgent' entirely.
+    const inbox = await inboxForUser(handle.db, { assigneeId: 'priority-tie-user-3', queueLimit: 2 });
+    expect(inbox.overdue.map((t) => t.priority)).toEqual(['urgent', 'high']);
+  });
+
+  it('P2 regression (round 5): the SAME business-rank tie-break applies to the waitingBlocked queue', async () => {
+    const property = await makeProperty(handle.db);
+    const sameDueDate = '2030-06-15';
+    const priorities: Array<'low' | 'normal' | 'high' | 'urgent'> = ['high', 'low', 'normal', 'urgent'];
+    for (const priority of priorities) {
+      await handle.db.insert(tasks).values({
+        propertyRefId: property.id,
+        assigneeId: 'priority-tie-user-2',
+        title: `waiting task priority=${priority}`,
+        status: 'open',
+        dueDate: sameDueDate,
+        priority,
+        waitingReason: 'awaiting response',
+      });
+    }
+
+    const inbox = await inboxForUser(handle.db, { assigneeId: 'priority-tie-user-2', today: '2030-06-01' });
+    expect(inbox.waitingBlocked.map((t) => t.priority)).toEqual(['urgent', 'high', 'normal', 'low']);
+  });
 });

@@ -11,9 +11,10 @@
  * matches the queue's name, documented per-queue below.
  */
 
-import { and, asc, count, eq, isNotNull, lte, gt, or, sql } from 'drizzle-orm';
+import { and, asc, count, desc, eq, isNotNull, lte, gt, or, sql } from 'drizzle-orm';
 import type { DbHandle } from './db-handle.ts';
 import { businessTodayIso } from '../date/business-today.ts';
+import { priorityRankExpr } from './priority-rank.ts';
 import {
   approvals,
   issues,
@@ -138,6 +139,22 @@ export async function inboxForUser(db: DbHandle, params: InboxForUserParams = {}
   // ordering) even though it does not, on its own, surface a "showing N of
   // M" signal to the caller (see this fix's doc comment for that
   // documented follow-up).
+  //
+  // ROUND-5 FIX (P2): the five `tasks`-shaped queues below (newUnreviewed,
+  // actionDateFollowups, upcoming, overdue, waitingBlocked) used to break
+  // due-date ties with the bare `asc(tasks.priority)` TEXT column, which
+  // sorts LEXICOGRAPHICALLY, not by business importance — tasks.priority
+  // shares issues.priority's exact CHECK domain {low, normal, high,
+  // urgent} (schema.ts:443,470), and ASCII-wise 'high' < 'low' < 'normal' <
+  // 'urgent', so within a due-date group the real order came back
+  // `high, low, normal, urgent`: urgent tasks sorted LAST and were the
+  // first rows this queue's `.limit()` truncation silently dropped. This
+  // is the identical defect the round-4 P2 fix corrected for the /issues
+  // Priority sort, one screen over. `priorityRankExpr` (hoisted out of
+  // issues-query-repo.ts into ./priority-rank.ts so both repos share ONE
+  // mapping instead of two copies that can drift) maps each value to its
+  // business rank (urgent=4 > high=3 > normal=2 > low=1); `desc(...)` puts
+  // the highest rank first within each due-date group.
   const [newUnreviewed, actionDateFollowups, upcoming, overdue, waitingBlocked, noticesDue, pendingApprovals] =
     await Promise.all([
       db
@@ -145,32 +162,32 @@ export async function inboxForUser(db: DbHandle, params: InboxForUserParams = {}
         .from(tasks)
         .innerJoin(issues, eq(tasks.issueId, issues.id))
         .where(withOwner(eq(tasks.status, 'open'), eq(issues.lifecycleStatus, 'intake')))
-        .orderBy(asc(tasks.dueDate), asc(tasks.priority), asc(tasks.id))
+        .orderBy(asc(tasks.dueDate), desc(priorityRankExpr(tasks.priority)), asc(tasks.id))
         .limit(limit)
         .then((rows) => rows.map((r) => r.task)),
       db
         .select()
         .from(tasks)
         .where(withOwner(openStatuses, isNotNull(tasks.actionDate), lte(tasks.actionDate, today)))
-        .orderBy(asc(tasks.dueDate), asc(tasks.priority), asc(tasks.id))
+        .orderBy(asc(tasks.dueDate), desc(priorityRankExpr(tasks.priority)), asc(tasks.id))
         .limit(limit),
       db
         .select()
         .from(tasks)
         .where(withOwner(openStatuses, isNotNull(tasks.dueDate), gt(tasks.dueDate, today), lte(tasks.dueDate, upcomingUntil)))
-        .orderBy(asc(tasks.dueDate), asc(tasks.priority), asc(tasks.id))
+        .orderBy(asc(tasks.dueDate), desc(priorityRankExpr(tasks.priority)), asc(tasks.id))
         .limit(limit),
       db
         .select()
         .from(tasks)
         .where(withOwner(openStatuses, isNotNull(tasks.dueDate), lte(tasks.dueDate, today)))
-        .orderBy(asc(tasks.dueDate), asc(tasks.priority), asc(tasks.id))
+        .orderBy(asc(tasks.dueDate), desc(priorityRankExpr(tasks.priority)), asc(tasks.id))
         .limit(limit),
       db
         .select()
         .from(tasks)
         .where(withOwner(openStatuses, or(isNotNull(tasks.waitingReason), isNotNull(tasks.waitingParty))))
-        .orderBy(asc(tasks.dueDate), asc(tasks.priority), asc(tasks.id))
+        .orderBy(asc(tasks.dueDate), desc(priorityRankExpr(tasks.priority)), asc(tasks.id))
         .limit(limit),
       db
         .select({ notice: notices })

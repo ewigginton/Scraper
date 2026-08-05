@@ -18,6 +18,7 @@ import type { DbHandle } from './db-handle.ts';
 import { businessTodayIso } from '../date/business-today.ts';
 import { containsNulByte, sanitizeText } from './id-guard.ts';
 import { cursorTimestampExpr, isValidCursorTimestamp } from './keyset-cursor.ts';
+import { priorityRankExpr } from './priority-rank.ts';
 import {
   issues,
   propertyRefs,
@@ -249,8 +250,18 @@ interface SortColumnSpec {
  * via cursorValueExprFor) and the WHERE predicate (keysetPredicate, which
  * also reads this same expr) automatically agree with the ORDER BY on page
  * 2+, exactly like every other sort key in this allowlist.
+ *
+ * ROUND-5 FIX (P2): hoisted into ./priority-rank.ts, column-parameterized,
+ * so tasks-repo.ts's inboxForUser queues (identical lexicographic defect on
+ * tasks.priority, same domain) sort by the SAME expression instead of
+ * re-deriving their own copy. See priority-rank.ts's doc comment.
+ *
+ * ROUND-5 FIX (P3): matched by a new expression index
+ * (supabase/migrations/20260805100000_issues_priority_rank_index.sql) so
+ * this sort stays index-assisted — the expression here and the index's
+ * expression must stay byte-identical; see priority-rank.ts's doc comment.
  */
-const PRIORITY_RANK_EXPR = sql`case ${issues.priority} when 'urgent' then '4' when 'high' then '3' when 'normal' then '2' else '1' end`;
+const PRIORITY_RANK_EXPR = priorityRankExpr(issues.priority);
 
 const SORT_ALLOWLIST: Record<SortKey, SortColumnSpec> = {
   updated_at: { expr: sql`${issues.updatedAt}`, nullable: false, valueType: 'timestamp' },
