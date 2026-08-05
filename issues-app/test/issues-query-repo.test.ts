@@ -1,0 +1,646 @@
+/**
+ * issues-query-repo.test.ts — coverage for lib/repositories/issues-query-repo.ts
+ * (docs/notion-redesign.md "Scale work" §1-2): filters, sort (incl. the
+ * literal-allowlist fallback for hostile input), free-text search, keyset
+ * pagination (incl. stability under concurrent inserts), and countIssues
+ * matching listIssues' true total.
+ */
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { sql } from 'drizzle-orm';
+import {
+  countIssues,
+  DEFAULT_SORT,
+  listIssues,
+  type IssueListRow,
+} from '../lib/repositories/issues-query-repo.ts';
+import { issuePeople, issues, type Issue, type NewIssue, type NewPropertyRef } from '../lib/db/schema.ts';
+import { closeTestDb, createTestDb, type TestDb, type TestDbHandle } from './helpers/pglite.ts';
+import { makePerson, makeProperty } from './helpers/fixtures.ts';
+
+let counter = 0;
+
+async function makeIssue(
+  db: TestDb,
+  overrides: Partial<NewIssue> & { propertyOverrides?: Partial<NewPropertyRef> } = {},
+): Promise<Issue> {
+  counter += 1;
+  const { propertyOverrides, propertyRefId, ...issueOverrides } = overrides;
+  const resolvedPropertyRefId = propertyRefId ?? (await makeProperty(db, propertyOverrides)).id;
+  const [row] = await db
+    .insert(issues)
+    .values({
+      issueType: 'default_recovery',
+      propertyRefId: resolvedPropertyRefId,
+      summary: `Test issue ${counter}`,
+      priority: 'normal',
+      lifecycleStatus: 'intake',
+      ...issueOverrides,
+    })
+    .returning();
+  if (!row) throw new Error('makeIssue: insert returned no row');
+  return row;
+}
+
+describe('issues-query-repo', () => {
+  let handle: TestDbHandle;
+
+  beforeEach(async () => {
+    handle = await createTestDb();
+  });
+
+  afterEach(async () => {
+    await closeTestDb(handle);
+  });
+
+  describe('filters', () => {
+    it('issueTypes narrows to the matching types', async () => {
+      await makeIssue(handle.db, { issueType: 'default_recovery' });
+      await makeIssue(handle.db, { issueType: 'covenant_violation' });
+      const result = await listIssues(handle.db, { filters: { issueTypes: ['covenant_violation'] } });
+      expect(result.rows).toHaveLength(1);
+      expect(result.rows[0]?.issue.issueType).toBe('covenant_violation');
+    });
+
+    it('lifecycleStatuses narrows to the matching statuses', async () => {
+      await makeIssue(handle.db, { lifecycleStatus: 'intake' });
+      await makeIssue(handle.db, { lifecycleStatus: 'active', coordinatorId: 'alice' });
+      const result = await listIssues(handle.db, { filters: { lifecycleStatuses: ['active'] } });
+      expect(result.rows).toHaveLength(1);
+      expect(result.rows[0]?.issue.lifecycleStatus).toBe('active');
+    });
+
+    it('priorities narrows to the matching priorities', async () => {
+      await makeIssue(handle.db, { priority: 'urgent' });
+      await makeIssue(handle.db, { priority: 'low' });
+      const result = await listIssues(handle.db, { filters: { priorities: ['urgent'] } });
+      expect(result.rows).toHaveLength(1);
+      expect(result.rows[0]?.issue.priority).toBe('urgent');
+    });
+
+    it('states narrows via the joined property_refs.state', async () => {
+      await makeIssue(handle.db, { propertyOverrides: { state: 'TX' } });
+      await makeIssue(handle.db, { propertyOverrides: { state: 'OK' } });
+      const result = await listIssues(handle.db, { filters: { states: ['OK'] } });
+      expect(result.rows).toHaveLength(1);
+      expect(result.rows[0]?.property.state).toBe('OK');
+    });
+
+    it('coordinatorOrQueue matches EITHER coordinator_id OR queue', async () => {
+      const byCoordinator = await makeIssue(handle.db, { coordinatorId: 'alice', lifecycleStatus: 'active' });
+      const byQueue = await makeIssue(handle.db, { queue: 'legal_queue' });
+      await makeIssue(handle.db, { coordinatorId: 'bob', lifecycleStatus: 'active' });
+
+      const result = await listIssues(handle.db, { filters: { coordinatorOrQueue: 'alice' } });
+      expect(result.rows.map((r) => r.issue.id)).toEqual([byCoordinator.id]);
+
+      const result2 = await listIssues(handle.db, { filters: { coordinatorOrQueue: 'legal_queue' } });
+      expect(result2.rows.map((r) => r.issue.id)).toEqual([byQueue.id]);
+    });
+
+    it('overdueOnly matches issues with an open/in_progress task past due_date, not issues with no overdue task', async () => {
+      const overdue = await makeIssue(handle.db);
+      const notOverdue = await makeIssue(handle.db);
+      await handle.client.exec(`
+        insert into tasks (issue_id, assignee_id, title, status, due_date)
+        values ('${overdue.id}', 'bulk-user', 'Overdue task', 'open', '2000-01-01')
+      `);
+      await handle.client.exec(`
+        insert into tasks (issue_id, assignee_id, title, status, due_date)
+        values ('${notOverdue.id}', 'bulk-user', 'Future task', 'open', '2999-01-01')
+      `);
+
+      const result = await listIssues(handle.db, { filters: { overdueOnly: true }, today: '2026-01-01' });
+      expect(result.rows.map((r) => r.issue.id)).toEqual([overdue.id]);
+    });
+
+    it('combining filters ANDs them together', async () => {
+      const match = await makeIssue(handle.db, { issueType: 'covenant_violation', priority: 'urgent' });
+      await makeIssue(handle.db, { issueType: 'covenant_violation', priority: 'low' });
+      await makeIssue(handle.db, { issueType: 'default_recovery', priority: 'urgent' });
+
+      const result = await listIssues(handle.db, {
+        filters: { issueTypes: ['covenant_violation'], priorities: ['urgent'] },
+      });
+      expect(result.rows.map((r) => r.issue.id)).toEqual([match.id]);
+    });
+  });
+
+  describe('search', () => {
+    it('matches via summary full-text OR property display_name ILIKE prefix', async () => {
+      const viaSummary = await makeIssue(handle.db, {
+        summary: 'Vacant lot needs mowing before listing',
+        propertyOverrides: { displayName: 'Oak Ridge Lot 12' },
+      });
+      const viaDisplayName = await makeIssue(handle.db, {
+        summary: 'Fence repair requested by neighbor',
+        propertyOverrides: { displayName: 'Vacant Meadow Tract' },
+      });
+      await makeIssue(handle.db, {
+        summary: 'Unrelated buyer cleanup case',
+        propertyOverrides: { displayName: 'Sunset Ranch' },
+      });
+
+      const result = await listIssues(handle.db, { filters: { searchText: 'vacant' } });
+      const ids = result.rows.map((r) => r.issue.id).sort();
+      expect(ids).toEqual([viaSummary.id, viaDisplayName.id].sort());
+    });
+
+    it('a hostile search string is safely parameterized (no throw, no match)', async () => {
+      await makeIssue(handle.db, { summary: 'Ordinary case' });
+      await expect(
+        listIssues(handle.db, { filters: { searchText: "'; drop table issues; --" } }),
+      ).resolves.toBeDefined();
+      const result = await listIssues(handle.db, { filters: { searchText: "'; drop table issues; --" } });
+      expect(result.rows).toHaveLength(0);
+    });
+  });
+
+  describe('search expansion (spec §15: person, phone/email, development/tract)', () => {
+    it('matches via a linked person\'s display_name', async () => {
+      const owner = await makePerson(handle.db, { displayName: 'Reginald Ashworth-Pemberton' });
+      const withPerson = await makeIssue(handle.db, { summary: 'Unrelated summary text' });
+      await handle.db.insert(issuePeople).values({ issueId: withPerson.id, personRefId: owner.id, role: 'owner' });
+      await makeIssue(handle.db, { summary: 'A different case entirely' });
+
+      const result = await listIssues(handle.db, { filters: { searchText: 'ashworth-pemberton' } });
+      expect(result.rows.map((r) => r.issue.id)).toEqual([withPerson.id]);
+    });
+
+    it('matches via a linked person\'s contact_snapshot phone', async () => {
+      const buyer = await makePerson(handle.db, { displayName: 'Someone Else', contactSnapshot: { phone: '555-0199-unique' } });
+      const withPhone = await makeIssue(handle.db, { summary: 'Case with a buyer' });
+      await handle.db.insert(issuePeople).values({ issueId: withPhone.id, personRefId: buyer.id, role: 'buyer' });
+      await makeIssue(handle.db, { summary: 'Case without a linked buyer' });
+
+      const result = await listIssues(handle.db, { filters: { searchText: '555-0199' } });
+      expect(result.rows.map((r) => r.issue.id)).toEqual([withPhone.id]);
+    });
+
+    it('matches via a linked person\'s contact_snapshot email', async () => {
+      const vendor = await makePerson(handle.db, { displayName: 'Vendor Co', kind: 'org', contactSnapshot: { email: 'unique-vendor@example.com' } });
+      const withEmail = await makeIssue(handle.db, { summary: 'Case with a vendor' });
+      await handle.db.insert(issuePeople).values({ issueId: withEmail.id, personRefId: vendor.id, role: 'vendor' });
+      await makeIssue(handle.db, { summary: 'Case without a linked vendor' });
+
+      const result = await listIssues(handle.db, { filters: { searchText: 'unique-vendor@example.com' } });
+      expect(result.rows.map((r) => r.issue.id)).toEqual([withEmail.id]);
+    });
+
+    it('matches via property development/tract ILIKE prefix', async () => {
+      const viaDevelopment = await makeIssue(handle.db, { propertyOverrides: { development: 'Whispering Pines Estates' } });
+      const viaTract = await makeIssue(handle.db, { propertyOverrides: { tract: 'Tractwood Ridge 7' } });
+      await makeIssue(handle.db, { propertyOverrides: { development: 'Unrelated Development', tract: 'Unrelated Tract' } });
+
+      const byDevelopment = await listIssues(handle.db, { filters: { searchText: 'Whispering' } });
+      expect(byDevelopment.rows.map((r) => r.issue.id)).toEqual([viaDevelopment.id]);
+
+      const byTract = await listIssues(handle.db, { filters: { searchText: 'Tractwood' } });
+      expect(byTract.rows.map((r) => r.issue.id)).toEqual([viaTract.id]);
+    });
+
+    it('stays bounded (LIMIT respected) even when the search matches via the person EXISTS subquery', async () => {
+      const shared = await makePerson(handle.db, { displayName: 'Prolific Caller', contactSnapshot: { phone: '555-shared' } });
+      for (let i = 0; i < 5; i += 1) {
+        const issue = await makeIssue(handle.db, { summary: `Case ${i}` });
+        await handle.db.insert(issuePeople).values({ issueId: issue.id, personRefId: shared.id, role: 'other' });
+      }
+
+      const result = await listIssues(handle.db, { filters: { searchText: '555-shared' }, limit: 2 });
+      expect(result.rows).toHaveLength(2);
+      expect(result.nextCursor).not.toBeNull();
+    });
+
+    it('a hostile search string against the person/phone/email/tract match is safely parameterized (no throw, no match)', async () => {
+      await makeIssue(handle.db, { propertyOverrides: { development: 'Safe Development', tract: 'Safe Tract' } });
+      const hostile = "'; drop table person_refs; --";
+      await expect(listIssues(handle.db, { filters: { searchText: hostile } })).resolves.toBeDefined();
+      const result = await listIssues(handle.db, { filters: { searchText: hostile } });
+      expect(result.rows).toHaveLength(0);
+    });
+  });
+
+  describe('sort', () => {
+    it('defaults to updated_at desc, id desc when no sort is given', async () => {
+      const a = await makeIssue(handle.db, { updatedAt: new Date('2026-01-01T00:00:00Z') });
+      const b = await makeIssue(handle.db, { updatedAt: new Date('2026-01-03T00:00:00Z') });
+      const c = await makeIssue(handle.db, { updatedAt: new Date('2026-01-02T00:00:00Z') });
+
+      const result = await listIssues(handle.db);
+      expect(result.sort).toEqual(DEFAULT_SORT);
+      expect(result.rows.map((r) => r.issue.id)).toEqual([b.id, c.id, a.id]);
+    });
+
+    it('sorts by an allowlisted key, ascending', async () => {
+      const a = await makeIssue(handle.db, { priority: 'urgent' });
+      const b = await makeIssue(handle.db, { priority: 'low' });
+      const c = await makeIssue(handle.db, { priority: 'normal' });
+
+      const result = await listIssues(handle.db, { sort: { key: 'priority', direction: 'asc' } });
+      const order = result.rows.map((r) => r.issue.id);
+      // Business-rank ascending: low < normal < urgent — coincidentally the
+      // SAME relative order lexicographic comparison would also give for
+      // this particular three-value subset (which is exactly why the round-3
+      // finding's omission of 'high' let the lexicographic-sort bug land;
+      // see the dedicated 'high' regression test below).
+      expect(order).toEqual([b.id, c.id, a.id]);
+    });
+
+    // P2 regression (round 4): the round-3 finding's seed set only used
+    // low/normal/urgent — the one three-value subset where lexicographic
+    // ('high' < 'low' < 'normal' < 'urgent') and business-rank order happen
+    // to produce the same relative order for the OTHER three values, so it
+    // never exercised the value that actually broke: 'high' collates
+    // between 'created' and 'low' lexicographically and landed at the
+    // bottom of a descending sort, below 'low'. All four priorities here,
+    // both directions, is what would have caught it.
+    it('priority sorts by business rank (urgent > high > normal > low), not lexicographically', async () => {
+      const low = await makeIssue(handle.db, { priority: 'low' });
+      const normal = await makeIssue(handle.db, { priority: 'normal' });
+      const high = await makeIssue(handle.db, { priority: 'high' });
+      const urgent = await makeIssue(handle.db, { priority: 'urgent' });
+
+      const desc = await listIssues(handle.db, { sort: { key: 'priority', direction: 'desc' } });
+      expect(desc.rows.map((r) => r.issue.id)).toEqual([urgent.id, high.id, normal.id, low.id]);
+
+      const asc = await listIssues(handle.db, { sort: { key: 'priority', direction: 'asc' } });
+      expect(asc.rows.map((r) => r.issue.id)).toEqual([low.id, normal.id, high.id, urgent.id]);
+    });
+
+    // P2 regression (round 4): the keyset cursor for `priority` is minted
+    // from the SAME rank expression the ORDER BY uses (cursorValueExprFor),
+    // so page 2+ must preserve business-rank order too, not just page 1.
+    it('priority sort keyset pagination preserves business-rank order across pages', async () => {
+      const low = await makeIssue(handle.db, { priority: 'low' });
+      const normal = await makeIssue(handle.db, { priority: 'normal' });
+      const high = await makeIssue(handle.db, { priority: 'high' });
+      const urgent = await makeIssue(handle.db, { priority: 'urgent' });
+
+      let cursor: string | null = null;
+      const paged: string[] = [];
+      for (let guard = 0; guard < 10; guard++) {
+        const page = await listIssues(handle.db, { sort: { key: 'priority', direction: 'desc' }, limit: 1, cursor });
+        paged.push(...page.rows.map((r) => r.issue.id));
+        cursor = page.nextCursor;
+        if (!cursor) break;
+      }
+      expect(paged).toEqual([urgent.id, high.id, normal.id, low.id]);
+    });
+
+    // P3 regression (round 5): a cursor minted under one sort, replayed
+    // under a DIFFERENT sort (e.g. a hand-edited/bookmarked/shared /issues
+    // URL that changed `sort=` but kept the old `after=`), must fall back
+    // to page 1 rather than affirmatively returning an EMPTY page.
+    // validCursorForSort's old valueType-shape check only caught this when
+    // the two sorts disagreed on valueType; two TEXT sorts (priority vs
+    // lifecycle_status here) both passed that check, so the stale
+    // `sortValue` -- a PRIORITY_RANK_EXPR digit rank ('4'..'1') -- got
+    // bound as-is into lifecycle_status's keysetPredicate, where every real
+    // lifecycle_status value sorts ABOVE the digit '4', producing zero
+    // rows on a desc replay. See validCursorForSort's doc comment.
+    it('a cursor minted under sort=priority, replayed under sort=lifecycle_status, falls back to the first page rather than returning zero rows', async () => {
+      const low = await makeIssue(handle.db, { priority: 'low', lifecycleStatus: 'intake' });
+      const normal = await makeIssue(handle.db, { priority: 'normal', lifecycleStatus: 'active', coordinatorId: 'alice' });
+      const high = await makeIssue(handle.db, { priority: 'high', lifecycleStatus: 'waiting' });
+      const urgent = await makeIssue(handle.db, { priority: 'urgent', lifecycleStatus: 'blocked' });
+
+      // Mint a real cursor under sort=priority (limit 1, so nextCursor is
+      // guaranteed to be set as long as more than one row matches).
+      const mintedUnderPriority = await listIssues(handle.db, { sort: { key: 'priority', direction: 'desc' }, limit: 1 });
+      expect(mintedUnderPriority.nextCursor).not.toBeNull();
+
+      // Replay that SAME cursor string, but with the URL's sort now
+      // resolved to a different key.
+      const replayedUnderLifecycleStatus = await listIssues(handle.db, {
+        sort: { key: 'lifecycle_status', direction: 'desc' },
+        cursor: mintedUnderPriority.nextCursor,
+      });
+
+      // Must equal an honest, cursor-less first page under lifecycle_status
+      // -- NOT an empty page.
+      const freshFirstPage = await listIssues(handle.db, { sort: { key: 'lifecycle_status', direction: 'desc' } });
+      expect(replayedUnderLifecycleStatus.rows.map((r) => r.issue.id)).toEqual(freshFirstPage.rows.map((r) => r.issue.id));
+      expect(replayedUnderLifecycleStatus.rows.length).toBeGreaterThan(0);
+      expect(replayedUnderLifecycleStatus.rows.map((r) => r.issue.id).sort()).toEqual([low.id, normal.id, high.id, urgent.id].sort());
+    });
+
+    // ROUND-6 regression (adversarial round 5's one survivor): binding the
+    // cursor to sortKey alone left the DIRECTION flip open — a desc-minted
+    // cursor replayed under asc inverts the keyset predicate and returns an
+    // affirmatively empty page on every sort key (the adversary reproduced
+    // 12/12: 6 keys x both flips). The cursor now also carries its minted
+    // direction and is discarded (page-1 fallback) on any mismatch. This
+    // test codifies that exact 12-case matrix.
+    it('a cursor replayed with the sort DIRECTION flipped falls back to the first page on every sort key, both directions', async () => {
+      await makeIssue(handle.db, { priority: 'low', lifecycleStatus: 'intake' });
+      await makeIssue(handle.db, { priority: 'normal', lifecycleStatus: 'active', coordinatorId: 'alice' });
+      await makeIssue(handle.db, { priority: 'high', lifecycleStatus: 'waiting' });
+      await makeIssue(handle.db, { priority: 'urgent', lifecycleStatus: 'blocked' });
+
+      const sortKeys = ['updated_at', 'created_at', 'priority', 'issue_type', 'lifecycle_status', 'property_display_name'] as const;
+      for (const key of sortKeys) {
+        for (const minted of ['asc', 'desc'] as const) {
+          const flipped = minted === 'asc' ? 'desc' : 'asc';
+          const first = await listIssues(handle.db, { sort: { key, direction: minted }, limit: 1 });
+          expect(first.nextCursor, `${key} ${minted}: nextCursor should exist`).not.toBeNull();
+
+          const replayed = await listIssues(handle.db, {
+            sort: { key, direction: flipped },
+            cursor: first.nextCursor,
+          });
+          const fresh = await listIssues(handle.db, { sort: { key, direction: flipped } });
+          expect(
+            replayed.rows.map((r) => r.issue.id),
+            `${key}: ${minted}-minted cursor replayed under ${flipped} must equal the cursor-less first page`,
+          ).toEqual(fresh.rows.map((r) => r.issue.id));
+          expect(replayed.rows.length, `${key} ${minted}->${flipped}: page must not be empty`).toBeGreaterThan(0);
+        }
+      }
+    });
+
+    it('sorts by the nullable property_display_name key without erroring on NULL display names', async () => {
+      const withName = await makeIssue(handle.db, { propertyOverrides: { displayName: 'Zephyr Tract' } });
+      const withoutName = await makeIssue(handle.db, { propertyOverrides: { displayName: null } });
+
+      const result = await listIssues(handle.db, { sort: { key: 'property_display_name', direction: 'asc' } });
+      expect(result.rows.map((r) => r.issue.id)).toEqual([withoutName.id, withName.id]);
+    });
+
+    it('an unrecognized sort key falls back to the default sort key rather than throwing', async () => {
+      await makeIssue(handle.db);
+      const result = await listIssues(handle.db, { sort: { key: "id; drop table issues; --" } });
+      expect(result.sort).toEqual(DEFAULT_SORT);
+    });
+
+    it('an unrecognized sort direction falls back to the default direction rather than throwing', async () => {
+      await makeIssue(handle.db);
+      const result = await listIssues(handle.db, { sort: { key: 'priority', direction: 'sideways' } });
+      expect(result.sort.direction).toBe('desc');
+    });
+  });
+
+  // P3 regression (round 5): the round-4 priority-rank ORDER BY
+  // (PRIORITY_RANK_EXPR) is correct but made the pre-existing
+  // issues_priority_idx (a plain index on the bare `priority` column)
+  // completely unusable for this sort, forcing a full scan + full sort on
+  // EVERY page (including page 2+ via the keyset predicate, which reads
+  // the same expression). supabase/migrations/20260805100000_issues_
+  // priority_rank_index.sql adds a matching expression index. Verified via
+  // EXPLAIN with `enable_seqscan = off` (the same technique round-4's
+  // adversarial probe Q used): forcing the planner away from a seq scan
+  // proves whether a usable index exists at all — if the plan still shows
+  // "Seq Scan on issues (Disabled: true)", no index matches; if it shows
+  // an Index Scan on issues_priority_rank_idx, the fix is index-assisted.
+  describe('priority sort index (round 5 P3)', () => {
+    it('the priority-rank ORDER BY is satisfied by an Index Scan on issues_priority_rank_idx, not a seq scan + full sort', async () => {
+      await makeIssue(handle.db, { priority: 'low' });
+      await makeIssue(handle.db, { priority: 'normal' });
+      await makeIssue(handle.db, { priority: 'high' });
+      await makeIssue(handle.db, { priority: 'urgent' });
+
+      await handle.client.exec('set enable_seqscan = off;');
+      const [explainResult] = await handle.client.exec(`
+        explain select id, priority
+        from issues
+        order by (case priority when 'urgent' then '4' when 'high' then '3' when 'normal' then '2' else '1' end) desc, id desc
+        limit 1;
+      `);
+      const plan = (explainResult?.rows ?? []).map((row) => Object.values(row as Record<string, unknown>)[0]).join('\n');
+
+      expect(plan).toContain('issues_priority_rank_idx');
+      expect(plan).toMatch(/Index.*Scan/);
+      expect(plan).not.toContain('Seq Scan');
+    });
+
+    it('the keyset predicate for page 2+ of the priority sort is ALSO index-assisted, not just the first page ORDER BY', async () => {
+      await makeIssue(handle.db, { priority: 'low' });
+      await makeIssue(handle.db, { priority: 'normal' });
+      await makeIssue(handle.db, { priority: 'high' });
+      await makeIssue(handle.db, { priority: 'urgent' });
+
+      await handle.client.exec('set enable_seqscan = off;');
+      const [explainResult] = await handle.client.exec(`
+        explain select id, priority
+        from issues
+        where (case priority when 'urgent' then '4' when 'high' then '3' when 'normal' then '2' else '1' end) < '4'
+        order by (case priority when 'urgent' then '4' when 'high' then '3' when 'normal' then '2' else '1' end) desc, id desc
+        limit 1;
+      `);
+      const plan = (explainResult?.rows ?? []).map((row) => Object.values(row as Record<string, unknown>)[0]).join('\n');
+
+      expect(plan).toContain('issues_priority_rank_idx');
+      expect(plan).not.toContain('Seq Scan');
+    });
+  });
+
+  describe('pagination', () => {
+    it('paginates via keyset cursor, "Load next" style, covering every row exactly once', async () => {
+      const created: Issue[] = [];
+      for (let i = 0; i < 5; i += 1) {
+        created.push(await makeIssue(handle.db, { updatedAt: new Date(Date.UTC(2026, 0, 10 - i)) }));
+      }
+      // Descending updated_at: created[0] newest ... created[4] oldest.
+
+      const page1 = await listIssues(handle.db, { limit: 2 });
+      expect(page1.rows.map((r) => r.issue.id)).toEqual([created[0]!.id, created[1]!.id]);
+      expect(page1.nextCursor).not.toBeNull();
+
+      const page2 = await listIssues(handle.db, { limit: 2, cursor: page1.nextCursor });
+      expect(page2.rows.map((r) => r.issue.id)).toEqual([created[2]!.id, created[3]!.id]);
+      expect(page2.nextCursor).not.toBeNull();
+
+      const page3 = await listIssues(handle.db, { limit: 2, cursor: page2.nextCursor });
+      expect(page3.rows.map((r) => r.issue.id)).toEqual([created[4]!.id]);
+      expect(page3.nextCursor).toBeNull();
+    });
+
+    it('keyset pagination is stable under concurrent inserts: no skipped or duplicated rows across pages', async () => {
+      const created: Issue[] = [];
+      for (let i = 0; i < 5; i += 1) {
+        created.push(await makeIssue(handle.db, { updatedAt: new Date(Date.UTC(2026, 0, 20 - i * 2)) }));
+      }
+      // created[0]=Jan20 (newest) ... created[4]=Jan12 (oldest), desc order.
+
+      const page1 = await listIssues(handle.db, { limit: 2 });
+      expect(page1.rows.map((r) => r.issue.id)).toEqual([created[0]!.id, created[1]!.id]);
+
+      // Simulate a new issue arriving between page loads, sorting BEFORE the
+      // cursor boundary (i.e. it would land on page 1 if refetched from
+      // scratch) — it must not leak into page 2, and must not push a
+      // legitimate page-2 row out.
+      const inserted = await makeIssue(handle.db, { updatedAt: new Date(Date.UTC(2026, 0, 19)) });
+      // And one sorting AFTER everything already fetched, which must not
+      // cause page 2 to skip anything either.
+      const insertedOld = await makeIssue(handle.db, { updatedAt: new Date(Date.UTC(2026, 0, 1)) });
+
+      const page2 = await listIssues(handle.db, { limit: 2, cursor: page1.nextCursor });
+      expect(page2.rows.map((r) => r.issue.id)).toEqual([created[2]!.id, created[3]!.id]);
+      expect(page2.rows.map((r) => r.issue.id)).not.toContain(inserted.id);
+
+      const page3 = await listIssues(handle.db, { limit: 2, cursor: page2.nextCursor });
+      // Two rows remain after the created[3] boundary: created[4] (Jan 12)
+      // and insertedOld (Jan 1, older still) — both correctly belong on
+      // this page under desc order; insertedOld arriving after page 1/2
+      // were already fetched does not cause anything to be skipped.
+      expect(page3.rows.map((r) => r.issue.id)).toEqual([created[4]!.id, insertedOld.id]);
+      expect(page3.nextCursor).toBeNull();
+
+      // Refetching from scratch now sees all 7 rows, with `inserted` between
+      // created[0] and created[1], confirming pages 1-3 above were a
+      // consistent snapshot of the original 5, not a corrupted mix.
+      const fresh = await listIssues(handle.db, { limit: 10 });
+      expect(fresh.rows.map((r) => r.issue.id)).toEqual([
+        created[0]!.id,
+        inserted.id,
+        created[1]!.id,
+        created[2]!.id,
+        created[3]!.id,
+        created[4]!.id,
+        insertedOld.id,
+      ]);
+    });
+
+    // -----------------------------------------------------------------
+    // P1 regression (round 3): keyset cursors used to be minted from
+    // `row.issue.createdAt.toISOString()` (millisecond resolution) while
+    // created_at is `timestamptz` (microsecond resolution) — a boundary
+    // row whose timestamp carried a non-zero sub-millisecond component was
+    // silently truncated out of the cursor, excluding every remaining row
+    // sharing that microsecond value AND reporting the feed complete
+    // (nextCursor null). The two tests above use whole-day-apart
+    // timestamps and therefore cannot catch this — this test forces
+    // several issues onto the SAME microsecond-precision created_at, the
+    // routine production case (`created_at` defaults `now()`, the
+    // transaction timestamp, so any bulk import/seed/backfill produces
+    // ties).
+    // -----------------------------------------------------------------
+    it('P1 regression: rows sharing one microsecond-precision created_at are ALL returned across pages, not silently dropped at the page boundary', async () => {
+      const created: Issue[] = [];
+      for (let i = 0; i < 5; i += 1) {
+        created.push(await makeIssue(handle.db));
+      }
+      // Force every row onto one shared, sub-millisecond-precision instant
+      // — the exact case a JS Date (millisecond resolution) cannot
+      // represent, so this can only be set via a raw SQL literal.
+      await handle.db.execute(
+        sql`update issues set created_at = '2026-08-04T12:00:00.123456Z'::timestamptz where id in (${sql.join(
+          created.map((c) => sql`${c.id}::uuid`),
+          sql`, `,
+        )})`,
+      );
+
+      const full = await listIssues(handle.db, { sort: { key: 'created_at', direction: 'desc' }, limit: 100 });
+      expect(full.rows).toHaveLength(5);
+
+      let cursor: string | null = null;
+      const paged: typeof full.rows = [];
+      for (let guard = 0; guard < 20; guard++) {
+        const page = await listIssues(handle.db, { sort: { key: 'created_at', direction: 'desc' }, limit: 2, cursor });
+        paged.push(...page.rows);
+        cursor = page.nextCursor;
+        if (!cursor) break;
+      }
+      expect(paged.map((r) => r.issue.id).sort()).toEqual(full.rows.map((r) => r.issue.id).sort());
+      expect(paged).toHaveLength(5);
+    });
+
+    it('a malformed cursor (garbage base64/JSON) falls back to the first page rather than throwing', async () => {
+      const a = await makeIssue(handle.db, { updatedAt: new Date('2026-01-02T00:00:00Z') });
+      const b = await makeIssue(handle.db, { updatedAt: new Date('2026-01-01T00:00:00Z') });
+
+      const withGarbage = await listIssues(handle.db, { cursor: 'not-valid-base64url-json!!!' });
+      const withNoCursor = await listIssues(handle.db);
+      expect(withGarbage.rows.map((r: IssueListRow) => r.issue.id)).toEqual(withNoCursor.rows.map((r) => r.issue.id));
+      expect(withGarbage.rows.map((r) => r.issue.id)).toEqual([a.id, b.id]);
+    });
+
+    it('a structurally-valid cursor whose sortValue does not fit the current sort falls back to the first page', async () => {
+      await makeIssue(handle.db);
+      // A cursor minted for a text sort key (garbage as a timestamp) reused
+      // against the default (timestamp) sort. sortKey matches the default
+      // ('updated_at') so this exercises the valueType shape check, not the
+      // round-5 sortKey-mismatch guard (covered separately below).
+      const bogusTimestampCursor = Buffer.from(
+        JSON.stringify(['updated_at', 'not-a-timestamp', '11111111-1111-1111-1111-111111111111']),
+      ).toString('base64url');
+      await expect(listIssues(handle.db, { cursor: bogusTimestampCursor })).resolves.toBeDefined();
+    });
+
+    // P2 regression (round 3): the round-2 fix canonicalized a timestamp
+    // sortValue via `new Date(Date.parse(x)).toISOString()`, a no-op for ISO
+    // 8601 extended-year / year-0000 strings — both parse fine in JS and
+    // round-trip byte-for-byte, then blow up as a raw driver error at the
+    // `${value}::timestamptz` cast in castParam/keysetPredicate, instead of
+    // the "malformed cursor -> page 1" contract this was supposed to
+    // guarantee. Round-3 validates the exact canonical shape instead of
+    // canonicalizing, so these never reach the cast.
+    it('a cursor sortValue carrying an ISO extended-year or year-0000 timestamp falls back to the first page rather than throwing', async () => {
+      await makeIssue(handle.db);
+      const badTimestamps = [
+        '0000-01-01T00:00:00.000Z',
+        '+010000-01-01T00:00:00.000Z',
+        '+275760-09-13T00:00:00.000Z',
+        '2026-13-01T00:00:00.123456Z',
+        '2026-02-30T00:00:00.123456Z',
+      ];
+      for (const at of badTimestamps) {
+        const poisoned = Buffer.from(JSON.stringify(['updated_at', at, '11111111-1111-1111-1111-111111111111'])).toString('base64url');
+        await expect(
+          listIssues(handle.db, { cursor: poisoned, sort: { key: 'updated_at', direction: 'desc' } }),
+          `expected no throw for sortValue=${at}`,
+        ).resolves.toBeDefined();
+      }
+    });
+
+    it('limit is clamped to a sane bound and a non-numeric limit falls back to the default', async () => {
+      for (let i = 0; i < 3; i += 1) {
+        await makeIssue(handle.db);
+      }
+      const result = await listIssues(handle.db, { limit: -5 });
+      expect(result.rows).toHaveLength(3);
+      const result2 = await listIssues(handle.db, { limit: Number.NaN });
+      expect(result2.rows).toHaveLength(3);
+    });
+  });
+
+  describe('countIssues', () => {
+    it('matches the true total across paginated listIssues calls, for the same filters', async () => {
+      for (let i = 0; i < 7; i += 1) {
+        await makeIssue(handle.db, { priority: 'urgent', updatedAt: new Date(Date.UTC(2026, 0, 1 + i)) });
+      }
+      await makeIssue(handle.db, { priority: 'low' });
+
+      const total = await countIssues(handle.db, { filters: { priorities: ['urgent'] } });
+      expect(total).toBe(7);
+
+      const seen = new Set<string>();
+      let cursor: string | null = null;
+      do {
+        const page = await listIssues(handle.db, { filters: { priorities: ['urgent'] }, limit: 3, cursor });
+        for (const row of page.rows) seen.add(row.issue.id);
+        cursor = page.nextCursor;
+      } while (cursor);
+
+      expect(seen.size).toBe(total);
+    });
+
+    it('respects the same filters as listIssues (zero when nothing matches)', async () => {
+      await makeIssue(handle.db, { priority: 'low' });
+      const total = await countIssues(handle.db, { filters: { priorities: ['urgent'] } });
+      expect(total).toBe(0);
+    });
+  });
+
+  describe('malformed filter input', () => {
+    it('non-array / wrong-typed filter values are dropped, not thrown', async () => {
+      await makeIssue(handle.db);
+      // @ts-expect-error deliberately hostile shapes to prove the repo never throws on them
+      await expect(listIssues(handle.db, { filters: { issueTypes: 'not-an-array', priorities: [{ evil: true }] } })).resolves.toBeDefined();
+    });
+
+    it('an issueType value not in the CHECK-constraint allowlist matches nothing rather than erroring', async () => {
+      await makeIssue(handle.db, { issueType: 'covenant_violation' });
+      const result = await listIssues(handle.db, { filters: { issueTypes: ['not_a_real_type'] } });
+      expect(result.rows).toHaveLength(0);
+    });
+  });
+});

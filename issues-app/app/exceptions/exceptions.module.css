@@ -1,0 +1,16 @@
+/* app/exceptions/exceptions.module.css — page-specific styling only; every
+   reusable component class (card, badge, muted, table-scroll, queue-section,
+   count-badge, empty-queue, summary-cell) comes from app/globals.css as-is
+   (see task brief). */
+
+.title {
+  margin-bottom: var(--space-sm);
+}
+
+.sectionIntro {
+  margin-bottom: var(--space-md);
+}
+
+.age {
+  font-variant-numeric: tabular-nums;
+}

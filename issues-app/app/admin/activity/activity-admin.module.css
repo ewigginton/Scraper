@@ -1,0 +1,45 @@
+/* app/admin/activity/activity-admin.module.css — page-specific styling
+   only; reusable component classes (card, table-scroll, muted, btn,
+   form-group) come from app/globals.css as-is (see task brief). */
+
+.title {
+  margin-bottom: var(--space-sm);
+}
+
+.banner {
+  margin-bottom: var(--space-lg);
+  border-color: var(--color-accent);
+  background-color: var(--color-accent-light);
+}
+
+.filterBar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-lg);
+  align-items: flex-end;
+  margin-bottom: var(--space-lg);
+}
+
+.filterBar :global(.form-group) {
+  margin-bottom: 0;
+  min-width: 10rem;
+}
+
+.filterActions {
+  margin-bottom: 0;
+}
+
+.shareBarTrack {
+  width: 100%;
+  min-width: 8rem;
+  height: 0.6rem;
+  border-radius: 0.3rem;
+  background-color: var(--color-border);
+  overflow: hidden;
+}
+
+.shareBarFill {
+  height: 100%;
+  background-color: var(--color-accent);
+  border-radius: 0.3rem;
+}

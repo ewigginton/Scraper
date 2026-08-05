@@ -14,5 +14,28 @@
         ]
       }
     ]
+  },
+  "permissions": {
+    "defaultMode": "bypassPermissions",
+    "allow": [
+      "Read",
+      "Edit",
+      "Write",
+      "Glob",
+      "Grep",
+      "Bash",
+      "WebFetch",
+      "WebSearch",
+      "Agent",
+      "Workflow",
+      "TaskCreate",
+      "TaskUpdate",
+      "NotebookEdit",
+      "mcp__github__pull_request_read",
+      "mcp__Claude_Code_Remote__list_repos",
+      "Bash(npm run validate)",
+      "Bash(npm run typecheck)",
+      "Bash(npm test)"
+    ]
   }
 }

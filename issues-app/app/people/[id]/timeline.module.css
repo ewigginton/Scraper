@@ -1,0 +1,101 @@
+/* Person-timeline feed rows (Wave 2a — Person timeline page).
+   Page-specific styling only; every color/spacing token below is inherited
+   from app/globals.css's :root variables so this stays theme-aware without
+   redefining any global class. */
+
+.feed {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm, 0.5rem);
+}
+
+.row {
+  display: grid;
+  grid-template-columns: 1.75rem 1fr auto;
+  gap: 0 var(--space-sm, 0.5rem);
+  align-items: start;
+  padding: var(--space-sm, 0.6rem) var(--space-sm, 0.6rem);
+  border: 1px solid var(--n-border, rgba(120, 120, 120, 0.18));
+  border-radius: var(--n-radius, 6px);
+  background: var(--n-bg, transparent);
+}
+
+.iconWrap {
+  grid-row: 1 / span 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.75rem;
+  height: 1.75rem;
+  border-radius: 6px;
+  background: var(--n-pill-gray-bg, rgba(120, 120, 120, 0.12));
+  color: var(--n-pill-gray-fg, inherit);
+}
+
+.title {
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  gap: 0.4em;
+  flex-wrap: wrap;
+}
+
+.direction {
+  font-weight: 400;
+  opacity: 0.7;
+}
+
+.direction.inbound::before {
+  content: '←';
+  margin-right: 0.25em;
+}
+
+.direction.outbound::before {
+  content: '→';
+  margin-right: 0.25em;
+}
+
+.snippet {
+  grid-column: 2;
+  color: var(--n-ink-muted, inherit);
+  opacity: 0.85;
+  margin-top: 0.15rem;
+}
+
+.meta {
+  grid-column: 2;
+  display: flex;
+  gap: 0.5em;
+  flex-wrap: wrap;
+  margin-top: 0.3rem;
+}
+
+.time {
+  white-space: nowrap;
+  text-align: right;
+  opacity: 0.7;
+  font-size: 0.85em;
+}
+
+.contextChip {
+  font-size: 0.8em;
+}
+
+.filterForm {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm, 0.5rem);
+  align-items: flex-end;
+  margin-bottom: var(--space-md, 1rem);
+}
+
+.filterField {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.filterField label {
+  font-size: 0.8em;
+  opacity: 0.75;
+}
