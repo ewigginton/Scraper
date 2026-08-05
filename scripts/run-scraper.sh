@@ -208,6 +208,80 @@ fi
 export SCRAPER_UPDATE_WARNING="$UPDATE_WARNING"
 export SCRAPER_GIT_COMMIT="$(git -C "$SCRIPT_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 
+# --- Scheduled-job audit (macOS launchd/cron drift detection) --------------
+# Leftover jobs from earlier scraper versions kept running for months, sending
+# extra daily emails, because nothing on the Mac ever compared the installed
+# jobs against what the repo expects. Detection is automatic here; removal
+# stays manual via setup-production.sh (interactive, asks before deleting
+# anything). Only meaningful on macOS — guarded on $LAUNCH_AGENTS_DIR existing
+# and `crontab` being available so it is a silent no-op on Linux/CI — and
+# every command that can fail is `|| true`'d so an audit error degrades to no
+# warning, never a run failure.
+JOB_AUDIT_WARNING=""
+LAUNCH_AGENTS_DIR="$HOME/Library/LaunchAgents"
+if [ -d "$LAUNCH_AGENTS_DIR" ]; then
+  JOB_AUDIT_ITEMS=""
+  add_audit_item() { JOB_AUDIT_ITEMS="${JOB_AUDIT_ITEMS:+$JOB_AUDIT_ITEMS; }$1"; }
+
+  # Expected agents = whatever services/*.plist ships in the repo today, so a
+  # future service needs no edit here. com.ccl.land-scraper.midday.plist is
+  # OPTIONAL — installed or absent are both fine — so it's only ever matched
+  # against, never required.
+  EXPECTED_AGENTS=""
+  for PLIST_PATH in "$SCRIPT_DIR/services"/*.plist; do
+    [ -f "$PLIST_PATH" ] || continue
+    EXPECTED_AGENTS="$EXPECTED_AGENTS $(basename "$PLIST_PATH")"
+  done
+
+  # Leftover launchd agents: anything scraper-shaped installed that isn't in
+  # the expected set (old digest emails, old intake pollers, retired agents).
+  for AGENT in $(ls "$LAUNCH_AGENTS_DIR" 2>/dev/null | grep -iE 'ccl|land|scraper|intake' || true); do
+    IS_EXPECTED=false
+    for EXPECTED in $EXPECTED_AGENTS; do
+      [ "$AGENT" = "$EXPECTED" ] && IS_EXPECTED=true && break
+    done
+    [ "$IS_EXPECTED" = true ] || add_audit_item "leftover launchd agent '$AGENT'"
+  done
+
+  # Leftover cron entries (old digest emails, old intake pollers)
+  if command -v crontab >/dev/null 2>&1; then
+    CRON_LEFTOVERS="$(crontab -l 2>/dev/null | grep -ivE '^[[:space:]]*#' | grep -iE 'ccl|land|scraper|digest' || true)"
+    if [ -n "$CRON_LEFTOVERS" ]; then
+      while IFS= read -r CRON_LINE; do
+        [ -n "$CRON_LINE" ] || continue
+        add_audit_item "leftover cron entry '$CRON_LINE'"
+      done <<< "$CRON_LEFTOVERS"
+    fi
+  fi
+
+  # Schedule drift: for each expected plist that IS installed, compare its
+  # StartCalendarInterval against the repo version. setup-production.sh
+  # rewrites the repo plist's hardcoded /Users/nora/... paths to this
+  # checkout's own path before installing, so a raw full-file diff would
+  # false-positive on every Mac whose checkout isn't literally at
+  # /Users/nora/ccl-land-scraper. Comparing only the StartCalendarInterval
+  # block sidesteps that path rewrite and still catches what actually
+  # matters: the job firing at the wrong time.
+  extract_schedule() {
+    awk '/<key>StartCalendarInterval<\/key>/{found=1} found{print} found && /<\/dict>/{exit}' "$1" 2>/dev/null || true
+  }
+  for PLIST_PATH in "$SCRIPT_DIR/services"/*.plist; do
+    [ -f "$PLIST_PATH" ] || continue
+    PLIST_NAME="$(basename "$PLIST_PATH")"
+    INSTALLED_PLIST="$LAUNCH_AGENTS_DIR/$PLIST_NAME"
+    [ -f "$INSTALLED_PLIST" ] || continue
+    if [ "$(extract_schedule "$PLIST_PATH")" != "$(extract_schedule "$INSTALLED_PLIST")" ]; then
+      add_audit_item "schedule drift in '$PLIST_NAME' (installed schedule differs from repo)"
+    fi
+  done
+
+  if [ -n "$JOB_AUDIT_ITEMS" ]; then
+    JOB_AUDIT_WARNING="Scheduled-job audit found: $JOB_AUDIT_ITEMS. Run 'bash scripts/setup-production.sh' on this Mac to review and remove leftovers."
+  fi
+fi
+[ -n "$JOB_AUDIT_WARNING" ] && echo "WARNING: $JOB_AUDIT_WARNING" >> "$LOG_FILE"
+export SCRAPER_JOB_AUDIT_WARNING="$JOB_AUDIT_WARNING"
+
 # Run a real (headed) Chrome for the browser fallback. This LaunchAgent runs in
 # the logged-in GUI session of the always-on production Mac, so a visible window
 # is fine — and headed is the single strongest counter to the headless-detection

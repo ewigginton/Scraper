@@ -328,3 +328,95 @@ test('standouts appear in the consolidated subject', () => {
   assert.match(subject, /2 new leads/);
   assert.match(subject, /1 standout/);
 });
+
+// ---------- skipped-unavailable / rejected-below-minimum accounting ----------
+
+test('SKIPPED section renders name + matched phrase + URL, per-site sub-lines show counts, sorted biggest-first', () => {
+  const { buildScraperBody } = require('../lib/notify');
+  const scraperReport = {
+    dryRun: false,
+    sites: {
+      LandWatch: {
+        status: 'ok', parsed: 10, passed: 2, written: 1, duplicates: 0, checked: 10,
+        rejectedBelowMinAcres: 1, skippedUnavailable: 2,
+      },
+    },
+    totals: {
+      checked: 10, parsed: 10, passed: 1, duplicates: 0, rejected: 1, written: 1, wouldWrite: 0, errors: 0,
+      rejectedBelowMinAcres: 1, skippedUnavailable: 2,
+    },
+    duplicateDetails: [],
+    skippedUnavailable: [
+      { source: 'LandWatch', name: 'Small Pending Tract', url: 'https://lw/small', phrase: 'under contract', acres: 20 },
+      { source: 'LandWatch', name: 'Big Pending Tract', url: 'https://lw/big', phrase: 'sale pending', acres: 300 },
+    ],
+    writeErrors: [],
+    sourceIssues: [],
+    warnings: [],
+    elapsedMinutes: 4,
+  };
+
+  const body = buildScraperBody(scraperReport, null, 'Monday');
+
+  // Per-site sub-lines (count only).
+  assert.match(body, /\(1 rejected: below minimum acreage\)/);
+  assert.match(body, /\(2 skipped: already unavailable — see SKIPPED section below\)/);
+
+  // TOTALS line carries both new numbers.
+  assert.match(body, /2 skipped \(already unavailable\)/);
+  assert.match(body, /1 of the rejected were below the minimum acreage floor/);
+
+  // Itemized SKIPPED section: name + matched phrase + URL.
+  assert.match(body, /SKIPPED — LISTING UNAVAILABLE/);
+  assert.match(body, /LandWatch: Big Pending Tract — matched "sale pending"/);
+  assert.match(body, /https:\/\/lw\/big/);
+  assert.match(body, /LandWatch: Small Pending Tract — matched "under contract"/);
+  assert.match(body, /https:\/\/lw\/small/);
+
+  // Biggest tract first (300ac before 20ac), regardless of insertion order.
+  assert.ok(
+    body.indexOf('Big Pending Tract') < body.indexOf('Small Pending Tract'),
+    'the 300ac listing must render before the 20ac listing'
+  );
+});
+
+test('CROSS-SITE DUPLICATES CAUGHT is sorted biggest-tract-first', () => {
+  const { buildScraperBody } = require('../lib/notify');
+  const scraperReport = {
+    dryRun: false,
+    sites: {},
+    totals: { checked: 0, parsed: 0, passed: 0, duplicates: 2, rejected: 0, written: 0, wouldWrite: 0, errors: 0 },
+    duplicateDetails: [
+      { source: 'LandWatch', name: 'Small Dup', url: 'https://x/1', reason: 'same fingerprint', matchType: 'fingerprint', acres: 40 },
+      { source: 'LandWatch', name: 'Huge Dup', url: 'https://x/2', reason: 'same fingerprint', matchType: 'fingerprint', acres: 500 },
+    ],
+    writeErrors: [],
+    sourceIssues: [],
+    warnings: [],
+    elapsedMinutes: 4,
+  };
+
+  const body = buildScraperBody(scraperReport, null, 'Monday');
+  assert.ok(
+    body.indexOf('Huge Dup') < body.indexOf('Small Dup'),
+    'the 500ac duplicate must render before the 40ac duplicate'
+  );
+});
+
+test('no skipped-unavailable / rejected-below-min listings renders neither section, no undefined/NaN', () => {
+  const { buildScraperBody } = require('../lib/notify');
+  const scraperReport = {
+    dryRun: false,
+    sites: { LandWatch: { status: 'ok', parsed: 5, passed: 5, written: 5, duplicates: 0, checked: 5 } },
+    totals: { checked: 5, parsed: 5, passed: 5, duplicates: 0, rejected: 0, written: 5, wouldWrite: 0, errors: 0 },
+    duplicateDetails: [],
+    writeErrors: [],
+    sourceIssues: [],
+    warnings: [],
+    elapsedMinutes: 2,
+  };
+  const body = buildScraperBody(scraperReport, null, 'Monday');
+  assert.ok(!/SKIPPED — LISTING UNAVAILABLE/.test(body));
+  assert.ok(!body.includes('undefined'));
+  assert.ok(!body.includes('NaN'));
+});

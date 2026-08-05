@@ -9,6 +9,8 @@ const {
   processScrapedListings,
   detailEnrichmentEnabled,
   combineDescriptions,
+  resolveMinAcres,
+  DEFAULT_MIN_ACRES,
 } = require('../lib/scraper');
 const { analyzeLead, matchesKeyword } = require('../lib/review');
 const BaseParser = require('../lib/parsers/base-parser');
@@ -232,7 +234,15 @@ test('combineDescriptions: dedupes when detail already contains the blurb, else 
   assert.ok(capped.length <= 2400, 'combined description capped at ~2400 chars');
 });
 
-test('end-to-end: a detail page saying "under contract" reaches analyzeLead as an availability flag, not a dealbreaker', async () => {
+test('end-to-end: a detail page saying "under contract" is caught by Step 4.6 and never written (superseded write-then-flag behavior)', async () => {
+  // Historically a fresh scrape whose DETAIL page (not the card) revealed
+  // "under contract" was still written and only flagged on review night —
+  // exactly the bug Emma reported (two LandWatch listings became New Leads
+  // while already under contract). lib/scraper.js's Step 4.6 now skips it
+  // before the write ever happens; see the "Step 4.6" tests below for the
+  // full skip/reject pipeline coverage. analyzeLead's own under-contract
+  // handling for EXISTING Airtable records (never auto-rejected, Emma
+  // decides) is unchanged and covered separately in test/fixes.test.js.
   initFilter(new Map([['taney|MO', 4000]]));
 
   const listing = {
@@ -243,24 +253,14 @@ test('end-to-end: a detail page saying "under contract" reaches analyzeLead as a
   const parser = new FakeEnrichParser({
     [listing.url]: detailPage('This property is under contract with a closing expected next month.'),
   });
-  const { ctx } = makeCtx({ dryRun: false });
+  const { report, ctx } = makeCtx({ dryRun: false });
 
   await withEnv({ GITHUB_ACTIONS: undefined, SCRAPER_DETAIL_ENRICHMENT: undefined }, () =>
     withStubbedWrite(async (captured) => {
       await processScrapedListings(parser, [listing], ctx);
-      const written = captured.find(l => l.url === listing.url);
-      assert.match(written.description, /under contract/, 'enriched description carries the availability phrase');
-
-      // The enriched description lands in Scraper Notes (FIELDS.notes) — the
-      // same field analyzeLead scans — so a scraped/enriched lead is covered
-      // by the same AVAILABILITY_FLAGS path intake and review share.
-      const record = { fields: { [airtable.FIELDS.notes]: written.description } };
-      const analysis = analyzeLead(record, { county: 'Taney', state: 'MO' });
-      assert.ok(
-        analysis.availabilityFlags.some(f => f.includes('under contract')),
-        `expected an availability flag, got: ${analysis.availabilityFlags.join(', ')}`
-      );
-      assert.deepEqual(analysis.dealbreakers, [], 'availability status must never count as a dealbreaker');
+      assert.equal(captured.find(l => l.url === listing.url), undefined, 'must never reach the Airtable write');
+      assert.equal(report.skippedUnavailable.length, 1);
+      assert.match(report.skippedUnavailable[0].phrase, /under contract/);
     })
   );
 });
@@ -320,4 +320,124 @@ test('extractDetailDescription: oversized HTML is bounded — regex meta fallbac
   const text = parser.extractDetailDescription(oversized);
   assert.ok(Date.now() - started < 2000);
   assert.match(text, /sale pending/i);
+});
+
+// ---------- Step 4.6: post-enrichment availability skip + hard acreage floor ----------
+// Regression coverage for Emma's three reported failures: two under-contract
+// LandWatch listings that still became New Leads, and a 0.24ac listing
+// recorded as 24ac with nothing enforcing the 40ac minimum in code.
+
+test('resolveMinAcres: defaults to 40, honors SCRAPER_MIN_ACRES, falls back on junk', async () => {
+  assert.equal(DEFAULT_MIN_ACRES, 40);
+  await withEnv({ SCRAPER_MIN_ACRES: undefined }, () => assert.equal(resolveMinAcres(), 40));
+  await withEnv({ SCRAPER_MIN_ACRES: '100' }, () => assert.equal(resolveMinAcres(), 100));
+  await withEnv({ SCRAPER_MIN_ACRES: '0' }, () => assert.equal(resolveMinAcres(), 0));
+  await withEnv({ SCRAPER_MIN_ACRES: 'not a number' }, () => assert.equal(resolveMinAcres(), 40));
+});
+
+test('Step 4.6: a listing whose card text matches an availability phrase is skipped, never written', async () => {
+  initFilter(new Map([['taney|MO', 4000]]));
+  const listing = {
+    name: 'Pending Tract', price: 300000, acres: 100, county: 'Taney', state: 'MO',
+    url: 'https://fake.example/pending',
+    description: 'Great pasture. This property is under contract as of last week.',
+  };
+  const parser = new FakeEnrichParser();
+  const { report, ctx } = makeCtx({ dryRun: false });
+
+  await withEnv({ GITHUB_ACTIONS: undefined, SCRAPER_DETAIL_ENRICHMENT: undefined }, () =>
+    withStubbedWrite(async (captured) => {
+      const siteReport = await processScrapedListings(parser, [listing], ctx);
+      assert.equal(siteReport.skippedUnavailable, 1);
+      assert.equal(report.totals.skippedUnavailable, 1);
+      assert.equal(report.skippedUnavailable.length, 1);
+      assert.equal(report.skippedUnavailable[0].phrase, 'under contract');
+      assert.equal(report.skippedUnavailable[0].url, listing.url);
+      assert.equal(captured.length, 0, 'skipped listing must never reach the Airtable write');
+      assert.equal(siteReport.passed, 0, 'the earlier pass-count is backed out once skipped');
+    })
+  );
+});
+
+test('Step 4.6: end-to-end — a detail page revealing "under contract" AFTER card scraping still skips the write (Emma\'s LandWatch bug)', async () => {
+  initFilter(new Map([['taney|MO', 4000]]));
+  const listing = {
+    name: 'Ridge Line Tract', price: 300000, acres: 100, county: 'Taney', state: 'MO',
+    url: 'https://fake.example/ridge-line-under-contract',
+    description: '100 acres in Taney County — great hunting.', // card blurb never mentions status
+  };
+  const parser = new FakeEnrichParser({
+    [listing.url]: detailPage('This property is under contract with a closing expected next month.'),
+  });
+  const { report, ctx } = makeCtx({ dryRun: false });
+
+  await withEnv({ GITHUB_ACTIONS: undefined, SCRAPER_DETAIL_ENRICHMENT: undefined }, () =>
+    withStubbedWrite(async (captured) => {
+      await processScrapedListings(parser, [listing], ctx);
+      assert.equal(captured.length, 0, 'must never reach Airtable once the detail page reveals under contract');
+      assert.equal(report.skippedUnavailable.length, 1);
+      assert.match(report.skippedUnavailable[0].phrase, /under contract/);
+    })
+  );
+});
+
+test('Step 4.6: "no restrictions" card text must never be mistaken for "under contract" (word-boundary match)', async () => {
+  initFilter(new Map([['taney|MO', 4000]]));
+  const listing = {
+    name: 'Open Tract', price: 300000, acres: 100, county: 'Taney', state: 'MO',
+    url: 'https://fake.example/no-restrictions',
+    description: 'Open pasture with no restrictions and paved road frontage.',
+  };
+  const parser = new FakeEnrichParser();
+  const { report, ctx } = makeCtx({ dryRun: false });
+
+  await withEnv({ GITHUB_ACTIONS: undefined, SCRAPER_DETAIL_ENRICHMENT: undefined }, () =>
+    withStubbedWrite(async (captured) => {
+      const siteReport = await processScrapedListings(parser, [listing], ctx);
+      assert.equal(siteReport.skippedUnavailable, 0);
+      assert.equal(captured.length, 1, 'a normal listing must still be written');
+    })
+  );
+});
+
+test('Step 4.6: SCRAPER_MIN_ACRES overrides the default floor and rejects post-enrichment', async () => {
+  initFilter(new Map([['taney|MO', 4000]]));
+  // 50ac clears the existing filter.js check (fixed at 40) but must still be
+  // rejected by the scraper.js floor once SCRAPER_MIN_ACRES=100 is set — this
+  // is the "regardless of what the source URL's filter params claim" floor.
+  const listing = {
+    name: 'Fifty Acre Tract', price: 200000, acres: 50, county: 'Taney', state: 'MO', // $4000/ac = at target
+    url: 'https://fake.example/fifty',
+  };
+  const parser = new FakeEnrichParser();
+  const { report, ctx } = makeCtx({ dryRun: false });
+
+  await withEnv({ GITHUB_ACTIONS: undefined, SCRAPER_DETAIL_ENRICHMENT: undefined, SCRAPER_MIN_ACRES: '100' }, () =>
+    withStubbedWrite(async (captured) => {
+      const siteReport = await processScrapedListings(parser, [listing], ctx);
+      assert.equal(siteReport.rejectedBelowMinAcres, 1);
+      assert.equal(report.totals.rejectedBelowMinAcres, 1);
+      assert.equal(report.totals.rejected, 1, 'folds into the generic rejected total too');
+      assert.equal(captured.length, 0, 'below the overridden floor must never be written');
+      assert.equal(siteReport.passed, 0, 'the earlier pass-count is backed out once rejected');
+    })
+  );
+});
+
+test('Step 4.6: a listing at/above the default 40ac floor is written normally (no false rejection)', async () => {
+  initFilter(new Map([['taney|MO', 4000]]));
+  const listing = {
+    name: 'Forty Acre Tract', price: 160000, acres: 40, county: 'Taney', state: 'MO', // $4000/ac = at target
+    url: 'https://fake.example/forty',
+  };
+  const parser = new FakeEnrichParser();
+  const { ctx } = makeCtx({ dryRun: false });
+
+  await withEnv({ GITHUB_ACTIONS: undefined, SCRAPER_DETAIL_ENRICHMENT: undefined, SCRAPER_MIN_ACRES: undefined }, () =>
+    withStubbedWrite(async (captured) => {
+      const siteReport = await processScrapedListings(parser, [listing], ctx);
+      assert.equal(siteReport.rejectedBelowMinAcres, 0);
+      assert.equal(captured.length, 1, 'exactly-at-the-floor listing is written, not rejected');
+    })
+  );
 });

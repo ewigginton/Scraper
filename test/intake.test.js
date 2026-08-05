@@ -13,7 +13,8 @@ process.env.SCRAPER_ALLOW_LOOPBACK_FETCH = 'true';
 
 const airtable = require('../lib/airtable');
 const { locationKey } = require('../lib/fingerprint');
-const { processIntakeQueue, extractListingDetails, extractAcres, extractCountyState, cleanTitle } = require('../lib/intake');
+const { processIntakeQueue, extractListingDetails, extractAcres, extractCountyState, cleanTitle, describeIntakeRejection } = require('../lib/intake');
+const { resolveMinAcres } = require('../lib/scraper');
 
 const LISTING_HTML = `<html><head>
   <title>Headwaters Ranch - 1,118 Acres in Pittsburg County | Republic Ranches</title>
@@ -262,7 +263,7 @@ test('intake: first failure queues a next-day retry; second failure is final', {
   assert.equal(report.failures[0].final, true);
 });
 
-test('intake: a page saying "sale pending" still creates the lead, but Result and notes carry the warning', { timeout: 60000 }, async (t) => {
+test('intake: a page saying "sale pending" does NOT create a lead — rejected with a plain-English Result', { timeout: 60000 }, async (t) => {
   const PENDING_HTML = `<html><head>
     <title>Quiet Ridge Tract - 80 Acres | Republic Ranches</title>
     <meta property="og:description" content="80 acres in Pittsburg County, Oklahoma.">
@@ -282,11 +283,119 @@ test('intake: a page saying "sale pending" still creates the lead, but Result an
 
   const report = await processIntakeQueue({ dryRun: false });
 
-  assert.equal(report.created, 1, 'the lead is still created — Emma decides, not the importer');
+  assert.equal(report.created, 0, 'under-contract/pending listings must never become a lead');
+  assert.equal(report.rejected, 1);
+  assert.equal(calls.createdLeads.length, 0);
+  assert.equal(report.rejections[0].reason, 'listing is sale pending');
+  assert.match(calls.intakeUpdates[0].fields.Result, /Not imported.*sale pending/i, 'the Result text explains the reject to the submitter');
+  // Deterministic reject — terminal status, never the Retry path (re-fetching
+  // tomorrow won't change that this listing is under contract).
+  assert.equal(calls.intakeUpdates[0].fields.Status, 'Failed');
+  assert.equal(report.retryQueued, 0);
+  assert.equal(report.failedFinal, 0, 'a deterministic reject is not counted as a fetch/parse failure');
+});
+
+test('intake: a "SOLD -" prefixed title is rejected even though cleanTitle strips the prefix', { timeout: 60000 }, async (t) => {
+  // cleanTitle splits "SOLD - Big Ranch | LandWatch" at its first
+  // " - <Capital>" boundary, leaving the display name "SOLD" — availability
+  // detection must run on the RAW title, where the "SOLD -" status prefix
+  // (and its load-bearing hyphen) still exists.
+  const SOLD_HTML = `<html><head>
+    <title>SOLD - Big Ranch | LandWatch</title>
+    <meta property="og:title" content="SOLD - Big Ranch | LandWatch">
+  </head><body><h1>Big Ranch</h1><p>300 acres in Pittsburg County, Oklahoma. $450,000.</p></body></html>`;
+  const server = http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/html' });
+    res.end(SOLD_HTML);
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => server.close());
+  const url = `http://127.0.0.1:${server.address().port}/pittsburg-county-oklahoma-big-ranch`;
+
+  const calls = stubAirtable(t, {
+    queue: [{ id: 'recIntakeSold001X', fields: { URL: url, 'Submitted By': 'Nora' } }],
+  });
+
+  const report = await processIntakeQueue({ dryRun: false });
+
+  assert.equal(report.created, 0, 'a sold listing must never become a lead, whatever cleanTitle leaves of its name');
+  assert.equal(calls.createdLeads.length, 0);
+  assert.equal(report.rejected, 1);
+  assert.equal(report.rejections[0].reason, 'listing is sold');
+  assert.match(calls.intakeUpdates[0].fields.Result, /Not imported.*sold/i);
+  assert.equal(calls.intakeUpdates[0].fields.Status, 'Failed');
+});
+
+test('intake: a below-floor acreage does NOT create a lead — rejected with a plain-English Result', { timeout: 60000 }, async (t) => {
+  const SMALL_HTML = `<html><head>
+    <title>Tiny Lot - 0.24 Acres</title>
+    <meta property="og:description" content="0.24 acres in Pittsburg County, Oklahoma.">
+    <script type="application/ld+json">{"@type":"Product","offers":{"price":"15000"}}</script>
+  </head><body><h1>Tiny Lot</h1><p>.24 acres in Pittsburg County.</p></body></html>`;
+  const server = http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/html' });
+    res.end(SMALL_HTML);
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => server.close());
+  const url = `http://127.0.0.1:${server.address().port}/pittsburg-county-oklahoma-tiny-lot`;
+
+  const calls = stubAirtable(t, {
+    queue: [{ id: 'recIntakeTiny01X', fields: { URL: url, 'Submitted By': 'Emma' } }],
+  });
+
+  const report = await processIntakeQueue({ dryRun: false });
+
+  assert.equal(report.created, 0);
+  assert.equal(report.rejected, 1);
+  assert.equal(calls.createdLeads.length, 0);
+  assert.equal(report.rejections[0].reason, `0.24 acres is below the ${resolveMinAcres()}-acre minimum`);
+  assert.match(calls.intakeUpdates[0].fields.Result, /Not imported.*0\.24 acres is below/i);
+  assert.equal(calls.intakeUpdates[0].fields.Status, 'Failed');
+});
+
+test('intake: acreage that could not be extracted at all still creates the lead with a warning (missing data is not "below the floor")', { timeout: 60000 }, async (t) => {
+  const NO_ACRES_HTML = `<html><head>
+    <title>Mystery Tract</title>
+    <meta property="og:description" content="A fine tract in Pittsburg County, Oklahoma.">
+    <script type="application/ld+json">{"@type":"Product","offers":{"price":"250000"}}</script>
+  </head><body><h1>Mystery Tract</h1><p>A property in Pittsburg County. No acreage figure on this page.</p></body></html>`;
+  const server = http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/html' });
+    res.end(NO_ACRES_HTML);
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => server.close());
+  const url = `http://127.0.0.1:${server.address().port}/pittsburg-county-oklahoma-mystery-tract`;
+
+  const calls = stubAirtable(t, {
+    queue: [{ id: 'recIntakeNoAcres01X', fields: { URL: url, 'Submitted By': 'Emma' } }],
+  });
+
+  const report = await processIntakeQueue({ dryRun: false });
+
+  assert.equal(report.created, 1, 'missing acreage must not be treated as below the floor');
+  assert.equal(report.rejected, 0);
   assert.equal(calls.createdLeads.length, 1);
-  assert.match(calls.createdLeads[0].description, /sale pending/i, 'the phrase reaches notes so analyzeLead also flags it');
-  assert.match(calls.intakeUpdates[0].fields.Result, /sale pending/i, 'the Result text carries the warning');
+  assert.equal(calls.createdLeads[0].acres, null);
   assert.equal(calls.intakeUpdates[0].fields.Status, 'Added');
+});
+
+test('describeIntakeRejection: availability wins over acreage when both apply', () => {
+  assert.equal(
+    describeIntakeRejection({ availabilityFlags: ['sold'], acres: 4 }, 40),
+    'listing is sold',
+  );
+});
+
+test('describeIntakeRejection: null acres (never extracted) is never a reject', () => {
+  assert.equal(describeIntakeRejection({ availabilityFlags: [], acres: null }, 40), null);
+  assert.equal(describeIntakeRejection({ availabilityFlags: [], acres: undefined }, 40), null);
+});
+
+test('describeIntakeRejection: acreage at or above the floor is never a reject', () => {
+  assert.equal(describeIntakeRejection({ availabilityFlags: [], acres: 40 }, 40), null);
+  assert.equal(describeIntakeRejection({ availabilityFlags: [], acres: 40.5 }, 40), null);
 });
 
 test('intake: extractListingDetails surfaces availabilityFlags from the fetched page text', (t) => {
@@ -361,4 +470,29 @@ test('intake failures render in the consolidated email', () => {
   assert.match(body, /blocked\.example\.com/);
   assert.match(body, /GIVEN UP \(1\)/);
   assert.match(body, /Set the record's Status back to 'New'/);
+});
+
+test('intake rejections (under-contract / below-floor) render in the consolidated email', () => {
+  const { buildScraperBody } = require('../lib/notify');
+  const scraperReport = {
+    dryRun: false,
+    sites: {},
+    totals: { written: 0, wouldWrite: 0, duplicates: 0, rejected: 0, errors: 0 },
+    duplicateDetails: [], writeErrors: [], sourceIssues: [], warnings: [], elapsedMinutes: 1,
+  };
+  const intakeReport = {
+    processed: 2, created: 0, duplicates: 0, rejected: 2, retryQueued: 0, failedFinal: 0,
+    added: [],
+    rejections: [
+      { url: 'https://ok.example.com/pending', submitter: 'Emma', reason: 'listing is sale pending' },
+      { url: 'https://ok.example.com/tiny', submitter: 'Lori', reason: '4.2 acres is below the 40-acre minimum' },
+    ],
+    failures: [],
+  };
+  const body = buildScraperBody(scraperReport, null, 'Monday', null, intakeReport);
+  assert.match(body, /LISTING INTAKE/);
+  assert.match(body, /NOT IMPORTED \(2\)/);
+  assert.match(body, /ok\.example\.com\/pending/);
+  assert.match(body, /Not imported: listing is sale pending/);
+  assert.match(body, /Not imported: 4\.2 acres is below the 40-acre minimum/);
 });

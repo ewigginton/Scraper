@@ -8,26 +8,31 @@ const { runScraper } = require('./lib/scraper');
 const { runPriceCheck } = require('./lib/price-checker');
 const { runReview } = require('./lib/review');
 const { processIntakeQueue } = require('./lib/intake');
+const { runLeadRecheck } = require('./lib/lead-recheck');
 const { closeBrowser } = require('./lib/browser-fetch');
 const { sendScraperEmail, pingHealthcheck } = require('./lib/notify');
 
 /**
  * Main entry point — runs on Classic's iMac at 2:00 AM via launchd.
- * The full run does scrape + price check + lead review and sends ONE
- * consolidated email covering all three.
+ * The full run does scrape + price check + lead review + lead recheck and
+ * sends ONE consolidated email covering all four.
  *
  * Modes:
- *   node index.js              → Full scrape + price check + review
+ *   node index.js              → Full scrape + price check + review + lead recheck
  *   node index.js --price-check-only → Price check only (for testing/manual runs)
  *   node index.js --skip-price-check → Skip watched-listing price checks
  *   node index.js --skip-review → Skip the lead review step
+ *   node index.js --skip-lead-recheck → Skip the nightly New Lead/Emma Review recheck
  *   node index.js --dry-run    → Scrape and check without writing Airtable changes
+ *                                (also skips lead recheck — it does live fetches
+ *                                against production listing URLs, production-only
+ *                                like the review's Airtable writes)
  *   SCRAPER_MIDDAY=1 node index.js → Midday mode (services/*.midday.plist, 12:30 PM):
- *                                scrape + intake only (price check and review stay
- *                                nightly-only); the email is skipped entirely when
- *                                the run found nothing noteworthy (see lib/notify.js
- *                                isMiddayRunNoteworthy). Evidence capture is skipped
- *                                by scripts/run-scraper.sh, not here.
+ *                                scrape + intake only (price check, review, and lead
+ *                                recheck stay nightly-only); the email is skipped
+ *                                entirely when the run found nothing noteworthy (see
+ *                                lib/notify.js isMiddayRunNoteworthy). Evidence
+ *                                capture is skipped by scripts/run-scraper.sh, not here.
  */
 async function main() {
   const priceCheckOnly = process.argv.includes('--price-check-only');
@@ -40,6 +45,12 @@ async function main() {
   const midday = process.env.SCRAPER_MIDDAY === '1' || process.env.SCRAPER_MIDDAY === 'true';
   const skipPriceCheck = process.argv.includes('--skip-price-check') || process.env.SKIP_PRICE_CHECK === 'true' || midday;
   const skipReview = process.argv.includes('--skip-review') || process.env.SKIP_REVIEW === 'true' || midday;
+  // Lead recheck (lib/lead-recheck.js) re-fetches New Lead / Emma Review
+  // listing URLs from the production Mac and is fetch-heavy like the
+  // scrape/price-check — gated the same way review is: off on a light
+  // midday sweep, and off in --dry-run below (it never writes, but the
+  // fetches themselves are production-only work).
+  const skipLeadRecheck = process.argv.includes('--skip-lead-recheck') || process.env.SKIP_LEAD_RECHECK === 'true' || midday;
   // CI runs are always dry-run, enforced here in code — the workflow files
   // also set it, but a workflow edit must not be able to write to production
   const inGithubActions = process.env.GITHUB_ACTIONS === 'true';
@@ -67,6 +78,7 @@ async function main() {
   let priceCheckReport = null;
   let reviewReport = null;
   let intakeReport = null;
+  let leadRecheckReport = null;
   let fatalError = null;
 
   try {
@@ -170,6 +182,34 @@ async function main() {
       }
     }
 
+    // Step 4.5: Nightly lead recheck — re-fetch each 'New Lead'/'Emma Review'
+    // record's own listing URL (bot-blocked from the cloud, so this only
+    // works on the production Mac) and report leads that have gone under
+    // contract/sold/off-market since they were scraped, plus acreage
+    // mismatches. REPORT ONLY — it never touches Stage or any Airtable field
+    // (see lib/lead-recheck.js). Individual fetch failures are counted, not
+    // fatal; a wholly failed recheck is a warning like a failed intake pass,
+    // not a run-crashing error like a failed price check/review.
+    if (priceCheckOnly || skipLeadRecheck) {
+      if (skipLeadRecheck) console.log('[Main] Skipping lead recheck.');
+    } else if (dryRun) {
+      console.log('[Main] Dry run — skipping lead recheck (it does live fetches against production listing URLs).');
+      if (scraperReport) {
+        scraperReport.warnings.push('Dry run: nightly lead recheck skipped (live fetch step)');
+      }
+    } else {
+      try {
+        leadRecheckReport = await runLeadRecheck();
+      } catch (err) {
+        console.error(`[Main] Lead recheck failed: ${err.message}`);
+        console.error(err.stack);
+        if (scraperReport) {
+          scraperReport.leadRecheckError = err.message;
+          scraperReport.totals.errors++;
+        }
+      }
+    }
+
   } catch (err) {
     fatalError = err;
     console.error(`[Main] Fatal error: ${err.message}`);
@@ -194,13 +234,13 @@ async function main() {
   // crashed sites), skips sending entirely — see isMiddayRunNoteworthy.
   let emailSent = true;
   try {
-    if (scraperReport || priceCheckReport || reviewReport || intakeReport) {
+    if (scraperReport || priceCheckReport || reviewReport || intakeReport || leadRecheckReport) {
       const result = await sendScraperEmail(
         scraperReport || { sites: {}, totals: { written: 0, duplicates: 0, rejected: 0, errors: 0 }, duplicateDetails: [], writeErrors: [], sourceIssues: [], elapsedMinutes: 0 },
         priceCheckReport,
         reviewReport,
         intakeReport,
-        { midday }
+        { midday, leadRecheckReport }
       );
       emailSent = result.sent || result.skipped;
     }

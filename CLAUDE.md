@@ -76,13 +76,14 @@ See `.env.example` for the full list.
 ## Running
 
 - Install deps: `npm install --silent`
-- Full nightly run (scrape + price check + review, ONE consolidated email): `node index.js`
-- Dry run (scrape and report without Airtable writes; review is skipped): `node index.js --dry-run`
+- Full nightly run (scrape + price check + review + lead recheck, ONE consolidated email): `node index.js`
+- Dry run (scrape and report without Airtable writes; review and lead recheck are skipped): `node index.js --dry-run`
 - Targeted dry run: `SCRAPER_TARGET_COUNTIES="Wayne|KY,Pittsburg|OK,Shannon|MO" SCRAPER_MAX_PAGE=1 node index.js --dry-run --skip-price-check`
 - Review leads only (manual; sends its own review email): `node review-leads.js`
 - Price check only: `node index.js --price-check-only`
 - Scrape without price check: `node index.js --skip-price-check`
 - Scrape without review: `node index.js --skip-review`
+- Scrape without lead recheck: `node index.js --skip-lead-recheck`
 
 ## GitHub Actions
 
@@ -130,7 +131,11 @@ in `lib/airtable.js` — never hardcode field names elsewhere:
   `New Lead` — only Emma does. Price-drop promotions arrive as `Price Drop`
   (not truly new leads). See `test/stage-policy.test.js`
 - `scripts/run-scraper.sh` self-updates the checkout from GitHub `main`
-  before each nightly run; failures surface as warnings in the report email
+  before each nightly run; failures surface as warnings in the report email.
+  It also audits the Mac's installed launchd agents/crontab against
+  `services/*.plist`, surfacing leftover or schedule-drifted jobs as a
+  warning in the same email — detection is automatic, removal stays manual
+  via `scripts/setup-production.sh`
 - Whitetail/MossyOak use the class-name-agnostic `extractByDetailLinks` engine in `base-parser.js` (detail-link anchors + price/acreage text extraction); when adding a source, prefer that engine plus real-HTML fixtures captured from the production Mac
 - Listing Intake (`lib/intake.js`, Airtable table `Listing Intake`): team
   members submit listing URLs via an Airtable form; the nightly run imports
@@ -138,8 +143,22 @@ in `lib/airtable.js` — never hardcode field names elsewhere:
   failure → Status `Retry` (re-attempted the next night); second failure →
   `Failed` (a human sets Status back to `New` to force another try). Results
   and failures appear in the consolidated email. Manual run: `npm run intake`
+- Lead recheck (`lib/lead-recheck.js`): nightly, production-Mac-only step that
+  re-fetches the listing URL of every `New Lead` / `Emma Review` record
+  (browser fallback applies — the cloud can't reach LandWatch), capped at 100
+  a night (oldest-unchecked-first, tracked in `data/lead-recheck/state.json`,
+  not on the Airtable record). REPORT ONLY — it never changes Stage or writes
+  any Airtable field; it lists leads that now match an availability phrase
+  (under contract/sold/off-market) or whose live acreage disagrees with the
+  record (>=10% relative difference or a crossing of the 40-acre floor) in a
+  `LEAD RECHECK` section of the consolidated email. Skipped on `--dry-run` and
+  midday runs (live-fetch, production-only, same as review); disable with
+  `--skip-lead-recheck` / `SKIP_LEAD_RECHECK=true`
 - County targets loaded dynamically from Airtable `County` table using `CPA Target`
-- Filtering: accepts listings within 20% of CPA target, watches 20-30% over, rejects >30%
+- Filtering: accepts listings within 20% of CPA target, watches 20-30% over, rejects >30%;
+  a hard 40-acre floor (`SCRAPER_MIN_ACRES`) and an under-contract/pending/off-market skip
+  both apply after detail enrichment, regardless of source URL filter params, and are each
+  itemized in the nightly report (`lib/scraper.js`, `lib/availability.js`)
 - Deduplication: URL match + property fingerprint (county/state/acres/price hash) + location/price-tolerance match; the dedup index includes `Not Interested` records so rejected leads are not re-created
 - Results written to the Airtable `Land` table
 - Failed Airtable writes are queued in `data/failed-writes/` and replayed automatically at the start of the next scrape (processed files move to `data/failed-writes/done/`)
@@ -147,3 +166,31 @@ in `lib/airtable.js` — never hardcode field names elsewhere:
   single consolidated email (no separate scheduled review job/email)
 - Launch scripts use a local run lock so scraper/review jobs do not overlap
 - Parser fetch/parse failures, bot-block detections, and markup-drift suspicions are saved locally under `data/source-health/` (HTML evidence in `data/source-health/snapshots/`) and summarized in reports
+
+## Source outage playbook (learned from the LandWatch outage, fixed Aug 2026)
+
+When a source's report line drops to "0 checked" with markup-drift warnings
+("pages load but no listings were recognized"), suspect a site redesign of
+URLs/markup — NOT a bot-block. Bot-blocks show up as 403/challenge warnings
+instead; "page fetched OK, zero cards matched" means our URL scheme or
+selectors are stale. Urgent-fix path that worked for LandWatch (PR #29,
+commit 108622c):
+
+1. Get real evidence first: read `data/source-health/<date>.jsonl` and
+   `data/source-health/snapshots/` from the production Mac (evidence-inbox
+   flow) — fix against actual served HTML, never against guesses. Queue
+   evidence-capture URL variants for any filter segment still unconfirmed
+   (captures run on the 2 AM nightly only; midday skips them).
+2. Fix the parser's URL builder + selectors against that HTML. LandWatch's
+   2026 scheme: `/{state}-land-for-sale/{county}-county` paths, `/page-N`
+   pagination (collapse the series), and error-shell detection (HTTP 200
+   with an empty app shell must count as a failed page, not "no results").
+3. Lock the fix in with a real-HTML fixture in `test/fixtures/` captured
+   from the production Mac.
+4. Ship via branch → PR → CI. The Mac self-updates from `main` before every
+   run, so merged-by-2-AM-Central means the next nightly runs it; the
+   12:30 PM midday run is the earliest same-day live confirmation (but it
+   emails only when noteworthy — silence means no crash AND no new leads,
+   see `isMiddayRunNoteworthy` in `lib/notify.js`).
+5. Verify from the report email: real "N checked" counts with no
+   markup-drift warnings for that source = fixed.
