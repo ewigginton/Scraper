@@ -32,6 +32,7 @@ import {
   getPersonIssues,
   personTimelinePage,
   enrichCommunicationEntries,
+  timelineEntryKey,
   type TimelineEntry,
   type CommEnrichment,
 } from '../../../lib/repositories/people-repo.ts';
@@ -246,7 +247,7 @@ export default async function PersonPage({ params, searchParams }: PageProps) {
           ) : (
             <div className={styles.feed}>
               {timeline.entries.map((entry) => (
-                <TimelineRow key={`${entry.sourceTable}:${entry.sourceId}:${entry.kind}`} entry={entry} enrichment={enrichment.get(entry.sourceId)} />
+                <TimelineRow key={timelineEntryKey(entry)} entry={entry} enrichment={enrichment.get(entry.sourceId)} />
               ))}
             </div>
           )}

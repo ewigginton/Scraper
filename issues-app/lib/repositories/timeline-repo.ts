@@ -235,6 +235,27 @@ function tieOf(e: TimelineEntry): string {
 }
 
 /**
+ * P2 FIX (round 5): the single source of truth for a TimelineEntry's React
+ * list key, exported so both render sites (app/issues/[id]/timeline/page.tsx
+ * and app/people/[id]/page.tsx) can never drift from the merge's own
+ * disambiguator again — that drift (render sites keying on the OLD, since-
+ * removed `sourceTable:sourceId:kind` composite instead of `tieOf`) is
+ * exactly what produced the round-4 finding this fixes: several audit_events
+ * rows about one issue/task/hold share one `sourceId` (the AUDITED OBJECT's
+ * id, not the audit row's own id — see TimelineEntry's `auditEventId` doc
+ * comment), so keying render on `sourceTable:sourceId:kind` collapsed them
+ * onto ONE identical React key. `tieOf` is already a globally-unique
+ * identity per entry (the row's own primary key for 'audit'/'communication',
+ * or `sourceTable:sourceId:kind` for the other kinds, which have no risk of
+ * sharing a `sourceId` across rows), so no extra `atExact` prefix is needed
+ * — but including it costs nothing and gives React a stable prefix that also
+ * happens to sort chronologically, which is a nice debugging property.
+ */
+export function timelineEntryKey(e: TimelineEntry): string {
+  return `${e.atExact}:${tieOf(e)}`;
+}
+
+/**
  * Ties are broken DESCENDING by `tieOf`, matching `ORDER BY occurred_at
  * DESC, id DESC` — the SQL order every paginated source actually fetches
  * rows in. An ascending tie-break here is silently INCOMPATIBLE with that:

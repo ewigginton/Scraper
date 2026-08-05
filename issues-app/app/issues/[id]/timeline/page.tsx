@@ -131,7 +131,7 @@ export default async function IssueTimelinePage({ params, searchParams }: PagePr
           <div className={styles.feed}>
             {timeline.entries.map((entry) => (
               <TimelineEntryRow
-                key={`${entry.sourceTable}:${entry.sourceId}:${entry.kind}`}
+                key={timelineRepo.timelineEntryKey(entry)}
                 entry={entry}
                 enrichment={enrichment.get(entry.sourceId)}
                 currentIssueId={issue.id}

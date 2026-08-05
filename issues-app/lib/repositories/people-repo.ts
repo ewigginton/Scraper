@@ -284,3 +284,4 @@ export async function enrichCommunicationEntries(db: DbHandle, entries: Timeline
 // Re-exported so pages can import everything person-timeline-related from
 // this one module.
 export type { TimelineEntry, TimelineFilters, TimelineResult };
+export const timelineEntryKey = timelineRepo.timelineEntryKey;

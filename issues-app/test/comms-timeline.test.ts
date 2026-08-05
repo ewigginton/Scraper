@@ -730,6 +730,51 @@ describe('timeline-repo', () => {
       }
       expect(heteroTitlesOf(paged)).toEqual(new Set(['Issue hetero_test', 'Task hetero_test']));
     });
+
+    // P2 regression (round 5): both flagship render sites
+    // (app/issues/[id]/timeline/page.tsx and app/people/[id]/page.tsx) used
+    // to key their React list on `${sourceTable}:${sourceId}:${kind}` --
+    // the exact composite the round-4 P1 fix above proved can't distinguish
+    // two audit_events rows about the SAME object, because `sourceId` for an
+    // 'audit' entry is the AUDITED OBJECT's id, not the audit row's own id
+    // (see TimelineEntry's `auditEventId` doc comment). `timelineEntryKey`
+    // is the exported chokepoint both render sites now call instead, so it
+    // can never drift from the merge's own `tieOf` disambiguator again. This
+    // is a DOM-free unit test: it asserts key uniqueness directly against
+    // the entries timeline-repo returns, without rendering either page.
+    it('P2 regression (round 5): timelineEntryKey is unique across several audit_events rows about ONE object, including the round-4 hetero-object same-microsecond fixture', async () => {
+      const owner = await makePerson(handle.db);
+      const { issue } = await makeIssueWithPeople(handle.db, [{ personRefId: owner.id, role: 'owner' }]);
+      const [taskRow] = await handle.db.select({ id: tasks.id }).from(tasks).where(eq(tasks.issueId, issue.id)).limit(1);
+      if (!taskRow) throw new Error('expected an initial task from makeIssueWithPeople');
+
+      // Round-4 probe G's exact reproduction: 3 audit rows about the SAME
+      // object (the issue) -- the case the OLD `sourceTable:sourceId:kind`
+      // render key collapsed onto ONE identical key.
+      await insertAuditEventAt(handle.db, { objectTable: 'issues', objectId: issue.id, action: 'key_test_a' }, '2026-08-04T13:00:00.111111Z');
+      await insertAuditEventAt(handle.db, { objectTable: 'issues', objectId: issue.id, action: 'key_test_b' }, '2026-08-04T13:00:00.222222Z');
+      await insertAuditEventAt(handle.db, { objectTable: 'issues', objectId: issue.id, action: 'key_test_c' }, '2026-08-04T13:00:00.333333Z');
+      // Plus the round-4 P1 fixture: a hetero-object pair (issue + its own
+      // task) sharing one microsecond-precision occurred_at.
+      await insertAuditEventAt(handle.db, { objectTable: 'issues', objectId: issue.id, action: 'hetero_key_test' }, '2026-08-04T14:00:00.123456Z');
+      await insertAuditEventAt(handle.db, { objectTable: 'tasks', objectId: taskRow.id, action: 'hetero_key_test' }, '2026-08-04T14:00:00.123456Z');
+
+      const result = await timelineRepo.issueTimeline(handle.db, { issueId: issue.id, filters: { kinds: ['audit'] }, limit: 1000 });
+      const keyTestEntries = result.entries.filter((e) => e.title.endsWith('key_test_a') || e.title.endsWith('key_test_b') || e.title.endsWith('key_test_c') || e.title.endsWith('hetero_key_test'));
+      expect(keyTestEntries.length).toBeGreaterThanOrEqual(5);
+
+      // The OLD, condemned render key: proves this fixture DOES reproduce a
+      // collision under the pre-fix formula (the 3 same-object rows all
+      // share one `issues:<id>:audit` string).
+      const oldKeyOf = (e: (typeof result.entries)[number]) => `${e.sourceTable}:${e.sourceId}:${e.kind}`;
+      const oldKeys = keyTestEntries.map(oldKeyOf);
+      expect(new Set(oldKeys).size).toBeLessThan(oldKeys.length);
+
+      // The NEW key, exported from timeline-repo and used by both render
+      // sites, must be genuinely unique per entry.
+      const newKeys = keyTestEntries.map(timelineRepo.timelineEntryKey);
+      expect(new Set(newKeys).size).toBe(newKeys.length);
+    });
   });
 
   describe('personTimeline', () => {
@@ -1045,7 +1090,7 @@ describe('NUL byte (U+0000) in free-text filters never reaches the driver', () =
 
   it('a cursor whose decoded sortValue contains a NUL byte is treated as invalid (page 1), not thrown', async () => {
     const { decodeCursor: decodeIssuesCursor, encodeCursor: encodeIssuesCursor } = await import('../lib/repositories/issues-query-repo.ts');
-    const poisoned = encodeIssuesCursor('abc\u0000def', '00000000-0000-0000-0000-000000000000');
+    const poisoned = encodeIssuesCursor('updated_at', 'abc\u0000def', '00000000-0000-0000-0000-000000000000');
     expect(decodeIssuesCursor(poisoned)).toBeNull();
   });
 
@@ -1105,7 +1150,7 @@ describe('PARSE-COMPATIBILITY FUZZ (round 2): a Date.parse-but-not-Postgres-pars
 
   it('issues-query-repo.decodeCursor + validCursorForSort: listIssues does not throw a raw driver error on the weird cursor', async () => {
     const { listIssues, encodeCursor: encodeIssuesCursor } = await import('../lib/repositories/issues-query-repo.ts');
-    const poisoned = encodeIssuesCursor(WEIRD_BUT_JS_PARSEABLE_AT, '00000000-0000-0000-0000-000000000000');
+    const poisoned = encodeIssuesCursor('updated_at', WEIRD_BUT_JS_PARSEABLE_AT, '00000000-0000-0000-0000-000000000000');
     await expect(listIssues(handle.db, { cursor: poisoned, sort: { key: 'updated_at', direction: 'desc' } })).resolves.not.toThrow();
   });
 
@@ -1192,7 +1237,7 @@ describe('P2 regression (round 3): extended-year and year-0000 cursor timestamps
   it('issues-query-repo: cursors carrying the same payloads never reach the driver (listIssues resolves, does not throw)', async () => {
     const { listIssues, encodeCursor: encodeIssuesCursor } = await import('../lib/repositories/issues-query-repo.ts');
     for (const at of BAD_TIMESTAMPS) {
-      const poisoned = encodeIssuesCursor(at, '11111111-1111-1111-1111-111111111111');
+      const poisoned = encodeIssuesCursor('updated_at', at, '11111111-1111-1111-1111-111111111111');
       await expect(listIssues(handle.db, { cursor: poisoned, sort: { key: 'updated_at', direction: 'desc' } })).resolves.not.toThrow();
     }
   });

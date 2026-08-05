@@ -284,14 +284,23 @@ function orderExprFor(spec: SortColumnSpec): SQL {
 // ---------------------------------------------------------------------
 
 interface DecodedCursor {
+  /**
+   * P3 FIX (round 5): the SortKey this cursor was minted under (see
+   * validCursorForSort's doc comment below for why this is required, not
+   * just carried along informationally). Typed as plain `string`, not
+   * `SortKey` — an untrusted cursor's key is only ever COMPARED against the
+   * already-allowlist-resolved `sort.key`, never used to index/look
+   * anything up, so no allowlist validation is needed at decode time.
+   */
+  sortKey: string;
   sortValue: string;
   id: string;
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-export function encodeCursor(sortValue: string, id: string): string {
-  return Buffer.from(JSON.stringify([sortValue, id]), 'utf8').toString('base64url');
+export function encodeCursor(sortKey: string, sortValue: string, id: string): string {
+  return Buffer.from(JSON.stringify([sortKey, sortValue, id]), 'utf8').toString('base64url');
 }
 
 /** Returns null (meaning: treat as the first page) on ANY malformed input — never throws. */
@@ -300,9 +309,15 @@ export function decodeCursor(raw: string | null | undefined): DecodedCursor | nu
   try {
     const json = Buffer.from(raw, 'base64url').toString('utf8');
     const parsed: unknown = JSON.parse(json);
-    if (!Array.isArray(parsed) || parsed.length !== 2) return null;
-    const [sortValue, id] = parsed as [unknown, unknown];
-    if (typeof sortValue !== 'string' || typeof id !== 'string') return null;
+    // P3 FIX (round 5): the payload grew a leading sortKey element (was
+    // [sortValue, id], now [sortKey, sortValue, id]) — see
+    // validCursorForSort's doc comment. A 2-element legacy cursor (minted
+    // before this fix shipped, e.g. sitting in a bookmarked/shared URL)
+    // fails this length check and decodes to null, which is exactly the
+    // documented "malformed cursor -> page 1" contract, not a thrown error.
+    if (!Array.isArray(parsed) || parsed.length !== 3) return null;
+    const [sortKey, sortValue, id] = parsed as [unknown, unknown, unknown];
+    if (typeof sortKey !== 'string' || typeof sortValue !== 'string' || typeof id !== 'string') return null;
     if (!UUID_RE.test(id)) return null;
     // INJECTION FUZZ finding (round 2): sortValue is bound directly as a
     // text-typed parameter for non-timestamp sorts (keysetPredicate's
@@ -311,9 +326,11 @@ export function decodeCursor(raw: string | null | undefined): DecodedCursor | nu
     // raw Postgres "invalid byte sequence" error. Reject outright (treat
     // as an invalid/stale cursor -> page 1) rather than silently
     // stripping, since silently altering a cursor's sort value could
-    // otherwise reorder/skip rows.
-    if (containsNulByte(sortValue)) return null;
-    return { sortValue, id };
+    // otherwise reorder/skip rows. sortKey gets the same guard — it never
+    // reaches SQL (only compared in JS against the resolved sort.key), but
+    // there is no reason to let a NUL-carrying value past decode either.
+    if (containsNulByte(sortValue) || containsNulByte(sortKey)) return null;
+    return { sortKey, sortValue, id };
   } catch {
     return null;
   }
@@ -327,9 +344,30 @@ export function decodeCursor(raw: string | null | undefined): DecodedCursor | nu
  * un-parseable timestamp string reach the driver — is what keeps a
  * malformed/stale cursor a safe "start over from page 1" instead of a
  * thrown SQL error.
+ *
+ * P3 FIX (round 5): the value-type shape check below is necessary but not
+ * sufficient — it only catches a cross-sort replay when the two sorts
+ * happen to disagree on `valueType` (e.g. priority [text] vs updated_at
+ * [timestamp]). Two TEXT sorts (e.g. priority vs lifecycle_status) both
+ * pass this check trivially, so the stale cursor's `sortValue` (still
+ * meaningful under the OLD sort) got bound as-is into the new sort's
+ * `keysetPredicate` — and after PRIORITY_RANK_EXPR started emitting digit
+ * ranks ('4'..'1') instead of the priority words, that stale digit compared
+ * against every OTHER text sort's real values and matched none of them:
+ * `lifecycle_status < '4'` is true for every lifecycle_status value's first
+ * byte, so a `desc` replay returned EVERY row after a strictly-less
+ * comparison miscount, and an `asc` replay could return ZERO — reproduced
+ * as zero rows (see this file's regression test), contradicting this
+ * function's own "stale cursor -> page 1" contract. The general fix: bind
+ * the cursor to the exact SortKey it was minted under (encodeCursor's new
+ * `sortKey` element) and discard it outright on ANY sort-key change, not
+ * just a valueType mismatch — this closes the whole class (any sort-key
+ * change with a live cursor), the same way the round-3 timestamp-shape
+ * check above closed its narrower class.
  */
-function validCursorForSort(cursor: DecodedCursor | null, spec: SortColumnSpec): DecodedCursor | null {
+function validCursorForSort(cursor: DecodedCursor | null, sortKey: SortKey, spec: SortColumnSpec): DecodedCursor | null {
   if (!cursor) return null;
+  if (cursor.sortKey !== sortKey) return null;
   if (spec.valueType === 'timestamp') {
     // ROUND-3 FIX (P2): the round-2 fix canonicalized via
     // `new Date(Date.parse(x)).toISOString()`, which is a NO-OP for ISO
@@ -437,7 +475,7 @@ export async function listIssues(db: DbHandle, params: ListIssuesParams = {}): P
   const limit = clampLimit(params.limit);
   const filters = normalizeFilters(params.filters);
   const today = params.today ?? businessTodayIso();
-  const cursor = validCursorForSort(decodeCursor(params.cursor ?? null), spec);
+  const cursor = validCursorForSort(decodeCursor(params.cursor ?? null), sort.key, spec);
 
   const conditions = buildFilterConditions(filters, today);
   if (cursor) {
@@ -461,7 +499,7 @@ export async function listIssues(db: DbHandle, params: ListIssuesParams = {}): P
   const hasMore = rows.length > limit;
   const pageRows = hasMore ? rows.slice(0, limit) : rows;
   const lastRow = pageRows[pageRows.length - 1];
-  const nextCursor = hasMore && lastRow ? encodeCursor(lastRow.cursorValue, lastRow.issue.id) : null;
+  const nextCursor = hasMore && lastRow ? encodeCursor(sort.key, lastRow.cursorValue, lastRow.issue.id) : null;
 
   return { rows: pageRows, nextCursor, sort };
 }
