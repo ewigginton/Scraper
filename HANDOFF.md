@@ -1,6 +1,6 @@
 # Session Handoff — CCL Land Scraper
 
-Last updated: **Aug 4, 2026, ~7:30 PM Central** (update this stamp when you edit).
+Last updated: **Aug 5, 2026, ~9:30 AM Central** (update this stamp when you edit).
 Read CLAUDE.md first — it has the standing working rules (workflow orchestration,
 model ladder, hard lines) and the Source outage playbook. This file is the
 *live status*: what's in flight right now and why.
@@ -17,26 +17,42 @@ the Mac picks changes up automatically. **Cloud IPs cannot fetch LandWatch/
 CoStar sites (bot-blocked) — anything needing live LandWatch pages must run on
 the Mac or come from `data/source-health/` evidence captures.**
 
-## State of play (Aug 4)
+## State of play (Aug 5)
 
-- **LandWatch outage: FIXED, pending full confirmation tonight.** Site
-  redesigned URLs (~May 2026) → months of "0 checked". Fix = PR #29, commit
-  `108622c`, merged ~3 AM Aug 4 (new `/{state}-land-for-sale/{county}-county`
-  URL scheme, `/page-N` pagination, error-shell detection). Proof it works: the
-  stray 3:35 AM dry-run jobs ran post-merge code on the Mac and parsed
-  **29 LandWatch listings** with zero bot-block/markup warnings. Tonight's
-  2 AM run is the first FULL county rotation on the new scheme, plus 4 queued
-  evidence-capture URL variants (the `minAcreage=150` filter segment is still
-  unconfirmed in the new scheme). A check-in is armed for **2:45 AM Central
-  Aug 5** to read the nightly report, pull evidence, commit a
-  `landwatch-search.html` fixture, and fix any filter-segment issue via PR.
+- **LandWatch outage: FIXED and CONFIRMED.** The Aug 5 2 AM nightly (code
+  `6c1d488`) ran the first full county rotation on the new URL scheme:
+  **2199 checked → 15 passed → 15 new**, 71/189 counties (rotation group
+  1 of 3), 15/15 detail fetches OK, zero bot-block/markup-drift warnings.
+  All 4 queued evidence captures landed on `evidence-inbox`; the
+  `/acres-over-150` path segment is CONFIRMED as real server-side filtering
+  (4 listings all ≥201ac vs 5ac lots on the unfiltered page). Real-HTML
+  fixtures now live in `test/fixtures/landwatch-search*.html` and the two
+  formerly-skipped parser tests run for real.
+- **Lead recheck's first night proved the concept**: 93/98 leads rechecked;
+  4 flagged now-unavailable; 11 acreage mismatches — including Emma's
+  original bad lead pid 426688209 (recorded 241ac, live 0.24ac). NOTE a
+  likely NEW defect visible in the mismatches: several leads scraped tonight
+  recorded lake/community acreage from prose ("1,000 acre Lake Halford" →
+  recorded 1000ac for a 0.94ac lot; also 600→5.01, 440→80, 80→36). The
+  scraper's enrichment acreage and the recheck's extraction disagree on the
+  same pages — the recheck side looks right. Root-cause candidate: enrichment
+  extraction picks the most-frequent/wrong number where intake's
+  extractListingDetails does better. NOT yet fixed — next session should
+  diagnose at the shared chokepoint before more 1000ac-lot leads accumulate.
+- **WhitetailProperties: 0 listings parsed** in the Aug 5 nightly (site-issue
+  flagged in the email). Not yet diagnosed — could be blocked or markup
+  drift; follow the Source outage playbook if it repeats.
 - **Stray scheduled jobs on the Mac**: leftover 3:35 AM validation dry-run
-  jobs send Emma extra emails daily. Fix has two parts: (1) Nora runs
-  `bash scripts/setup-production.sh` on the Mac and accepts removals —
-  **answer "n" (keep) for `com.ccl.land-scraper.midday.plist`**, everything
-  else scraper-shaped gets "y"; (2) commit `c242715` added a nightly
-  launchd/cron audit that names any leftover/drifted job in the report email
-  until it's removed.
+  jobs send Emma extra emails daily — they fired again Aug 5 (~3:34 AM).
+  Fix has two parts: (1) Nora runs `bash scripts/setup-production.sh` on
+  the Mac and accepts removals — **answer "n" (keep) for
+  `com.ccl.land-scraper.midday.plist`**, everything else scraper-shaped
+  gets "y"; (2) commit `c242715` added a nightly launchd/cron audit that
+  names any leftover/drifted job in the report email until it's removed.
+  The audit section did NOT appear in the Aug 5 email — expected: the
+  running `run-scraper.sh` instance was the pre-update version (the script
+  self-updates the checkout, but the already-running shell is old). It
+  should appear from the Aug 6 nightly onward; if it still doesn't, debug.
 - **Lead-quality fixes LANDED** (3 workflow rounds + inline round 3 after the
   subagent harness broke; verified by adversarial-Opus attack harnesses rerun
   to green, full suite 378 pass), from Emma's reports of bad leads (all

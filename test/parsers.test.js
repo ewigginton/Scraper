@@ -206,6 +206,27 @@ test('LandWatch extracts real listings from a captured search page (when present
   }
 });
 
+// Captured 2026-08-05 via the evidence-capture pipeline (config/
+// evidence-requests.json → nightly run on the production Mac → evidence-inbox
+// branch). Confirms the /acres-over-150 path segment is real server-side
+// filtering in LandWatch's 2026 URL scheme — the open question left when the
+// scheme was rebuilt (the old minAcreage=150 query param had no confirmed
+// equivalent). The same capture batch's unfiltered page contains 5-acre
+// listings, so an all-≥150 result here is the filter working, not chance.
+test('LandWatch /acres-over-150 filter segment returns only ≥150-acre listings (when captured)', (t) => {
+  const fixture = path.join(__dirname, 'fixtures', 'landwatch-search-acres-over-150.html');
+  if (!fs.existsSync(fixture)) {
+    t.skip('no captured acres-over-150 fixture');
+    return;
+  }
+  const parser = new LandWatchParser();
+  const listings = parser.parseSearchPage(fs.readFileSync(fixture, 'utf8'), 'Wayne', 'KY');
+  assert.ok(listings.length > 0, 'filtered page should still yield listings');
+  for (const l of listings) {
+    assert.ok(l.acres >= 150, `filter segment leaked a below-150 listing: ${l.acres}ac ${l.url}`);
+  }
+});
+
 test('county slugs strip punctuation so URLs do not 404', () => {
   const parser = new LandWatchParser();
   const urls = parser.buildSearchUrls([
