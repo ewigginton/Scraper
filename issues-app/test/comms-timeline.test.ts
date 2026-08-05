@@ -1090,7 +1090,7 @@ describe('NUL byte (U+0000) in free-text filters never reaches the driver', () =
 
   it('a cursor whose decoded sortValue contains a NUL byte is treated as invalid (page 1), not thrown', async () => {
     const { decodeCursor: decodeIssuesCursor, encodeCursor: encodeIssuesCursor } = await import('../lib/repositories/issues-query-repo.ts');
-    const poisoned = encodeIssuesCursor('updated_at', 'abc\u0000def', '00000000-0000-0000-0000-000000000000');
+    const poisoned = encodeIssuesCursor('updated_at', 'desc', 'abc\u0000def', '00000000-0000-0000-0000-000000000000');
     expect(decodeIssuesCursor(poisoned)).toBeNull();
   });
 
@@ -1150,7 +1150,7 @@ describe('PARSE-COMPATIBILITY FUZZ (round 2): a Date.parse-but-not-Postgres-pars
 
   it('issues-query-repo.decodeCursor + validCursorForSort: listIssues does not throw a raw driver error on the weird cursor', async () => {
     const { listIssues, encodeCursor: encodeIssuesCursor } = await import('../lib/repositories/issues-query-repo.ts');
-    const poisoned = encodeIssuesCursor('updated_at', WEIRD_BUT_JS_PARSEABLE_AT, '00000000-0000-0000-0000-000000000000');
+    const poisoned = encodeIssuesCursor('updated_at', 'desc', WEIRD_BUT_JS_PARSEABLE_AT, '00000000-0000-0000-0000-000000000000');
     await expect(listIssues(handle.db, { cursor: poisoned, sort: { key: 'updated_at', direction: 'desc' } })).resolves.not.toThrow();
   });
 
@@ -1237,7 +1237,7 @@ describe('P2 regression (round 3): extended-year and year-0000 cursor timestamps
   it('issues-query-repo: cursors carrying the same payloads never reach the driver (listIssues resolves, does not throw)', async () => {
     const { listIssues, encodeCursor: encodeIssuesCursor } = await import('../lib/repositories/issues-query-repo.ts');
     for (const at of BAD_TIMESTAMPS) {
-      const poisoned = encodeIssuesCursor('updated_at', at, '11111111-1111-1111-1111-111111111111');
+      const poisoned = encodeIssuesCursor('updated_at', 'desc', at, '11111111-1111-1111-1111-111111111111');
       await expect(listIssues(handle.db, { cursor: poisoned, sort: { key: 'updated_at', direction: 'desc' } })).resolves.not.toThrow();
     }
   });

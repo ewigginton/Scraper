@@ -304,14 +304,24 @@ interface DecodedCursor {
    * anything up, so no allowlist validation is needed at decode time.
    */
   sortKey: string;
+  /**
+   * ROUND-6 FIX (adversarial round 5's one survivor): the sort DIRECTION
+   * this cursor was minted under. Binding to sortKey alone left the
+   * direction-flip replay open — a desc-minted cursor replayed under asc
+   * inverts the keyset predicate and returns zero rows on every sort key
+   * (12/12 reproduced by the round-5 adversary), the same empty-page harm
+   * the sortKey binding was built to prevent. Same remedy: compare, and
+   * discard the cursor outright (page-1 fallback) on any mismatch.
+   */
+  direction: string;
   sortValue: string;
   id: string;
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-export function encodeCursor(sortKey: string, sortValue: string, id: string): string {
-  return Buffer.from(JSON.stringify([sortKey, sortValue, id]), 'utf8').toString('base64url');
+export function encodeCursor(sortKey: string, direction: string, sortValue: string, id: string): string {
+  return Buffer.from(JSON.stringify([sortKey, direction, sortValue, id]), 'utf8').toString('base64url');
 }
 
 /** Returns null (meaning: treat as the first page) on ANY malformed input — never throws. */
@@ -326,9 +336,15 @@ export function decodeCursor(raw: string | null | undefined): DecodedCursor | nu
     // before this fix shipped, e.g. sitting in a bookmarked/shared URL)
     // fails this length check and decodes to null, which is exactly the
     // documented "malformed cursor -> page 1" contract, not a thrown error.
-    if (!Array.isArray(parsed) || parsed.length !== 3) return null;
-    const [sortKey, sortValue, id] = parsed as [unknown, unknown, unknown];
-    if (typeof sortKey !== 'string' || typeof sortValue !== 'string' || typeof id !== 'string') return null;
+    // ROUND-6 FIX: payload is now [sortKey, direction, sortValue, id] —
+    // the direction element closes the direction-flip replay (see
+    // DecodedCursor.direction). 2- and 3-element legacy cursors fail this
+    // length check and decode to null: the documented "malformed/stale
+    // cursor -> page 1" contract, not a thrown error.
+    if (!Array.isArray(parsed) || parsed.length !== 4) return null;
+    const [sortKey, direction, sortValue, id] = parsed as [unknown, unknown, unknown, unknown];
+    if (typeof sortKey !== 'string' || typeof direction !== 'string' || typeof sortValue !== 'string' || typeof id !== 'string') return null;
+    if (direction !== 'asc' && direction !== 'desc') return null;
     if (!UUID_RE.test(id)) return null;
     // INJECTION FUZZ finding (round 2): sortValue is bound directly as a
     // text-typed parameter for non-timestamp sorts (keysetPredicate's
@@ -341,7 +357,7 @@ export function decodeCursor(raw: string | null | undefined): DecodedCursor | nu
     // reaches SQL (only compared in JS against the resolved sort.key), but
     // there is no reason to let a NUL-carrying value past decode either.
     if (containsNulByte(sortValue) || containsNulByte(sortKey)) return null;
-    return { sortKey, sortValue, id };
+    return { sortKey, direction, sortValue, id };
   } catch {
     return null;
   }
@@ -376,9 +392,18 @@ export function decodeCursor(raw: string | null | undefined): DecodedCursor | nu
  * change with a live cursor), the same way the round-3 timestamp-shape
  * check above closed its narrower class.
  */
-function validCursorForSort(cursor: DecodedCursor | null, sortKey: SortKey, spec: SortColumnSpec): DecodedCursor | null {
+function validCursorForSort(
+  cursor: DecodedCursor | null,
+  sortKey: SortKey,
+  direction: 'asc' | 'desc',
+  spec: SortColumnSpec,
+): DecodedCursor | null {
   if (!cursor) return null;
   if (cursor.sortKey !== sortKey) return null;
+  // ROUND-6 FIX: a direction flip inverts the keyset predicate, turning a
+  // stale cursor into an affirmatively empty page — discard exactly like a
+  // sort-key change (see DecodedCursor.direction).
+  if (cursor.direction !== direction) return null;
   if (spec.valueType === 'timestamp') {
     // ROUND-3 FIX (P2): the round-2 fix canonicalized via
     // `new Date(Date.parse(x)).toISOString()`, which is a NO-OP for ISO
@@ -486,7 +511,7 @@ export async function listIssues(db: DbHandle, params: ListIssuesParams = {}): P
   const limit = clampLimit(params.limit);
   const filters = normalizeFilters(params.filters);
   const today = params.today ?? businessTodayIso();
-  const cursor = validCursorForSort(decodeCursor(params.cursor ?? null), sort.key, spec);
+  const cursor = validCursorForSort(decodeCursor(params.cursor ?? null), sort.key, sort.direction, spec);
 
   const conditions = buildFilterConditions(filters, today);
   if (cursor) {
@@ -510,7 +535,7 @@ export async function listIssues(db: DbHandle, params: ListIssuesParams = {}): P
   const hasMore = rows.length > limit;
   const pageRows = hasMore ? rows.slice(0, limit) : rows;
   const lastRow = pageRows[pageRows.length - 1];
-  const nextCursor = hasMore && lastRow ? encodeCursor(sort.key, lastRow.cursorValue, lastRow.issue.id) : null;
+  const nextCursor = hasMore && lastRow ? encodeCursor(sort.key, sort.direction, lastRow.cursorValue, lastRow.issue.id) : null;
 
   return { rows: pageRows, nextCursor, sort };
 }

@@ -323,6 +323,40 @@ describe('issues-query-repo', () => {
       expect(replayedUnderLifecycleStatus.rows.map((r) => r.issue.id).sort()).toEqual([low.id, normal.id, high.id, urgent.id].sort());
     });
 
+    // ROUND-6 regression (adversarial round 5's one survivor): binding the
+    // cursor to sortKey alone left the DIRECTION flip open — a desc-minted
+    // cursor replayed under asc inverts the keyset predicate and returns an
+    // affirmatively empty page on every sort key (the adversary reproduced
+    // 12/12: 6 keys x both flips). The cursor now also carries its minted
+    // direction and is discarded (page-1 fallback) on any mismatch. This
+    // test codifies that exact 12-case matrix.
+    it('a cursor replayed with the sort DIRECTION flipped falls back to the first page on every sort key, both directions', async () => {
+      await makeIssue(handle.db, { priority: 'low', lifecycleStatus: 'intake' });
+      await makeIssue(handle.db, { priority: 'normal', lifecycleStatus: 'active', coordinatorId: 'alice' });
+      await makeIssue(handle.db, { priority: 'high', lifecycleStatus: 'waiting' });
+      await makeIssue(handle.db, { priority: 'urgent', lifecycleStatus: 'blocked' });
+
+      const sortKeys = ['updated_at', 'created_at', 'priority', 'issue_type', 'lifecycle_status', 'property_display_name'] as const;
+      for (const key of sortKeys) {
+        for (const minted of ['asc', 'desc'] as const) {
+          const flipped = minted === 'asc' ? 'desc' : 'asc';
+          const first = await listIssues(handle.db, { sort: { key, direction: minted }, limit: 1 });
+          expect(first.nextCursor, `${key} ${minted}: nextCursor should exist`).not.toBeNull();
+
+          const replayed = await listIssues(handle.db, {
+            sort: { key, direction: flipped },
+            cursor: first.nextCursor,
+          });
+          const fresh = await listIssues(handle.db, { sort: { key, direction: flipped } });
+          expect(
+            replayed.rows.map((r) => r.issue.id),
+            `${key}: ${minted}-minted cursor replayed under ${flipped} must equal the cursor-less first page`,
+          ).toEqual(fresh.rows.map((r) => r.issue.id));
+          expect(replayed.rows.length, `${key} ${minted}->${flipped}: page must not be empty`).toBeGreaterThan(0);
+        }
+      }
+    });
+
     it('sorts by the nullable property_display_name key without erroring on NULL display names', async () => {
       const withName = await makeIssue(handle.db, { propertyOverrides: { displayName: 'Zephyr Tract' } });
       const withoutName = await makeIssue(handle.db, { propertyOverrides: { displayName: null } });
