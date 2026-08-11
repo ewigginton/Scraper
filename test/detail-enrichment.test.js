@@ -441,3 +441,129 @@ test('Step 4.6: a listing at/above the default 40ac floor is written normally (n
     })
   );
 });
+
+// ---------- acreage cross-check: the "N-acre lake" bug (Lane B) ----------
+// Real LandWatch failure: a 0.94ac lot's search-card acreage regex snagged
+// "1,000 acre" from nearby description prose ("Nestled beside the gorgeous
+// 1,000 acre Lake Halford"), so the card arrived with acres=1000 — well clear
+// of both the price-per-acre filter and the 40ac floor, so it was written as
+// a bogus 1000-acre New Lead. The detail page's price line ("$150,000 •
+// 0.94 acres") names the listing's true acreage; enrichment must trust it,
+// correct the listing, and record the disagreement so it surfaces in the
+// nightly report — see BaseParser#extractDetailAcres / applyDetailToListing.
+function withDataDir(fn) {
+  const os = require('os');
+  const path = require('path');
+  const fs = require('fs');
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ccl-test-'));
+  const original = process.env.SCRAPER_DATA_DIR;
+  process.env.SCRAPER_DATA_DIR = tmpDir;
+  return Promise.resolve()
+    .then(fn)
+    .finally(() => {
+      if (original === undefined) delete process.env.SCRAPER_DATA_DIR;
+      else process.env.SCRAPER_DATA_DIR = original;
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+}
+
+test('Step 4.5: a >=10x card-vs-detail acreage disagreement is corrected and recorded as a source-health suspicion', async () => {
+  initFilter(new Map([['taney|MO', 4000]]));
+
+  const listing = {
+    // Card-scraped acreage (1000) is the corrupted figure; $150,000/1000ac =
+    // $150/ac clears the $4000/ac target easily, so Step 4a passes it through
+    // exactly like the real production bug.
+    name: 'Lake Halford Retreat', price: 150000, acres: 1000, county: 'Taney', state: 'MO',
+    url: 'https://fake.example/lake-halford',
+    description: 'Nestled beside the gorgeous 1,000 acre Lake Halford.',
+  };
+  const detailHtml = `<html><body><main>
+      <h1>Lake Halford Retreat</h1>
+      <div class="price-line">$150,000 • 0.94 acres</div>
+      <p>Nestled beside the gorgeous 1,000 acre Lake Halford, this parcel offers incredible views.</p>
+    </main></body></html>`;
+  const parser = new FakeEnrichParser({ [listing.url]: detailHtml });
+  const { report, ctx } = makeCtx({ dryRun: false });
+
+  await withDataDir(() =>
+    withEnv({ GITHUB_ACTIONS: undefined, SCRAPER_DETAIL_ENRICHMENT: undefined, SCRAPER_MIN_ACRES: undefined }, () =>
+      withStubbedWrite(async (captured) => {
+        const siteReport = await processScrapedListings(parser, [listing], ctx);
+
+        // The corrected 0.94ac figure is the TRUE acreage — which correctly
+        // fails the 40ac floor (Step 4.6), unlike the bogus 1000ac figure
+        // that let this exact listing slip through in production.
+        assert.equal(captured.length, 0, 'the corrected small-acreage lot must never reach Airtable as a 1000ac lead');
+        assert.equal(siteReport.rejectedBelowMinAcres, 1);
+        assert.equal(report.totals.rejectedBelowMinAcres, 1);
+
+        const issue = report.sourceIssues.find(i => i.url === listing.url);
+        assert.ok(issue, 'the card/detail acreage mismatch is recorded as a source-health suspicion');
+        assert.equal(issue.type, 'markup_drift');
+        assert.equal(issue.source, 'FakeEnrichSite');
+        assert.match(issue.error, /1000/);
+        assert.match(issue.error, /0\.94/);
+      })
+    )
+  );
+});
+
+test('Step 4.5: acreage cross-check leaves a listing alone when card and detail roughly agree', async () => {
+  initFilter(new Map([['taney|MO', 4000]]));
+
+  const listing = {
+    name: 'Ordinary Tract', price: 300000, acres: 100, county: 'Taney', state: 'MO',
+    url: 'https://fake.example/ordinary',
+  };
+  // Detail page's price line says 98 acres — well within 10x of the card's
+  // 100, so the card figure (or a close detail figure) must NOT trigger a
+  // mismatch suspicion or an unnecessary correction to the wrong number.
+  const detailHtml = `<html><body><main>
+      <h1>Ordinary Tract</h1>
+      <div class="price-line">$300,000 • 98 acres</div>
+      <p>Rolling pasture with a live creek and mature timber.</p>
+    </main></body></html>`;
+  const parser = new FakeEnrichParser({ [listing.url]: detailHtml });
+  const { report, ctx } = makeCtx({ dryRun: false });
+
+  await withDataDir(() =>
+    withEnv({ GITHUB_ACTIONS: undefined, SCRAPER_DETAIL_ENRICHMENT: undefined }, () =>
+      withStubbedWrite(async (captured) => {
+        await processScrapedListings(parser, [listing], ctx);
+        const written = captured.find(l => l.url === listing.url);
+        assert.ok(written, 'a normal listing is still written');
+        assert.equal(written.acres, 100, 'a near-agreeing detail figure does not overwrite the card acreage');
+        assert.equal(report.sourceIssues.find(i => i.url === listing.url), undefined, 'no mismatch suspicion recorded');
+      })
+    )
+  );
+});
+
+test('Step 4.5: a missing card acreage is filled from the detail page structured signal', async () => {
+  initFilter(new Map([['taney|MO', 4000]]));
+
+  const listing = {
+    name: 'Sparse Card Tract', price: 300000, acres: null, county: 'Taney', state: 'MO',
+    url: 'https://fake.example/sparse-acres',
+  };
+  const detailHtml = `<html><body><main>
+      <h1>Sparse Card Tract</h1>
+      <div class="price-line">$300,000 • 75 acres</div>
+    </main></body></html>`;
+  const parser = new FakeEnrichParser({ [listing.url]: detailHtml });
+  const { ctx } = makeCtx({ dryRun: false });
+
+  // A null-acres card is card-sparse, so Step 3.5 pre-filter enrichment fills
+  // it before the filter ever runs.
+  await withDataDir(() =>
+    withEnv({ GITHUB_ACTIONS: undefined, SCRAPER_DETAIL_ENRICHMENT: undefined }, () =>
+      withStubbedWrite(async (captured) => {
+        await processScrapedListings(parser, [listing], ctx);
+        const written = captured.find(l => l.url === listing.url);
+        assert.ok(written, 'the sparse-card listing is rescued by detail-page acreage and written');
+        assert.equal(written.acres, 75);
+      })
+    )
+  );
+});
