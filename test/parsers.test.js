@@ -48,6 +48,38 @@ test('LandWatch page 1 and /page-N share one pagination series key; acres-over i
   assert.notEqual(k1, kAcres);
 });
 
+test('LandWatch paginates the large-tract pass over 3 pages in the /page-N scheme', () => {
+  // Page-1-only meant a county with more than one page of ≥150ac inventory
+  // silently lost the rest — the pass exists precisely to catch big tracts
+  // pushed off the main pages.
+  const parser = new LandWatchParser();
+  const urls = parser.buildSearchUrls([{ county: 'Wayne', state: 'KY', maxCPA: 3000 }]);
+  const largeTract = urls.filter(u => u.url.includes('acres-over-150'));
+  assert.deepEqual(largeTract.map(u => u.url), [
+    'https://www.landwatch.com/kentucky-land-for-sale/wayne-county/acres-over-150',
+    'https://www.landwatch.com/kentucky-land-for-sale/wayne-county/acres-over-150/page-2',
+    'https://www.landwatch.com/kentucky-land-for-sale/wayne-county/acres-over-150/page-3',
+  ]);
+  assert.deepEqual(largeTract.map(u => u.page), [1, 2, 3],
+    'page numbers must be set so SCRAPER_MAX_PAGE can trim the pass');
+});
+
+test('LandWatch large-tract pages collapse to ONE pagination series', () => {
+  // The composed /acres-over-N/page-M shape is not yet confirmed against real
+  // HTML. Collapsing the three pages into one series is what keeps that cheap:
+  // a rejected or empty page 1 (or page 2) exhausts the series and the tail is
+  // never requested.
+  const parser = new LandWatchParser();
+  const base = 'https://www.landwatch.com/kentucky-land-for-sale/wayne-county/acres-over-150';
+  const k1 = parser.paginationSeriesKey(base, 'Wayne', 'KY');
+  const k2 = parser.paginationSeriesKey(`${base}/page-2`, 'Wayne', 'KY');
+  const k3 = parser.paginationSeriesKey(`${base}/page-3`, 'Wayne', 'KY');
+  assert.equal(k1, k2);
+  assert.equal(k2, k3);
+  const kCounty = parser.paginationSeriesKey('https://www.landwatch.com/kentucky-land-for-sale/wayne-county/page-2', 'Wayne', 'KY');
+  assert.notEqual(k1, kCounty, 'the large-tract series stays separate from the main pass');
+});
+
 test('Land.com generates title-case state slugs', () => {
   const parser = new LandComParser();
   const urls = parser.buildSearchUrls(testCounties);
@@ -225,6 +257,49 @@ test('LandWatch /acres-over-150 filter segment returns only ≥150-acre listings
   for (const l of listings) {
     assert.ok(l.acres >= 150, `filter segment leaked a below-150 listing: ${l.acres}ac ${l.url}`);
   }
+});
+
+// End-to-end guard for the kill switch that cost two nightlies: LandWatch
+// 400s an unsupported URL shape (Aug 6 + Aug 9), those 400s counted as
+// bot-wall blocks, and the 5th one abandoned every remaining county. The real
+// captured county page stands in for the pages that WERE working, so the test
+// proves the run keeps producing leads through the 400s.
+test('LandWatch: 400s on the large-tract pass cost only those series, never the run', async (t) => {
+  const browserFetchModule = require('../lib/browser-fetch');
+  const originalIsEnabled = browserFetchModule.isEnabled;
+  browserFetchModule.isEnabled = () => true;
+  t.after(() => { browserFetchModule.isEnabled = originalIsEnabled; });
+
+  const countyHtml = fs.readFileSync(path.join(__dirname, 'fixtures', 'landwatch-search.html'), 'utf8');
+  const counties = ['Wayne', 'Pulaski', 'Russell', 'Clinton', 'McCreary', 'Adair']
+    .map(county => ({ county, state: 'KY', maxCPA: 3000 }));
+
+  const parser = new LandWatchParser();
+  parser.sleep = async () => {};
+  const fetched = [];
+  parser.browserFetch = async (url) => {
+    fetched.push(url);
+    if (url.includes('acres-over-')) {
+      const err = new Error(`HTTP 400 for ${url}`);
+      err.status = 400;
+      throw err;
+    }
+    return countyHtml;
+  };
+
+  const listings = await parser.scrapeAll(counties);
+
+  assert.equal(parser.stats.blockedPages, 0, '400s must not feed the bot-wall kill switch');
+  assert.equal(parser.stats.errorPages, 0, 'nor the error-storm kill switch');
+  assert.equal(parser.stats.unsupportedUrlPages, 6, 'one per county large-tract series');
+  assert.ok(!parser.sourceIssues.some(issue => issue.type === 'site_abandoned'),
+    'the run must not be abandoned');
+  // Every county's large-tract page 1 is attempted, and each 400 exhausts its
+  // series so pages 2-3 are never requested.
+  assert.equal(fetched.filter(url => url.includes('acres-over-')).length, 6);
+  assert.ok(!fetched.some(url => /acres-over-\d+\/page-\d/.test(url)),
+    'a rejected large-tract page 1 must skip the rest of its series');
+  assert.ok(listings.length > 0, 'the working county pages still produced leads');
 });
 
 test('county slugs strip punctuation so URLs do not 404', () => {

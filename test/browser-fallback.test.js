@@ -52,17 +52,23 @@ test('fetchPageSmart falls back to the browser on HTTP 403', async (t) => {
   assert.match(html, /REAL LISTING/);
 });
 
-test('fetchPageSmart falls back to the browser on HTTP 400 (CoStar bot wall)', async (t) => {
+test('fetchPageSmart does NOT fall back on HTTP 400 (unsupported URL shape, not a bot wall)', async (t) => {
+  // LandWatch 400s an unsupported URL SHAPE (production Aug 6 + Aug 9:
+  // /oklahoma-land-for-sale/leflore-county and an acres-over segment). The
+  // rejection is on the URL, not the client, so a browser attempt burns ~30s
+  // on a guaranteed identical failure.
+  let browserCalled = false;
   withStubbedBrowser(t, { enabled: true, html: '<html>REAL LISTING</html>' });
   const parser = makeParser();
+  parser.browserFetch = async () => { browserCalled = true; return '<html>REAL LISTING</html>'; };
   parser.fetchPage = async () => {
     const err = new Error('HTTP 400 for url');
     err.status = 400;
     throw err;
   };
 
-  const html = await parser.fetchPageSmart('https://example.com/search?page=1');
-  assert.match(html, /REAL LISTING/);
+  await assert.rejects(() => parser.fetchPageSmart('https://example.com/search?page=1'), /HTTP 400/);
+  assert.equal(browserCalled, false);
 });
 
 test('fetchPageSmart falls back to the browser on HTTP 429 once plain retries are exhausted', async (t) => {
@@ -163,22 +169,86 @@ test('scrapeAll still records a block when the browser also gets a challenge pag
   assert.equal(parser.stats.blockedPages, 1);
 });
 
-test('scrapeAll counts a hard 400 as blocked when the browser fallback also fails, and aborts after 5', async (t) => {
-  // The browser attempt fails, so fetchPageSmart rethrows the original 400
-  // into scrapeAll's catch block, where isBotWallStatus(400) marks it blocked.
+test('scrapeAll records a hard 400 as unsupported_url — never blocked, and the run continues', async (t) => {
+  // The kill-switch regression this guards: LandWatch answers an unsupported
+  // URL shape with 400, and counting those as bot-wall blocks tripped
+  // BLOCKED_PAGES_ABORT_THRESHOLD, abandoning every remaining county for the
+  // night (Aug 6 + Aug 9 nightlies).
+  withStubbedBrowser(t, { enabled: false });
+  const parser = new BaseParser('TestSite');
+  parser.sleep = async () => {};
+  // Eight distinct county series — more than both circuit-breaker thresholds
+  // could tolerate if 400s counted toward either one.
+  const counties = ['Wayne', 'Pike', 'Shannon', 'Taney', 'Butler', 'Ripley', 'Carter', 'Dent'];
+  parser.buildSearchUrls = () => counties.map(county => ({
+    url: `https://example.com/${county}/search?page=1`, county, state: 'MO', page: 1,
+  }));
+  parser.parseSearchPage = () => [];
+  const fetched = [];
+  parser.fetchPage = async (url) => {
+    fetched.push(url);
+    const err = new Error(`HTTP 400 for ${url}`);
+    err.status = 400;
+    throw err;
+  };
+
+  const listings = await parser.scrapeAll(counties.map(county => ({ county, state: 'MO' })));
+  assert.equal(listings.length, 0);
+  assert.equal(parser.stats.blockedPages, 0, 'a 400 is not a bot-wall block');
+  assert.equal(parser.stats.errorPages, 0, 'nor a generic error page — it must not feed that breaker either');
+  assert.equal(parser.stats.unsupportedUrlPages, 8);
+  assert.equal(fetched.length, 8, 'every county is still attempted — no site abandonment');
+  assert.ok(!parser.sourceIssues.some(issue => issue.type === 'site_abandoned'),
+    'unsupported URL shapes must never abandon the site');
+  assert.equal(parser.sourceIssues.filter(issue => issue.type === 'unsupported_url').length, 8);
+  assert.equal(parser.stats.abortedByBotWall, false);
+});
+
+test('scrapeAll exhausts a 400 series so its deeper pages are never requested', async (t) => {
+  withStubbedBrowser(t, { enabled: false });
+  const parser = new BaseParser('TestSite');
+  parser.sleep = async () => {};
+  // One county, pages 1-3 in the LandWatch /page-N shape: page 1 400s, so the
+  // series is exhausted and pages 2-3 must not be fetched.
+  parser.buildSearchUrls = () => [1, 2, 3].map(page => ({
+    url: page === 1
+      ? 'https://example.com/wayne-county/acres-over-150'
+      : `https://example.com/wayne-county/acres-over-150/page-${page}`,
+    county: 'Wayne',
+    state: 'KY',
+    page,
+  }));
+  parser.parseSearchPage = () => [];
+  const fetched = [];
+  parser.fetchPage = async (url) => {
+    fetched.push(url);
+    const err = new Error(`HTTP 400 for ${url}`);
+    err.status = 400;
+    throw err;
+  };
+
+  await parser.scrapeAll([{ county: 'Wayne', state: 'KY' }]);
+  assert.deepEqual(fetched, ['https://example.com/wayne-county/acres-over-150']);
+  assert.equal(parser.stats.unsupportedUrlPages, 1);
+  assert.equal(parser.stats.blockedPages, 0);
+});
+
+test('scrapeAll still counts a hard 403 as blocked and aborts the site after 5', async (t) => {
+  // The browser attempt fails, so fetchPageSmart rethrows the original 403
+  // into scrapeAll's catch block, where isBotWallStatus(403) marks it blocked.
   withStubbedBrowser(t, { enabled: true, error: new Error('browser navigation failed') });
   const parser = new BaseParser('TestSite');
   parser.sleep = async () => {};
   // Six distinct county series so each contributes one blocked page — a single
   // county series collapses to one seriesKey and would only block once.
   const counties = ['Wayne', 'Pike', 'Shannon', 'Taney', 'Butler', 'Ripley'];
-  parser.buildSearchUrls = () => counties.map((county, i) => ({
+  parser.buildSearchUrls = () => counties.map(county => ({
     url: `https://example.com/${county}/search?page=1`, county, state: 'MO', page: 1,
   }));
   parser.parseSearchPage = () => [];
   parser.fetchPage = async () => {
-    const err = new Error('HTTP 400 for url');
-    err.status = 400;
+    const err = new Error('HTTP 403 for url');
+    err.status = 403;
     throw err;
   };
 
@@ -189,6 +259,32 @@ test('scrapeAll counts a hard 400 as blocked when the browser fallback also fail
   assert.equal(parser.stats.blockedPages, 5);
   assert.ok(parser.sourceIssues.some(issue => issue.type === 'site_abandoned'),
     'the run must abandon the site with a site_abandoned source issue');
+  assert.equal(parser.stats.abortedByBotWall, true, 'a real bot wall still arms the cooldown retry');
+});
+
+test('a 400 storm does not stop a later blocked page from tripping the bot-wall breaker', async (t) => {
+  // Mixed run: the unsupported-URL pass must neither trip the breaker itself
+  // nor mask a genuine wall that starts partway through the run.
+  withStubbedBrowser(t, { enabled: false });
+  const counties = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L'];
+  const parser = new BaseParser('TestSite');
+  parser.sleep = async () => {};
+  parser.buildSearchUrls = () => counties.map(county => ({
+    url: `https://example.com/${county}/search?page=1`, county, state: 'OK', page: 1,
+  }));
+  parser.parseSearchPage = () => [];
+  parser.fetchPage = async (url) => {
+    const county = url.match(/example\.com\/([A-Z])\//)[1];
+    const status = ['A', 'B', 'C', 'D', 'E', 'F'].includes(county) ? 400 : 403;
+    const err = new Error(`HTTP ${status} for ${url}`);
+    err.status = status;
+    throw err;
+  };
+
+  await parser.scrapeAll(counties.map(county => ({ county, state: 'OK' })));
+  assert.equal(parser.stats.unsupportedUrlPages, 6);
+  assert.equal(parser.stats.blockedPages, 5, 'the 5 403s trip the breaker; the 12th county is skipped');
+  assert.ok(parser.sourceIssues.some(issue => issue.type === 'site_abandoned'));
 });
 
 // Build a parser with N distinct county series, each a single page-1 URL, so

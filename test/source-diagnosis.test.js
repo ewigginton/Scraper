@@ -34,6 +34,23 @@ test('404 storm is diagnosed as action_needed with URL-structure language and st
   assert.match(diagnosis.headline, /stopped after 10 requests/);
 });
 
+test('an HTTP 400 storm is diagnosed as a URL-builder problem, not as a bot wall', () => {
+  // 400 means "unsupported URL shape" on the CoStar network, so it must read
+  // as action_needed (fix the parser) rather than the transient
+  // "bot defense is blocking us, wait it out" verdict it used to produce.
+  const issues = [];
+  for (let i = 0; i < 8; i++) {
+    issues.push({ source: 'TestSite', type: 'unsupported_url', county: `County${i}`, state: 'OK', page: 1, error: `HTTP 400 for https://example.com/County${i}` });
+  }
+  const diagnosis = diagnoseSite('TestSite', { status: 'ok', checked: 12, parsed: 30, errors: 8 }, issues);
+
+  assert.ok(diagnosis);
+  assert.equal(diagnosis.severity, 'action_needed');
+  assert.match(diagnosis.headline, /returned HTTP 400/);
+  assert.match(diagnosis.headline, /url builder needs updating/i);
+  assert.doesNotMatch(diagnosis.headline, /bot defense/);
+});
+
 test('bot wall with a failed post-cooldown retry is diagnosed as transient mentioning the failed retry', () => {
   const issues = [];
   for (let i = 0; i < 8; i++) issues.push(makeBlockedIssue(`County${i}`));
