@@ -117,6 +117,57 @@ test('consolidated body includes the lead review section', () => {
   assert.match(body, /Sketchy Tract/);
 });
 
+test('LARGE TRACTS section renders every large tract regardless of score, in addition to standouts', () => {
+  const { buildReviewBody } = require('../lib/notify');
+  const report = {
+    reviewed: 2,
+    errors: 0,
+    standouts: [{ name: 'Sweet Spot Tract', county: 'Wayne', state: 'KY', acres: 200, price: 400000, cpa: 2000, positives: [] }],
+    flagged: [],
+    autoRejected: [],
+    largeTracts: [{ name: 'Huge Ranch', county: 'Wayne', state: 'KY', acres: 600, price: 1200000, cpa: 2000 }],
+    largeTractHighlightMin: 500,
+  };
+  const body = buildReviewBody(report, 'Monday');
+  assert.match(body, /LARGE TRACTS \(500ac\+\)/);
+  assert.match(body, /Huge Ranch/);
+  assert.match(body, /600ac/);
+  // Additive, not a replacement — the standout list still renders too
+  assert.match(body, /STANDOUT PROPERTIES/);
+  assert.match(body, /Sweet Spot Tract/);
+});
+
+test('LARGE TRACTS section is omitted entirely when there are no large tracts', () => {
+  const { buildReviewBody } = require('../lib/notify');
+  const report = {
+    reviewed: 1,
+    errors: 0,
+    standouts: [],
+    flagged: [],
+    autoRejected: [],
+    largeTracts: [],
+    largeTractHighlightMin: 500,
+  };
+  const body = buildReviewBody(report, 'Monday');
+  assert.doesNotMatch(body, /LARGE TRACTS/);
+});
+
+test('LARGE TRACTS header reflects a custom largeTractHighlightMin setting', () => {
+  const { buildReviewBody } = require('../lib/notify');
+  const report = {
+    reviewed: 1,
+    errors: 0,
+    standouts: [],
+    flagged: [],
+    autoRejected: [],
+    largeTracts: [{ name: 'Mid Tract', county: 'Wayne', state: 'KY', acres: 300, price: 600000, cpa: 2000 }],
+    largeTractHighlightMin: 250,
+  };
+  const body = buildReviewBody(report, 'Monday');
+  assert.match(body, /LARGE TRACTS \(250ac\+\)/);
+  assert.match(body, /Mid Tract/);
+});
+
 test('review crash is surfaced in the consolidated body and subject', () => {
   const { buildScraperBody, buildScraperSubject } = require('../lib/notify');
   const scraperReport = {

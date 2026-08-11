@@ -245,6 +245,105 @@ test('runReview surfaces an availability flag in report.flagged without touching
   for (const u of updates) assert.equal('Stage' in u.fields, false, 'review must never write Stage');
 });
 
+test('runReview: a 600ac lead below standout score still lands in report.largeTracts', async (t) => {
+  const { FIELDS, STAGES } = airtable;
+  const record = {
+    id: 'recLarge0000001X',
+    fields: {
+      Name: 'Big Bend Ranch',
+      Stage: STAGES.newLead,
+      [FIELDS.price]: 1800000,
+      [FIELDS.acres]: 600, // > preferredAcresMax (400) — no sweet-spot bonus, won't standout
+      [FIELDS.notes]: '',
+      [FIELDS.created]: new Date().toISOString(),
+    },
+  };
+  const original = {
+    getRecordsByStage: airtable.getRecordsByStage,
+    resolveCountyFields: airtable.resolveCountyFields,
+    updateRecord: airtable.updateRecord,
+  };
+  const updates = [];
+  airtable.getRecordsByStage = async stage => (stage === STAGES.newLead ? [record] : []);
+  airtable.resolveCountyFields = () => ({ county: 'Taney', state: 'MO' });
+  airtable.updateRecord = async (recordId, fields) => { updates.push({ recordId, fields }); return { id: recordId }; };
+  t.after(() => Object.assign(airtable, original));
+
+  initFilter(new Map([['taney|MO', 4000]]));
+  const report = await runReview();
+
+  assert.equal(report.standouts.length, 0, 'a 600ac tract scores below standout — must not appear there');
+  assert.equal(report.largeTracts.length, 1);
+  assert.equal(report.largeTracts[0].name, 'Big Bend Ranch');
+  assert.equal(report.largeTracts[0].acres, 600);
+  assert.equal(report.largeTractHighlightMin, 500);
+});
+
+test('runReview: a 300ac lead does not appear in report.largeTracts', async (t) => {
+  const { FIELDS, STAGES } = airtable;
+  const record = {
+    id: 'recSmall0000001X',
+    fields: {
+      Name: 'Modest Tract',
+      Stage: STAGES.newLead,
+      [FIELDS.price]: 900000,
+      [FIELDS.acres]: 300,
+      [FIELDS.notes]: '',
+      [FIELDS.created]: new Date().toISOString(),
+    },
+  };
+  const original = {
+    getRecordsByStage: airtable.getRecordsByStage,
+    resolveCountyFields: airtable.resolveCountyFields,
+    updateRecord: airtable.updateRecord,
+  };
+  airtable.getRecordsByStage = async stage => (stage === STAGES.newLead ? [record] : []);
+  airtable.resolveCountyFields = () => ({ county: 'Taney', state: 'MO' });
+  airtable.updateRecord = async () => ({ id: 'x' });
+  t.after(() => Object.assign(airtable, original));
+
+  initFilter(new Map([['taney|MO', 4000]]));
+  const report = await runReview();
+
+  assert.equal(report.largeTracts.length, 0);
+});
+
+test('runReview: largeTractHighlightMin setting override is respected', async (t) => {
+  const { FIELDS, STAGES } = airtable;
+  const record = {
+    id: 'recOverride00001X',
+    fields: {
+      Name: 'Override Tract',
+      Stage: STAGES.newLead,
+      [FIELDS.price]: 750000,
+      [FIELDS.acres]: 300, // below the 500 default, above a 250 override
+      [FIELDS.notes]: '',
+      [FIELDS.created]: new Date().toISOString(),
+    },
+  };
+  const original = {
+    getRecordsByStage: airtable.getRecordsByStage,
+    resolveCountyFields: airtable.resolveCountyFields,
+    updateRecord: airtable.updateRecord,
+  };
+  airtable.getRecordsByStage = async stage => (stage === STAGES.newLead ? [record] : []);
+  airtable.resolveCountyFields = () => ({ county: 'Taney', state: 'MO' });
+  airtable.updateRecord = async () => ({ id: 'x' });
+  t.after(() => Object.assign(airtable, original));
+
+  const settings = require('../config/settings.json');
+  const originalMin = settings.review.largeTractHighlightMin;
+  settings.review.largeTractHighlightMin = 250;
+  t.after(() => { settings.review.largeTractHighlightMin = originalMin; });
+
+  initFilter(new Map([['taney|MO', 4000]]));
+  const report = await runReview();
+
+  assert.equal(report.largeTractHighlightMin, 250);
+  assert.equal(report.largeTracts.length, 1);
+  assert.equal(report.largeTracts[0].name, 'Override Tract');
+});
+
 test('"no road noise" does not trip a road-access dealbreaker', () => {
   const record = {
     fields: {

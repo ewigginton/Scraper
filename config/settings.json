@@ -27,7 +27,8 @@
     "preferredAcresMin": 150,
     "preferredAcresMax": 400,
     "smallAcresMax": 100,
-    "domNegotiationDays": 180
+    "domNegotiationDays": 180,
+    "largeTractHighlightMin": 500
   },
   "sites": {
     "landwatch": { "enabled": true, "countyRotation": 3 },
