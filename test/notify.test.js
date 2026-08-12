@@ -471,3 +471,25 @@ test('no skipped-unavailable / rejected-below-min listings renders neither secti
   assert.ok(!body.includes('undefined'));
   assert.ok(!body.includes('NaN'));
 });
+
+test('source health summary names unsupported URL shapes as a parser fix, not a bot block', () => {
+  // A 400 is a URL-scheme problem we must act on, so it must not be reported
+  // under the transient "bot defense" heading that invites waiting it out.
+  const { buildScraperBody } = require('../lib/notify');
+  const report = {
+    dryRun: false,
+    sites: {},
+    totals: { checked: 0, parsed: 0, passed: 0, duplicates: 0, rejected: 0, written: 0, wouldWrite: 0, errors: 2 },
+    duplicateDetails: [],
+    writeErrors: [],
+    sourceIssues: [
+      { source: 'LandWatch', type: 'unsupported_url', error: 'HTTP 400 for https://x.test/a', url: 'https://x.test/a' },
+      { source: 'LandWatch', type: 'unsupported_url', error: 'HTTP 400 for https://x.test/b', url: 'https://x.test/b' },
+    ],
+    warnings: [],
+  };
+
+  const body = buildScraperBody(report, null, 'Monday');
+  assert.match(body, /2 page\(s\) hit an unsupported URL shape \(parser fix needed/);
+  assert.doesNotMatch(body, /page\(s\) served a bot-block/);
+});

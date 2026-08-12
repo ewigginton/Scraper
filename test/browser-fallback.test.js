@@ -52,11 +52,12 @@ test('fetchPageSmart falls back to the browser on HTTP 403', async (t) => {
   assert.match(html, /REAL LISTING/);
 });
 
-test('fetchPageSmart does NOT fall back on HTTP 400 (unsupported URL shape, not a bot wall)', async (t) => {
+test('fetchPageSmart does NOT browser-retry an HTTP 400 when the caller built the URL', async (t) => {
   // LandWatch 400s an unsupported URL SHAPE (production Aug 6 + Aug 9:
-  // /oklahoma-land-for-sale/leflore-county and an acres-over segment). The
-  // rejection is on the URL, not the client, so a browser attempt burns ~30s
-  // on a guaranteed identical failure.
+  // /oklahoma-land-for-sale/leflore-county and an acres-over segment). For
+  // search URLs WE construct, the rejection is on the URL, not the client, so
+  // a browser attempt burns ~30s on a guaranteed identical failure — scrapeAll
+  // passes browserRetryOn400:false for exactly this case.
   let browserCalled = false;
   withStubbedBrowser(t, { enabled: true, html: '<html>REAL LISTING</html>' });
   const parser = makeParser();
@@ -67,8 +68,32 @@ test('fetchPageSmart does NOT fall back on HTTP 400 (unsupported URL shape, not 
     throw err;
   };
 
-  await assert.rejects(() => parser.fetchPageSmart('https://example.com/search?page=1'), /HTTP 400/);
+  await assert.rejects(
+    () => parser.fetchPageSmart('https://example.com/search?page=1', { browserRetryOn400: false }),
+    /HTTP 400/
+  );
   assert.equal(browserCalled, false);
+});
+
+test('fetchPageSmart DOES browser-retry an HTTP 400 by default (third-party listing URLs)', async (t) => {
+  // Intake and lead-recheck fetch listing URLs submitted by people or already
+  // stored on records — third-party URLs where some bot managers answer a bad
+  // TLS/HTTP2 fingerprint with 400 rather than 403 (the wall commit 6875f3b
+  // was written to get past). Those callers must keep their browser retry, so
+  // the default stays "retry"; only self-built search URLs opt out.
+  let browserCalled = false;
+  withStubbedBrowser(t, { enabled: true, html: '<html>REAL LISTING</html>' });
+  const parser = makeParser();
+  parser.browserFetch = async () => { browserCalled = true; return '<html>REAL LISTING</html>'; };
+  parser.fetchPage = async () => {
+    const err = new Error('HTTP 400 for url');
+    err.status = 400;
+    throw err;
+  };
+
+  const html = await parser.fetchPageSmart('https://third-party.example/listing/1');
+  assert.match(html, /REAL LISTING/);
+  assert.equal(browserCalled, true);
 });
 
 test('fetchPageSmart falls back to the browser on HTTP 429 once plain retries are exhausted', async (t) => {
@@ -197,11 +222,44 @@ test('scrapeAll records a hard 400 as unsupported_url — never blocked, and the
   assert.equal(parser.stats.blockedPages, 0, 'a 400 is not a bot-wall block');
   assert.equal(parser.stats.errorPages, 0, 'nor a generic error page — it must not feed that breaker either');
   assert.equal(parser.stats.unsupportedUrlPages, 8);
-  assert.equal(fetched.length, 8, 'every county is still attempted — no site abandonment');
+  assert.equal(fetched.length, 8, 'a handful of bad URL shapes must not abandon the site');
   assert.ok(!parser.sourceIssues.some(issue => issue.type === 'site_abandoned'),
-    'unsupported URL shapes must never abandon the site');
+    'isolated unsupported URL shapes must never abandon the site');
   assert.equal(parser.sourceIssues.filter(issue => issue.type === 'unsupported_url').length, 8);
   assert.equal(parser.stats.abortedByBotWall, false);
+});
+
+test('scrapeAll DOES abandon the site once unsupported-URL 400s look sitewide', async (t) => {
+  // The flip side of the test above. Tolerating isolated 400s must not mean
+  // tolerating unlimited ones: when every county 400s, the site's URL scheme
+  // changed and the run should stop rather than walk all 189 counties through
+  // a headed browser. Commit 6875f3b logged 2,525 failed LandWatch fetches
+  // over ~6h the last time this was unbounded.
+  withStubbedBrowser(t, { enabled: false });
+  const parser = new BaseParser('TestSite');
+  parser.sleep = async () => {};
+  const counties = Array.from({ length: 30 }, (_, i) => `County${i}`);
+  parser.buildSearchUrls = () => counties.map(county => ({
+    url: `https://example.com/${county}/search?page=1`, county, state: 'MO', page: 1,
+  }));
+  parser.parseSearchPage = () => [];
+  const fetched = [];
+  parser.fetchPage = async (url) => {
+    fetched.push(url);
+    const err = new Error(`HTTP 400 for ${url}`);
+    err.status = 400;
+    throw err;
+  };
+
+  await parser.scrapeAll(counties.map(county => ({ county, state: 'MO' })));
+  assert.equal(parser.stats.unsupportedUrlPages, 12, 'stops at the unsupported-URL threshold');
+  assert.equal(fetched.length, 12, 'the remaining 18 counties are never requested');
+  const abandoned = parser.sourceIssues.filter(issue => issue.type === 'site_abandoned');
+  assert.equal(abandoned.length, 1);
+  assert.match(abandoned[0].error, /URL scheme looks broken/);
+  assert.equal(parser.stats.blockedPages, 0, 'still not counted as a bot wall');
+  assert.equal(parser.stats.abortedByBotWall, false,
+    'no post-cooldown retry — a cooldown cannot make a wrong URL right');
 });
 
 test('scrapeAll exhausts a 400 series so its deeper pages are never requested', async (t) => {

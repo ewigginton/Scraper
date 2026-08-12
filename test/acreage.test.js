@@ -181,3 +181,78 @@ test('extractDetailAcres: garbage/absent HTML never throws', () => {
     assert.doesNotThrow(() => parser.extractDetailAcres(junk));
   }
 });
+
+// --- Regressions from the adversarial review of the acreage cross-check ---
+// Each case below was a REPRODUCED corruption: the detail-page override is
+// powerful enough to destroy correct data, so it now demands a price-anchored
+// signal before it may overwrite a card acreage.
+
+test('findAcresInJson: a pricePerAcre field is never read as acreage', () => {
+  const parser = new BaseParser('Test');
+  // Reproduced: a correct 105ac listing was rewritten to 4000ac because the
+  // key merely contained the substring "acre" while holding a dollar rate.
+  const html = `<html><head>
+    <script type="application/ld+json">
+      {"@context":"https://schema.org","@type":"Product","offers":{"price":420000,"pricePerAcre":4000}}
+    </script>
+    </head><body></body></html>`;
+  assert.equal(parser.extractDetailAcres(html), null,
+    'pricePerAcre is a rate, not an acreage');
+});
+
+test('findAcresInJson: a thousands-separated acreage string keeps its magnitude', () => {
+  const parser = new BaseParser('Test');
+  // Reproduced: "1,200" went through parseFloat and became 1, after which the
+  // 40-acre floor discarded a genuine 1,200-acre tract.
+  const html = `<html><head>
+    <script type="application/ld+json">
+      {"@context":"https://schema.org","@type":"Product","acres":"1,200"}
+    </script>
+    </head><body></body></html>`;
+  assert.equal(parser.extractDetailAcres(html), 1200);
+});
+
+test('extractConfirmedDetailAcres: a nearby-listings card cannot answer for this listing', () => {
+  const parser = new BaseParser('Test');
+  // Reproduced: a genuine 200ac listing whose page carried a "similar
+  // properties nearby" rail was rewritten to the neighbour's 1.5ac and then
+  // rejected by the 40-acre floor.
+  const html = `<html><body>
+    <main><h1>Timber Tract</h1><p>Priced at $700,000.</p></main>
+    <aside>Similar properties nearby<div class="card">$45,000 • 1.5 acres</div></aside>
+  </body></html>`;
+  assert.equal(parser.extractConfirmedDetailAcres(html, 700000), null,
+    'no price-anchored signal for THIS listing — must not confirm');
+});
+
+test('extractConfirmedDetailAcres: a price-matched bullet confirms the listing own acreage', () => {
+  const parser = new BaseParser('Test');
+  const html = `<html><body>
+    <main><h1>Ozark Parcel</h1><div>$574,000 • 80 acres</div></main>
+    <aside>Nearby<div class="card">$45,000 • 1.5 acres</div></aside>
+  </body></html>`;
+  assert.equal(parser.extractConfirmedDetailAcres(html, 574000), 80,
+    'the bullet whose price matches the listing wins over document order');
+});
+
+test('extractConfirmedDetailAcres: JSON-LD acreage is taken from the price-matching node only', () => {
+  const parser = new BaseParser('Test');
+  const html = `<html><head>
+    <script type="application/ld+json">
+      {"@context":"https://schema.org","@type":"ItemList","itemListElement":[
+        {"@type":"Product","name":"Nearby","offers":{"price":45000},"acres":1.5}]}
+    </script>
+    <script type="application/ld+json">
+      {"@context":"https://schema.org","@type":"Product","name":"This one","offers":{"price":700000},"acres":200}
+    </script>
+    </head><body></body></html>`;
+  assert.equal(parser.extractConfirmedDetailAcres(html, 700000), 200,
+    'the nearby ItemList entry must not win just by appearing first');
+});
+
+test('extractConfirmedDetailAcres: no listing price means nothing can be confirmed', () => {
+  const parser = new BaseParser('Test');
+  const html = `<html><body><div>$574,000 • 80 acres</div></body></html>`;
+  assert.equal(parser.extractConfirmedDetailAcres(html, null), null);
+  assert.equal(parser.extractConfirmedDetailAcres(html, 0), null);
+});

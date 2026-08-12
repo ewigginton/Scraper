@@ -10,6 +10,7 @@ const {
   detailEnrichmentEnabled,
   combineDescriptions,
   resolveMinAcres,
+  applyDetailToListing,
   DEFAULT_MIN_ACRES,
 } = require('../lib/scraper');
 const { analyzeLead, matchesKeyword } = require('../lib/review');
@@ -566,4 +567,43 @@ test('Step 4.5: a missing card acreage is filled from the detail page structured
       })
     )
   );
+});
+
+test('applyDetailToListing: an unconfirmed 10x disagreement is reported, not applied', () => {
+  // The override exists to fix "N-acre lake" card misparses, but it must never
+  // be the thing that CAUSES one. Without a price-anchored detail signal the
+  // card value stands and the disagreement surfaces in the nightly report.
+  const parser = new BaseParser('Test');
+  const issues = [];
+  parser.recordSourceIssue = issue => issues.push(issue);
+  const listing = { url: 'https://x.test/1', acres: 200, price: 700000 };
+  const html = `<html><body>
+    <main><h1>Timber Tract</h1></main>
+    <aside>Similar nearby<div>$45,000 • 1.5 acres</div></aside>
+  </body></html>`;
+
+  applyDetailToListing(parser, listing, html);
+
+  assert.equal(listing.acres, 200, 'the correct card acreage survives');
+  assert.equal(issues.length, 1);
+  assert.match(issues[0].error, /unconfirmed/);
+});
+
+test('applyDetailToListing: a price-anchored 10x disagreement still corrects the card', () => {
+  // The original bug this cross-check was built for: a 0.94ac lot whose card
+  // acreage was scraped from "the gorgeous 1,000 acre Lake Halford".
+  const parser = new BaseParser('Test');
+  const issues = [];
+  parser.recordSourceIssue = issue => issues.push(issue);
+  const listing = { url: 'https://x.test/2', acres: 1000, price: 150000 };
+  const html = `<html><body><main>
+    <div>$150,000 • 0.94 acres</div>
+    <p>Located on the gorgeous 1,000 acre Lake Halford.</p>
+  </main></body></html>`;
+
+  applyDetailToListing(parser, listing, html);
+
+  assert.equal(listing.acres, 0.94, 'the price-anchored detail value wins');
+  assert.equal(issues.length, 1);
+  assert.match(issues[0].error, /trusting the detail page/);
 });
