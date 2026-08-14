@@ -5,6 +5,8 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
 
+const cheerio = require('cheerio');
+const BaseParser = require('../lib/parsers/base-parser');
 const LandWatchParser = require('../lib/parsers/landwatch');
 const LandComParser = require('../lib/parsers/landcom');
 const LandAndFarmParser = require('../lib/parsers/landfarm');
@@ -533,4 +535,83 @@ test('SCRAPER_MAX_PAGE limits validation runs to early pages', async () => {
     if (originalDelay === undefined) delete process.env.SCRAPER_REQUEST_DELAY_MS;
     else process.env.SCRAPER_REQUEST_DELAY_MS = originalDelay;
   }
+});
+
+// --- Card-text extraction: the silent large-tract loss ---------------------
+// Real captured LandWatch HTML. These lock in a fix for listings that were
+// parsed as "cards" and then discarded for having no acreage, which the run
+// reported as nothing wrong at all.
+
+test('LandWatch large-tract page yields every listing the page says it has', () => {
+  const LandWatchParser = require('../lib/parsers/landwatch');
+  const html = fs.readFileSync(path.join(__dirname, 'fixtures/landwatch-search-acres-over-150.html'), 'utf8');
+  const parser = new LandWatchParser();
+  const listings = parser.parseSearchPage(html, 'Wayne', 'KY');
+
+  // The page's own header reads "1-6 of 6 Listings" and carries 6 detail links.
+  assert.equal(parser._lastCardCount, 6);
+  assert.equal(listings.length, 6, 'all 6 large tracts must survive extraction');
+
+  // The two that used to vanish: their visible cards read "$585,000 • 259
+  // acres" and "$1,137,000 • 265 acres", but the acreage was being read from
+  // JSON description prose ("259.34 nrestricted acres", "264.95-acre
+  // property") that matched no pattern.
+  const byPrice = new Map(listings.map(l => [l.price, l]));
+  assert.ok(byPrice.has(585000), 'the 259-acre $585,000 tract must be found');
+  assert.ok(byPrice.has(1137000), 'the 265-acre $1,137,000 tract must be found');
+  assert.equal(Math.round(byPrice.get(585000).acres), 259);
+  assert.equal(Math.round(byPrice.get(1137000).acres), 265);
+});
+
+test('LandWatch county page 1 yields nearly all of its cards, not a third of them', () => {
+  const LandWatchParser = require('../lib/parsers/landwatch');
+  const html = fs.readFileSync(path.join(__dirname, 'fixtures/landwatch-search.html'), 'utf8');
+  const parser = new LandWatchParser();
+  const listings = parser.parseSearchPage(html, 'Wayne', 'KY');
+
+  assert.equal(parser._lastCardCount, 25);
+  assert.ok(listings.length >= 22,
+    `expected nearly all 25 cards to extract, got ${listings.length} (was 10 before the card-text fix)`);
+});
+
+test('card text is read from rendered content, never from an embedded JSON-LD script', () => {
+  // Cheerio .text() includes <script> bodies, so a per-card JSON block was
+  // being read as the card, and acreage came from description prose.
+  const parser = new BaseParser('Test');
+  const $ = cheerio.load(`<html><body><div class="card">
+      <script type="application/ld+json">
+        {"description":"a 9999 acres lake nearby","offers":{"price":123456}}
+      </script>
+      <a href="/listing/pid/1"><span>$585,000</span><span>&nbsp;•&nbsp;</span><span>259 acres</span></a>
+    </div></body></html>`);
+  const listings = parser.extractByDetailLinks($, { hrefPattern: /\/pid\/\d+/ });
+  assert.equal(listings.length, 1);
+  assert.equal(listings[0].acres, 259, 'the visible 259 acres wins over the script blob');
+  assert.equal(listings[0].price, 585000);
+});
+
+test('adjacent elements do not run together and swallow the acreage', () => {
+  // "<span>259 acres</span><p>1330 Kentucky 790...</p>" used to collapse to
+  // "259 acres1330 Kentucky 790" — no word boundary after "acres", no match,
+  // listing silently dropped.
+  const parser = new BaseParser('Test');
+  const $ = cheerio.load(`<html><body><div class="card">
+      <a href="/listing/pid/2"><span>$1,137,000</span><span>265 acres</span></a>
+      <p>1412 George Garner Road, Monticello, KY, 42633, Wayne County</p>
+    </div></body></html>`);
+  const listings = parser.extractByDetailLinks($, { hrefPattern: /\/pid\/\d+/ });
+  assert.equal(listings.length, 1);
+  assert.equal(listings[0].acres, 265);
+});
+
+test('extractAcres reads the hyphenated form big tracts are described with', () => {
+  const parser = new BaseParser('Test');
+  assert.equal(parser.extractAcres('this 1,200-acre ranch'), 1200);
+  assert.equal(parser.extractAcres('a 264.95-acre property offers privacy'), 264.95);
+  // Existing forms keep working.
+  assert.equal(parser.extractAcres('278.19 Acres on Parmleysville Road'), 278.19);
+  assert.equal(parser.extractAcres('201.15+/- acre property'), 201.15);
+  assert.equal(parser.extractAcres('.499 Acres +/- lot'), 0.499);
+  // A range must still take the acreage-bearing figure, not the lower bound.
+  assert.equal(parser.extractAcres('10-50 acres available'), 50);
 });
