@@ -517,3 +517,25 @@ test('shell browser-retries stop after the budget when they never recover', asyn
   assert.equal(parser.stats.shellRecoveries, 0);
   assert.equal(parser.stats.shellRetries, 5, 'budget caps wasted browser renders');
 });
+
+test('a zero-card page reports the link shapes it DOES have, so a changed URL scheme is readable', async (t) => {
+  // Whitetail reported "0 listings" for four nights. If the site moved its
+  // detail pages, "zero cards" looks identical either way — the link shapes
+  // are what actually names the new scheme, without a hand capture.
+  withStubbedBrowser(t, { enabled: false });
+  const parser = new BaseParser('TestSite');
+  parser.sleep = async () => {};
+  parser.buildSearchUrls = () => ([{ url: 'https://example.com/wayne', county: 'Wayne', state: 'KY', page: 1 }]);
+  parser.fetchPage = async () => `<html><body><nav>Browse our land listings for sale here</nav>
+    <a href="/property/12345">Tract A</a><a href="/property/67890">Tract B</a>
+    <a href="/property/24680">Tract C</a><a href="/about-us">About</a></body></html>`;
+  parser.parseSearchPage = () => { parser._lastCardCount = 0; return []; };
+
+  await parser.scrapeAll([{ county: 'Wayne', state: 'KY' }]);
+  const drift = parser.sourceIssues.filter(i => i.type === 'markup_drift');
+  assert.equal(drift.length, 1);
+  assert.match(drift[0].error, /Links on this page look like:/);
+  // Per-listing ids collapse to one shape with a count, instead of three
+  // separate one-offs that reveal nothing.
+  assert.match(drift[0].error, /\/property\/N \(3\)/);
+});
