@@ -444,3 +444,76 @@ test('site_abandoned error text reflects the dominant error status among mixed e
   assert.ok(abandoned);
   assert.match(abandoned.error, /mostly HTTP 404/, 'the more common status (404, 7x) wins over 500 (3x)');
 });
+
+test('an unrendered JS shell is recovered by a browser render, not written off as drift', async (t) => {
+  // The Whitetail failure signature: HTTP 200, zero cards, four nights
+  // running, reported as markup drift with no way to tell whether the fix was
+  // new selectors or browser rendering. If the page is an empty SPA shell,
+  // one real render answers it.
+  withStubbedBrowser(t, { enabled: true, html: '<html><body>REAL</body></html>' });
+  const parser = new BaseParser('TestSite');
+  parser.sleep = async () => {};
+  parser.buildSearchUrls = () => ([{ url: 'https://example.com/wayne', county: 'Wayne', state: 'KY', page: 1 }]);
+  parser.fetchPage = async () => '<html><head><script src="/app.js"></script></head><body><div id="root"></div></body></html>';
+  parser.browserFetch = async () => '<html><body><div class="card">Rendered Tract 80 acres $200,000</div></body></html>';
+  parser.parseSearchPage = (html) => {
+    parser._lastCardCount = html.includes('card') ? 1 : 0;
+    return html.includes('card') ? [{ url: 'https://example.com/1', acres: 80, price: 200000 }] : [];
+  };
+
+  const listings = await parser.scrapeAll([{ county: 'Wayne', state: 'KY' }]);
+  assert.equal(listings.length, 1, 'the browser render recovered the listing');
+  assert.equal(parser.stats.shellRetries, 1);
+  assert.equal(parser.stats.shellRecoveries, 1);
+  assert.equal(parser.stats.driftPages, 0, 'a recovered page is not drift');
+});
+
+test('an unrendered shell with no browser is reported as needing rendering, not stale selectors', async (t) => {
+  withStubbedBrowser(t, { enabled: false });
+  const parser = new BaseParser('TestSite');
+  parser.sleep = async () => {};
+  parser.buildSearchUrls = () => ([{ url: 'https://example.com/wayne', county: 'Wayne', state: 'KY', page: 1 }]);
+  parser.fetchPage = async () => '<html><head><script src="/app.js"></script></head><body><div id="root"></div></body></html>';
+  parser.parseSearchPage = () => { parser._lastCardCount = 0; return []; };
+
+  await parser.scrapeAll([{ county: 'Wayne', state: 'KY' }]);
+  const issues = parser.sourceIssues.filter(i => i.type === 'unrendered_shell');
+  assert.equal(issues.length, 1, 'classified as a shell, not markup_drift');
+  assert.match(issues[0].error, /needs browser rendering/);
+  assert.equal(parser.sourceIssues.filter(i => i.type === 'markup_drift').length, 0);
+});
+
+test('a genuinely redesigned page is still reported as markup drift', async (t) => {
+  // The detector must not steal real drift cases: a redesigned page still has
+  // nav/body/footer copy, so it fails the "no visible text" half of the test.
+  withStubbedBrowser(t, { enabled: false });
+  const parser = new BaseParser('TestSite');
+  parser.sleep = async () => {};
+  parser.buildSearchUrls = () => ([{ url: 'https://example.com/wayne', county: 'Wayne', state: 'KY', page: 1 }]);
+  parser.fetchPage = async () => `<html><body><div id="root"><nav>Home About Listings</nav>
+    <main><h1>Wayne County Land For Sale</h1><p>${'Browse rural property and hunting land in Wayne County Kentucky. '.repeat(20)}</p></main>
+    <footer>Copyright 2026 Example Realty</footer></div></body></html>`;
+  parser.parseSearchPage = () => { parser._lastCardCount = 0; return []; };
+
+  await parser.scrapeAll([{ county: 'Wayne', state: 'KY' }]);
+  assert.equal(parser.sourceIssues.filter(i => i.type === 'markup_drift').length, 1);
+  assert.equal(parser.sourceIssues.filter(i => i.type === 'unrendered_shell').length, 0);
+});
+
+test('shell browser-retries stop after the budget when they never recover', async (t) => {
+  withStubbedBrowser(t, { enabled: true, html: '<html><body><div id="root"></div></body></html>' });
+  const parser = new BaseParser('TestSite');
+  parser.sleep = async () => {};
+  const counties = Array.from({ length: 20 }, (_, i) => `County${i}`);
+  parser.buildSearchUrls = () => counties.map(county => ({
+    url: `https://example.com/${county}`, county, state: 'KY', page: 1,
+  }));
+  const shell = '<html><head><script src="/app.js"></script></head><body><div id="root"></div></body></html>';
+  parser.fetchPage = async () => shell;
+  parser.browserFetch = async () => shell; // render never helps
+  parser.parseSearchPage = () => { parser._lastCardCount = 0; return []; };
+
+  await parser.scrapeAll(counties.map(county => ({ county, state: 'KY' })));
+  assert.equal(parser.stats.shellRecoveries, 0);
+  assert.equal(parser.stats.shellRetries, 5, 'budget caps wasted browser renders');
+});

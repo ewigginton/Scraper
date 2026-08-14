@@ -493,3 +493,40 @@ test('source health summary names unsupported URL shapes as a parser fix, not a 
   assert.match(body, /2 page\(s\) hit an unsupported URL shape \(parser fix needed/);
   assert.doesNotMatch(body, /page\(s\) served a bot-block/);
 });
+
+test('large tracts the run dropped are itemized with reasons, not hidden in a rejected count', () => {
+  // Emma's report: the really large properties never arrive even when every
+  // source is healthy. A 1,200ac tract dropped for "no price" used to be
+  // indistinguishable from a 3-acre lot in the "N rejected" total.
+  const { buildScraperBody } = require('../lib/notify');
+  const report = {
+    dryRun: false,
+    sites: {},
+    totals: { checked: 10, parsed: 9, passed: 1, duplicates: 0, rejected: 3, written: 1, wouldWrite: 0, errors: 0 },
+    duplicateDetails: [],
+    writeErrors: [],
+    sourceIssues: [],
+    warnings: [],
+    largeTractsNotWritten: [
+      { source: 'LandWatch', url: 'https://x/1', county: 'Wayne', state: 'KY', acres: 1200, price: null, reason: 'Data validation failed: Missing or invalid price' },
+      { source: 'TuttLand', url: 'https://x/2', county: 'Shannon', state: 'MO', acres: 980, price: null, reason: 'Data validation failed: Missing or invalid price' },
+    ],
+  };
+
+  const body = buildScraperBody(report, null, 'Monday');
+  assert.match(body, /LARGE TRACTS FOUND BUT NOT WRITTEN \(2\)/);
+  assert.match(body, /1200ac — no price/);
+  assert.match(body, /2x Data validation failed/, 'a repeated reason must be summarized');
+  // Biggest first — the largest loss is the one to look at.
+  assert.ok(body.indexOf('1200ac') < body.indexOf('980ac'));
+});
+
+test('no large-tract section when nothing big was dropped', () => {
+  const { buildScraperBody } = require('../lib/notify');
+  const body = buildScraperBody({
+    dryRun: false, sites: {},
+    totals: { checked: 1, parsed: 1, passed: 1, duplicates: 0, rejected: 0, written: 1, wouldWrite: 0, errors: 0 },
+    duplicateDetails: [], writeErrors: [], sourceIssues: [], warnings: [],
+  }, null, 'Monday');
+  assert.doesNotMatch(body, /LARGE TRACTS FOUND BUT NOT WRITTEN/);
+});
