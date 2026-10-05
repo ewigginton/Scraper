@@ -17,6 +17,7 @@ const {
 const { stableHash, dayIndex, selectRotationCounties } = require('../lib/county-rotation');
 const { buildScraperBody } = require('../lib/notify');
 const BaseParser = require('../lib/parsers/base-parser');
+const { computeAbortStepsSkipped } = require('../index');
 
 test('full pipeline: filter -> fingerprint -> dedup flow', () => {
   initFilter(new Map([
@@ -274,15 +275,16 @@ function withEnv(overrides, fn) {
 // the report (lib/scraper.js recordRefusedWrites), so a refused write is
 // never silently dropped on the floor.
 
-test('recordRefusedWrites: an implausible refusal is tallied into siteReport/report.filterRejects', () => {
+test('recordRefusedWrites: an implausible refusal is tallied into siteReport.implausibleWriteRefused/report.totals.implausibleWriteRefused, NOT report.totals.implausible (that one is filter-time-only — see lib/scraper.js)', () => {
   const { report, ctx } = makeCtx();
-  const siteReport = { implausible: 0 };
+  const siteReport = { implausibleWriteRefused: 0 };
   recordRefusedWrites(
     [{ listing: { name: 'Glued Tract', url: 'https://x.example/1', acres: 873600312 }, reason: 'Implausible data: Price and acres are identical (873600312)' }],
     'TestSite', siteReport, report
   );
-  assert.equal(siteReport.implausible, 1);
-  assert.equal(report.totals.implausible, 1);
+  assert.equal(siteReport.implausibleWriteRefused, 1);
+  assert.equal(report.totals.implausibleWriteRefused, 1);
+  assert.equal(report.totals.implausible, 0, 'a write-time refusal must never inflate the filter-time implausible total (it was never in totals.rejected)');
   assert.equal(report.filterRejects.length, 1);
   assert.equal(report.filterRejects[0].source, 'TestSite');
   assert.match(report.filterRejects[0].reason, /^Implausible data:/);
@@ -808,4 +810,44 @@ test('county rotation: consolidated email renders the rotation line', () => {
   };
   const body = buildScraperBody(report, null, 'Test Day', null, null);
   assert.match(body, /county rotation: swept 63 of 189 counties \(group 2 of 3\)/);
+});
+
+// DEFECT 4 regression: a scrape abort (county targets / dedup index load
+// failure) must name only the steps THIS run's own mode flags would
+// actually have taken — never every step that exists, since several are
+// already off for midday/dry-run/explicit --skip-* runs regardless of the
+// abort.
+test('computeAbortStepsSkipped: a normal full run names all four later steps', () => {
+  const steps = computeAbortStepsSkipped({
+    dryRun: false, skipPriceCheck: false, skipReview: false, skipLeadRecheck: false,
+  });
+  assert.deepEqual(steps, ['price check', 'listing intake', 'lead review', 'lead recheck']);
+});
+
+test('computeAbortStepsSkipped: a midday run never names price check/review/lead recheck (already off, not because of the abort)', () => {
+  const steps = computeAbortStepsSkipped({
+    dryRun: false, skipPriceCheck: true, skipReview: true, skipLeadRecheck: true,
+  });
+  assert.deepEqual(steps, ['listing intake']);
+});
+
+test('computeAbortStepsSkipped: a dry run never names intake/review/lead recheck (already off); price check still runs in dry run so it IS named', () => {
+  const steps = computeAbortStepsSkipped({
+    dryRun: true, skipPriceCheck: false, skipReview: false, skipLeadRecheck: false,
+  });
+  assert.deepEqual(steps, ['price check']);
+});
+
+test('computeAbortStepsSkipped: explicit --skip-price-check alone removes only price check from the list', () => {
+  const steps = computeAbortStepsSkipped({
+    dryRun: false, skipPriceCheck: true, skipReview: false, skipLeadRecheck: false,
+  });
+  assert.deepEqual(steps, ['listing intake', 'lead review', 'lead recheck']);
+});
+
+test('computeAbortStepsSkipped: a midday dry run (every gate closed) names nothing', () => {
+  const steps = computeAbortStepsSkipped({
+    dryRun: true, skipPriceCheck: true, skipReview: true, skipLeadRecheck: true,
+  });
+  assert.deepEqual(steps, []);
 });

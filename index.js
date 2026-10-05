@@ -217,17 +217,52 @@ async function main() {
     console.error(`[Main] Fatal error: ${err.message}`);
     console.error(err.stack);
 
-    // Still try to send email on failure
-    scraperReport = scraperReport || {
-      sites: {},
-      totals: { checked: 0, parsed: 0, passed: 0, duplicates: 0, rejected: 0, written: 0, errors: 1 },
-      duplicateDetails: [],
-      writeErrors: [{ site: 'system', error: err.message }],
-      sourceIssues: [],
-      warnings: dryRun ? ['Dry run enabled: Airtable writes were skipped'] : [],
-      dryRun,
-      elapsedMinutes: 0,
-    };
+    if (err.scraperAbort) {
+      // The scrape itself never ran (county targets, or the dedup index,
+      // could not be loaded from Airtable — see lib/scraper.js runScraper
+      // and lib/airtable.js loadCountyTargets). Because that failure
+      // happens at the very start of the guarded try block above, NOTHING
+      // after it ran either: price check, listing intake, lead review, and
+      // lead recheck are each gated behind a successful scrape step in this
+      // same try block, so none of them executed this run. Say that
+      // plainly instead of letting it look like a write failure with
+      // "0 written" (the old behavior — see lib/notify.js).
+      scraperReport = scraperReport || {
+        sites: {},
+        totals: { checked: 0, parsed: 0, passed: 0, duplicates: 0, rejected: 0, written: 0, wouldWrite: 0, errors: 1 },
+        duplicateDetails: [],
+        writeErrors: [],
+        sourceIssues: [],
+        warnings: dryRun ? ['Dry run enabled: Airtable writes were skipped'] : [],
+        dryRun,
+        elapsedMinutes: 0,
+      };
+      scraperReport.scraperAborted = true;
+      scraperReport.abortStage = err.abortStage || 'unknown';
+      scraperReport.abortReason = err.message;
+      // Name only the steps this run would actually have taken had the
+      // scrape completed — not every step that exists. Midday runs never
+      // run price check/review/lead recheck regardless of the abort, dry
+      // runs never run intake/review/lead recheck, and an explicit
+      // --skip-* flag means that step was already off. Claiming those were
+      // "skipped by the abort" would be false.
+      scraperReport.stepsSkipped = computeAbortStepsSkipped({
+        dryRun, skipPriceCheck, skipReview, skipLeadRecheck,
+      });
+      scraperReport.elapsedMinutes = parseFloat(((Date.now() - startTime) / 1000 / 60).toFixed(1));
+    } else {
+      // Still try to send email on failure
+      scraperReport = scraperReport || {
+        sites: {},
+        totals: { checked: 0, parsed: 0, passed: 0, duplicates: 0, rejected: 0, written: 0, errors: 1 },
+        duplicateDetails: [],
+        writeErrors: [{ site: 'system', error: err.message }],
+        sourceIssues: [],
+        warnings: dryRun ? ['Dry run enabled: Airtable writes were skipped'] : [],
+        dryRun,
+        elapsedMinutes: 0,
+      };
+    }
   }
 
   // Step 5: Send the single consolidated email (always, even on failure).
@@ -269,6 +304,23 @@ async function main() {
   await pingHealthcheck(!fatalError && (emailSent || dryRun));
 }
 
+/**
+ * Which later steps a scrape abort (county targets / dedup index load
+ * failure) actually prevented from running, given this run's own mode
+ * flags — never every step that exists. A step already off for this run
+ * (midday's forced price-check/review/lead-recheck skip, dry run's
+ * intake/review/lead-recheck skip, or an explicit --skip-* flag) was never
+ * going to run regardless of the abort, so it does not belong on this list.
+ */
+function computeAbortStepsSkipped({ dryRun, skipPriceCheck, skipReview, skipLeadRecheck }) {
+  const steps = [];
+  if (!skipPriceCheck) steps.push('price check');
+  if (!dryRun) steps.push('listing intake');
+  if (!skipReview && !dryRun) steps.push('lead review');
+  if (!skipLeadRecheck && !dryRun) steps.push('lead recheck');
+  return steps;
+}
+
 function parseIntegerOption(flag, envValue) {
   const arg = process.argv.find(value => value.startsWith(`${flag}=`));
   const rawValue = arg ? arg.slice(flag.length + 1) : envValue;
@@ -296,7 +348,15 @@ function parseTargetCountiesOption(flag, envValue) {
     });
 }
 
-main().catch(err => {
-  console.error(`[Main] Unhandled error: ${err.message}`);
-  process.exit(1);
-});
+// Guarded so tests can require() this file (e.g. to unit-test
+// computeAbortStepsSkipped) without triggering a real run — `node index.js`
+// itself always satisfies require.main === module, so production behavior
+// is unchanged.
+if (require.main === module) {
+  main().catch(err => {
+    console.error(`[Main] Unhandled error: ${err.message}`);
+    process.exit(1);
+  });
+}
+
+module.exports = { computeAbortStepsSkipped };

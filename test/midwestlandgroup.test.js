@@ -22,6 +22,12 @@ const detailHtml = fs.readFileSync(
   path.join(__dirname, 'fixtures', 'midwestlandgroup-detail-latimer.html'),
   'utf8',
 );
+// Freshly captured live on 2026-10-05 in response to a dry-run markup_drift
+// report (see the test below) — confirms the card markup is still current.
+const indexHtml20261005 = fs.readFileSync(
+  path.join(__dirname, 'fixtures', 'midwestlandgroup-index-2026-10-05.html'),
+  'utf8',
+);
 
 // ---------- buildSearchUrls ----------
 
@@ -116,6 +122,44 @@ test('parseDetailPage on a garbage/empty/null page returns no listing fields wit
   assert.equal(garbage.acres, undefined);
   assert.equal(garbage.county, undefined);
   assert.equal(garbage.state, undefined);
+});
+
+// ---------- 2026-10-05 markup_drift investigation (false alarm — not a parser bug) ----------
+//
+// A dry run raised markup_drift for /listings/ (0 cards read from
+// data/source-health/snapshots/2026-10-05T17-05-44-838Z-MidwestLandGroup.html)
+// while nightly emails the same day reported "MidwestLandGroup: 10 checked".
+// That snapshot contains ONLY the hidden JS card template (confirmed: it has
+// exactly one `listings-archive row` element, and it carries the `hidden`
+// class) — i.e. it was captured before the page's client-side listings fetch
+// had finished, not after a site redesign. A live re-fetch on the same day,
+// waited out to full hydration, shows the identical selectors this parser
+// already uses (`.listings-archive.row`, `.item--price/acre/county/state`,
+// `.listings-archive__title`) with 10 real cards + the 1 hidden template —
+// matching the "10 checked" the nightly email reported. No parser change
+// needed; this fixture locks in that the markup is unchanged.
+test('parseSearchPage on the fresh 2026-10-05 live capture still reads all 10 real cards', () => {
+  const parser = new MidwestLandGroupParser();
+  const listings = parser.parseSearchPage(indexHtml20261005, null, null);
+
+  assert.equal(listings.length, 10, 'all 10 real cards parsed (hidden template excluded)');
+  assert.equal(parser._lastCardCount, 10);
+
+  // Spot-check one ordinary listing...
+  const neosho = listings.find(l => l.url.endsWith('/neosho-105/'));
+  assert.ok(neosho, 'neosho-105 card found');
+  assert.equal(neosho.price, 383250);
+  assert.equal(neosho.acres, 105);
+  assert.equal(neosho.county, 'Neosho');
+  assert.equal(neosho.state, 'KS');
+
+  // ...and one auction listing with no set price yet ("$0" on the card) —
+  // parses cleanly rather than throwing or dropping the card.
+  const carroll = listings.find(l => l.url.endsWith('/carroll-146/'));
+  assert.ok(carroll, 'carroll-146 (sealed-bid auction) card found');
+  assert.equal(carroll.price, 0);
+  assert.equal(carroll.acres, 146);
+  assert.equal(carroll.state, 'IA');
 });
 
 // ---------- BUG 2: the client-rendered index is fetched through the browser ----------
