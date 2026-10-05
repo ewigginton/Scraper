@@ -23,13 +23,17 @@ const counties = [
 
 // ---------- URL building ----------
 
-test('Whitetail builds /hunting-land/{state}/{county} URLs with saint-expansion', () => {
+test('Whitetail builds the site\'s own county search (state-keyed county filter, 40+ acres) with saint-expansion', () => {
   const parser = new WhitetailParser();
   const urls = parser.buildSearchUrls(counties);
-  assert.match(urls[0].url, /whitetailproperties\.com\/hunting-land\/kentucky\/wayne$/);
+  assert.equal(urls[0].url,
+    'https://www.whitetailproperties.com/hunting-land?state%5B%5D=Kentucky&county%5BKentucky%5D%5B%5D=Wayne&acreage_min=40');
   const stFrancois = urls.find(u => u.county === 'St. Francois');
-  // Whitetail spells out "saint" — st-francois would 404 every night
-  assert.match(stFrancois.url, /\/hunting-land\/missouri\/saint-francois/);
+  // Whitetail's Missouri county filter spells out "Saint" ("Saint Francois",
+  // live 2026-10-05); detail URLs use the matching saint-francois slug
+  assert.equal(stFrancois.url,
+    'https://www.whitetailproperties.com/hunting-land?state%5B%5D=Missouri&county%5BMissouri%5D%5B%5D=Saint%20Francois&acreage_min=40');
+  assert.equal(parser.countySlug('St. Francois'), 'saint-francois');
 });
 
 test('MossyOak builds /land-for-sale/{state}/{county}-county/ URLs with ?pg pagination', () => {
@@ -454,8 +458,33 @@ test('Whitetail is browser-rendered: a plain fetch is a card-less skeleton, and 
   assert.equal(parser._lastCardCount, 9, 'the rendered page has the cards');
 });
 
-test('Whitetail builds /oklahoma/le-flore for the Airtable "Leflore" county', () => {
+test('Whitetail searches "Le Flore" for the Airtable "Leflore" county ("Leflore"/"LeFlore" return 0 live)', () => {
   const WhitetailParser = require('../lib/parsers/whitetail');
-  const urls = new WhitetailParser().buildSearchUrls([{ county: 'Leflore', state: 'OK' }]).map(u => u.url);
-  assert.ok(urls.every(u => /\/hunting-land\/oklahoma\/le-flore(\?|$)/.test(u)), urls.join('\n'));
+  const parser = new WhitetailParser();
+  const urls = parser.buildSearchUrls([{ county: 'Leflore', state: 'OK' }]).map(u => u.url);
+  assert.deepEqual(urls, [
+    'https://www.whitetailproperties.com/hunting-land?state%5B%5D=Oklahoma&county%5BOklahoma%5D%5B%5D=Le%20Flore&acreage_min=40',
+  ]);
+  // detail URLs still use the le-flore path slug
+  assert.equal(parser.countySlug('Leflore'), 'le-flore');
+});
+
+test('Whitetail county filter values for multi-word and Mc counties match the site\'s own names (live 2026-10-05)', () => {
+  const parser = new WhitetailParser();
+  const cases = [
+    ['Roger Mills', 'OK', 'Oklahoma', 'Roger%20Mills'],
+    ['McCurtain', 'OK', 'Oklahoma', 'McCurtain'],
+    ['McIntosh', 'OK', 'Oklahoma', 'McIntosh'],
+    ['Van Buren', 'TN', 'Tennessee', 'Van%20Buren'],
+    ['San Saba', 'TX', 'Texas', 'San%20Saba'],
+    ['San Augustine', 'TX', 'Texas', 'San%20Augustine'],
+    ['Ste. Genevieve', 'MO', 'Missouri', 'Sainte%20Genevieve'],
+    ['Cherokee', 'SC', 'South%20Carolina', 'Cherokee'],
+  ];
+  for (const [county, state, encodedState, encodedCounty] of cases) {
+    const [{ url }] = parser.buildSearchUrls([{ county, state }]);
+    assert.equal(url,
+      `https://www.whitetailproperties.com/hunting-land?state%5B%5D=${encodedState}&county%5B${encodedState}%5D%5B%5D=${encodedCounty}&acreage_min=40`,
+      county);
+  }
 });

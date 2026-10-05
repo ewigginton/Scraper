@@ -7,8 +7,9 @@
 //   - LandWatch's rounded card headline acreage ("241 acres") is refined to
 //     the surveyed figure the page also states ("240.65 +/- acre")
 //   - Whitetail: a zero-card render is drift unless the RENDERED page says
-//     the county is empty; ?page=2 (ignored by the site) is no longer fetched
-//   - LandWatch: a still-full last large-tract page records a coverage warning
+//     the county is empty; ?page=2 (ignored by the site) is no longer fetched;
+//     the county search is the site's own 40+ acre query form
+//   - LandWatch: a county with results past the page cap records a coverage warning
 //   - extractByDetailLinks: one listing linked by relative and absolute URLs
 //     is one card, not two cards that block each other's walk-up
 
@@ -135,69 +136,172 @@ function makeScrapeHarness(t, ParserClass, pages) {
 }
 
 test('Whitetail scrapeAll: a stuck render raises markup drift; an empty county does not; one fetch per county', async (t) => {
-  const base = 'https://www.whitetailproperties.com/hunting-land/oklahoma';
+  const urlFor = (county) => new WhitetailParser().searchUrlFor(county, 'OK');
   const { parser, fetched } = makeScrapeHarness(t, WhitetailParser, {
-    [`${base}/dewey`]: fixture('whitetail-search-dewey-plain-fetch.html'),
-    [`${base}/pittsburg`]: fixture('whitetail-search-pittsburg-empty.html'),
+    [urlFor('Dewey')]: fixture('whitetail-search-dewey-plain-fetch.html'),
+    [urlFor('Pittsburg')]: fixture('whitetail-query-pittsburg-ok-40ac-empty.html'),
   });
   const listings = await parser.scrapeAll([
     { county: 'Dewey', state: 'OK', maxCPA: 2500 },
     { county: 'Pittsburg', state: 'OK', maxCPA: 2500 },
   ]);
-  assert.deepEqual(fetched, [`${base}/dewey`, `${base}/pittsburg`], 'no ?page=2 fetches');
+  assert.deepEqual(fetched, [urlFor('Dewey'), urlFor('Pittsburg')], 'one render per county');
   assert.equal(listings.length, 0);
   const drift = parser.sourceIssues.filter(i => i.type === 'markup_drift');
   assert.equal(drift.length, 1);
-  assert.equal(drift[0].url, `${base}/dewey`);
+  assert.equal(drift[0].url, urlFor('Dewey'));
   assert.equal(parser.stats.driftPages, 1);
+  assert.equal(parser.sourceIssues.length, 1, 'the empty county raises nothing');
 });
 
-test('Whitetail builds exactly one search URL per county (the site ignores ?page=N)', () => {
+test('Whitetail builds exactly one search URL per county (the site ignores &page=N)', () => {
   const parser = new WhitetailParser();
   const urls = parser.buildSearchUrls([
     { county: 'Dewey', state: 'OK' },
     { county: 'St. Francois', state: 'MO' },
   ]);
   assert.deepEqual(urls.map(u => [u.url, u.page]), [
-    ['https://www.whitetailproperties.com/hunting-land/oklahoma/dewey', 1],
-    ['https://www.whitetailproperties.com/hunting-land/missouri/saint-francois', 1],
+    ['https://www.whitetailproperties.com/hunting-land?state%5B%5D=Oklahoma&county%5BOklahoma%5D%5B%5D=Dewey&acreage_min=40', 1],
+    ['https://www.whitetailproperties.com/hunting-land?state%5B%5D=Missouri&county%5BMissouri%5D%5B%5D=Saint%20Francois&acreage_min=40', 1],
   ]);
 });
 
-// ---------- LandWatch large-tract coverage cap (verifier D6) ----------
+// ---------- Whitetail query-form county search (2026-10-05 captures) ----------
+// Real Chrome renders of the site's own search form URL with acreage_min=40
+// (script/style bodies stripped, Mapbox token redacted).
 
-test('LandWatch: only the last large-tract page carries the full-page coverage check', () => {
+test('Whitetail Owsley KY 40+ acres: "Showing 1-2 of 2" — the 115-acre tract, the priceless Pending card skipped', () => {
+  const parser = new WhitetailParser();
+  const listings = parser.parseSearchPage(fixture('whitetail-query-owsley-ky-40ac.html'), 'Owsley', 'KY');
+  assert.deepEqual(listings.map(l => [l.url.replace(/^.*\/hunting-land\//, ''), l.price, l.acres]), [
+    ['kentucky/owsley/private-mountain-big-buck-multi-use-hunting-property', 109000, 115],
+  ]);
+  assert.equal(parser._lastCardCount, 2);
+  assert.equal(parser._lastTotalCount, 2);
+  assert.equal(parser._lastRangeEnd, 2);
+});
+
+test('Whitetail Dewey, Le Flore and McIntosh OK 40+ acre renders parse every priced 40+ acre card', () => {
+  const cases = [
+    ['whitetail-query-dewey-ok-40ac.html', 'Dewey', 9, [[795600, 312], [368000, 160], [392000, 160], [376000, 160]]],
+    ['whitetail-query-le-flore-ok-40ac.html', 'Leflore', 1, [[230000, 80]]],
+    ['whitetail-query-mcintosh-ok-40ac.html', 'McIntosh', 5, [[949980, 355], [372000, 120], [1762405, 417.83]]],
+  ];
+  for (const [name, county, total, expected] of cases) {
+    const parser = new WhitetailParser();
+    const listings = parser.parseSearchPage(fixture(name), county, 'OK');
+    assert.deepEqual(listings.map(l => [l.price, l.acres]), expected, name);
+    assert.equal(parser._lastTotalCount, total, name);
+    assert.ok(listings.every(l => l.acres >= 40), name);
+  }
+});
+
+test('Whitetail empty county render ("Showing 0-0 of 0") is empty: no drift, no name-mismatch report', async (t) => {
+  const parser0 = new WhitetailParser();
+  const html = fixture('whitetail-query-pittsburg-ok-40ac-empty.html');
+  assert.equal(parser0.looksLikeEmptyResults(html), true);
+  const url = parser0.searchUrlFor('Pittsburg', 'OK');
+  const { parser, fetched } = makeScrapeHarness(t, WhitetailParser, { [url]: html });
+  const listings = await parser.scrapeAll([{ county: 'Pittsburg', state: 'OK', maxCPA: 2500 }]);
+  assert.deepEqual(fetched, [url]);
+  assert.equal(listings.length, 0);
+  assert.deepEqual(parser.sourceIssues, []);
+  assert.equal(parser.stats.driftPages, 0);
+});
+
+test('Whitetail reports a misspelled county filter (searched "Leflore", site lists "Le Flore") instead of a silent empty county', async (t) => {
+  // Real render of county[Oklahoma][]=Leflore: "Showing 0-0 of 0", while the
+  // page's own Oklahoma county checkboxes list "Le Flore". Simulate an
+  // override going missing by searching the raw Airtable name.
+  const html = fixture('whitetail-query-leflore-misspelled-ok-40ac.html');
+  const { parser } = makeScrapeHarness(t, WhitetailParser, () => html);
+  parser.countyFilterValue = county => county; // no override
+  const listings = await parser.scrapeAll([{ county: 'Leflore', state: 'OK', maxCPA: 2500 }]);
+  assert.equal(listings.length, 0);
+  const mismatch = parser.sourceIssues.filter(i => i.type === 'county_name_mismatch');
+  assert.equal(mismatch.length, 1);
+  assert.match(mismatch[0].error, /Searched county "Leflore" returned 0 listings, but Whitetail lists this county as "Le Flore"/);
+  assert.equal(parser.stats.driftPages, 0, 'still not markup drift');
+
+  // With the real override in place the same empty page raises nothing
+  // (an empty county the site does not list at all is simply empty).
+  const second = makeScrapeHarness(t, WhitetailParser, () => fixture('whitetail-query-pittsburg-ok-40ac-empty.html'));
+  await second.parser.scrapeAll([{ county: 'Leflore', state: 'OK', maxCPA: 2500 }]);
+  assert.deepEqual(second.parser.sourceIssues, []);
+});
+
+test('Whitetail: more results than the rendered page ("Showing 1-50 of 96") is a coverage warning', async (t) => {
+  // Real state-level render (Oklahoma, 40+ acres) standing in for a county
+  // with more than one page of qualifying listings.
+  const html = fixture('whitetail-query-state-oklahoma-40ac-96-results.html');
+  const { parser, fetched } = makeScrapeHarness(t, WhitetailParser, () => html);
+  await parser.scrapeAll([{ county: 'Pushmataha', state: 'OK', maxCPA: 2500 }]);
+  assert.equal(fetched.length, 1, 'still one render: &page=2 is ignored by the site');
+  const truncated = parser.sourceIssues.filter(i => i.type === 'coverage_truncated');
+  assert.equal(truncated.length, 1);
+  assert.match(truncated[0].error, /site reports 96 listings, so about 46 were not read/);
+});
+
+test('Whitetail: a complete county page ("Showing 1-9 of 9") is not a coverage warning', async (t) => {
+  const { parser } = makeScrapeHarness(t, WhitetailParser, () => fixture('whitetail-query-dewey-ok-40ac.html'));
+  const listings = await parser.scrapeAll([{ county: 'Dewey', state: 'OK', maxCPA: 2500 }]);
+  assert.equal(listings.length, 4);
+  assert.deepEqual(parser.sourceIssues, []);
+});
+
+// ---------- LandWatch per-county page cap (verifier D6) ----------
+
+const LW_PITTSBURG_AO40 = 'https://www.landwatch.com/oklahoma-land-for-sale/pittsburg-county/acres-over-40';
+
+test('LandWatch: only the last planned page of a county carries the full-page coverage check', () => {
   const parser = new LandWatchParser();
   const urls = parser.buildSearchUrls([{ county: 'Pittsburg', state: 'OK' }]);
   const flagged = urls.filter(u => u.warnIfFullAtCards);
   assert.equal(flagged.length, 1);
-  assert.match(flagged[0].url, new RegExp(`/acres-over-150/page-${LandWatchParser.LARGE_TRACT_MAX_PAGES}$`));
+  assert.equal(flagged[0].url, `${LW_PITTSBURG_AO40}/page-${LandWatchParser.MAX_PAGES_PER_COUNTY}`);
   assert.equal(flagged[0].warnIfFullAtCards, LandWatchParser.RESULTS_PER_PAGE);
 });
 
-test('LandWatch scrapeAll records coverage_truncated when the last large-tract page is still full', async (t) => {
-  const full = fixture('landwatch-search-acres-over-150-pittsburg-page-1.html'); // 25 cards
-  const empty = fixture('landwatch-search-acres-over-150-pittsburg-page-3.html');
-  const ao150 = 'https://www.landwatch.com/oklahoma-land-for-sale/pittsburg-county/acres-over-150';
-  const { parser, fetched } = makeScrapeHarness(t, LandWatchParser, url => (url.includes('acres-over-150') ? full : empty));
+test('LandWatch scrapeAll records coverage_truncated when the site total runs past the 10-page cap', async (t) => {
+  // Every page is a full 25-card page stating 300 results in total.
+  const full = fixture('landwatch-search-acres-over-40-pittsburg-page-1.html').replace(/"totalCount":61/, '"totalCount":300').replace(/LandWatch has 61 land/g, 'LandWatch has 300 land');
+  const { parser, fetched } = makeScrapeHarness(t, LandWatchParser, () => full);
   await parser.scrapeAll([{ county: 'Pittsburg', state: 'OK', maxCPA: 2500 }]);
-  assert.equal(fetched.filter(u => u.startsWith(ao150)).length, 5);
+  assert.equal(fetched.length, 10, 'the cap holds: page 11 is never requested');
   const truncated = parser.sourceIssues.filter(i => i.type === 'coverage_truncated');
   assert.equal(truncated.length, 1);
-  assert.equal(truncated[0].url, `${ao150}/page-5`);
-  assert.match(truncated[0].error, /still full \(25 listings\)/);
+  assert.equal(truncated[0].url, `${LW_PITTSBURG_AO40}/page-10`);
+  assert.match(truncated[0].error, /site reports 300 listings, so about 50 were not read/);
+});
+
+test('LandWatch scrapeAll records no coverage warning when the total ends exactly at the cap', async (t) => {
+  const full = fixture('landwatch-search-acres-over-40-pittsburg-page-1.html').replace(/"totalCount":61/, '"totalCount":250').replace(/LandWatch has 61 land/g, 'LandWatch has 250 land');
+  const { parser, fetched } = makeScrapeHarness(t, LandWatchParser, () => full);
+  await parser.scrapeAll([{ county: 'Pittsburg', state: 'OK', maxCPA: 2500 }]);
+  assert.equal(fetched.length, 10);
+  assert.equal(parser.sourceIssues.filter(i => i.type === 'coverage_truncated').length, 0);
 });
 
 test('LandWatch scrapeAll records no coverage warning when the series ends before the cap', async (t) => {
-  const ao150 = 'https://www.landwatch.com/oklahoma-land-for-sale/pittsburg-county/acres-over-150';
-  const empty = fixture('landwatch-search-acres-over-150-pittsburg-page-3.html');
-  const { parser } = makeScrapeHarness(t, LandWatchParser, url => {
-    if (url === ao150) return fixture('landwatch-search-acres-over-150-pittsburg-page-1.html');
-    if (url === `${ao150}/page-2`) return fixture('landwatch-search-acres-over-150-pittsburg-page-2.html');
-    return empty;
+  const { parser, fetched } = makeScrapeHarness(t, LandWatchParser, url => {
+    if (url === LW_PITTSBURG_AO40) return fixture('landwatch-search-acres-over-40-pittsburg-page-1.html');
+    if (url === `${LW_PITTSBURG_AO40}/page-2`) return fixture('landwatch-search-acres-over-40-pittsburg-page-2.html');
+    if (url === `${LW_PITTSBURG_AO40}/page-3`) return fixture('landwatch-search-acres-over-40-pittsburg-page-3.html');
+    throw new Error(`unexpected fetch ${url}`);
   });
   await parser.scrapeAll([{ county: 'Pittsburg', state: 'OK', maxCPA: 2500 }]);
+  assert.equal(fetched.length, 3);
   assert.equal(parser.sourceIssues.filter(i => i.type === 'coverage_truncated').length, 0);
+});
+
+test('LandWatch, total unreadable: a still-full page 10 is a coverage warning', async (t) => {
+  const full = fixture('landwatch-search-acres-over-40-pittsburg-page-1.html').replace(/"totalCount":61/, '"noTotal":0').replace(/LandWatch has 61 land/g, 'LandWatch has many land');
+  const { parser, fetched } = makeScrapeHarness(t, LandWatchParser, () => full);
+  await parser.scrapeAll([{ county: 'Pittsburg', state: 'OK', maxCPA: 2500 }]);
+  assert.equal(fetched.length, 10);
+  const truncated = parser.sourceIssues.filter(i => i.type === 'coverage_truncated');
+  assert.equal(truncated.length, 1);
+  assert.match(truncated[0].error, /still full \(25 listings\)/);
 });
 
 // ---------- one listing, two href spellings (verifier D7) ----------
@@ -230,16 +334,15 @@ test('extractByDetailLinks treats relative and absolute/trailing-slash links to 
   assert.equal(listings[0].url, 'https://www.whitetailproperties.com/hunting-land/oklahoma/dewey/creek-tract/');
 });
 
-test('LandWatch: a last large-tract page of only out-of-county "nearby" cards is not a coverage warning', async (t) => {
+test('LandWatch, total unreadable: a full page of only out-of-county "nearby" cards ends the series without a warning', async (t) => {
   // Page-1 Pittsburg cards served for a Dewey search: 25 cards, every one
   // rejected by verifyCounty — the padding LandWatch shows past the results.
-  const full = fixture('landwatch-search-acres-over-150-pittsburg-page-1.html');
-  const { parser, fetched } = makeScrapeHarness(t, LandWatchParser, url => {
-    if (url.includes('/page-5')) return full;
-    if (url.includes('acres-over-150')) return fixture('landwatch-search-acres-over-150-pittsburg-page-1.html').replace(/pittsburg/gi, 'dewey');
-    return fixture('landwatch-search-acres-over-150-pittsburg-page-3.html');
-  });
-  await parser.scrapeAll([{ county: 'Dewey', state: 'OK', maxCPA: 2500 }]);
-  assert.ok(fetched.some(u => u.endsWith('/acres-over-150/page-5')), 'the series really reached page 5');
+  const pittsburgCards = fixture('landwatch-search-acres-over-40-pittsburg-page-1.html').replace(/"totalCount":61/, '"noTotal":0').replace(/LandWatch has 61 land/g, 'LandWatch has many land');
+  const deweyCards = pittsburgCards.replace(/pittsburg/gi, 'dewey');
+  const { parser, fetched } = makeScrapeHarness(t, LandWatchParser, url => (url.includes('/page-') ? pittsburgCards : deweyCards));
+  const listings = await parser.scrapeAll([{ county: 'Dewey', state: 'OK', maxCPA: 2500 }]);
+  assert.equal(listings.length, 25);
+  assert.equal(fetched.length, 2, 'the zero-listing page 2 ends the series');
   assert.equal(parser.sourceIssues.filter(i => i.type === 'coverage_truncated').length, 0);
+  assert.equal(parser.stats.driftPages, 0);
 });

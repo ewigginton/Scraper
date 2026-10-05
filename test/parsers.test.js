@@ -16,36 +16,30 @@ const testCounties = [
   { county: 'Taney', state: 'MO', maxCPA: 4000 },
 ];
 
-test('LandWatch builds current /{state}-land-for-sale/{county}-county URLs', () => {
+test('LandWatch builds current /{state}-land-for-sale/{county}-county/acres-over-N URLs', () => {
   // The pre-2026 /{state}/{county}-county/land-for-sale?minAcreage=&sort=
   // query form is 400-rejected by the site — the 2026-08-04 nightly burned
-  // 244 pages on it. Page 1 is the bare county URL; deeper pages are /page-N;
-  // the large-tract pass is an /acres-over-N path segment.
+  // 244 pages on it. Filters are path segments: page 1 is the county page
+  // filtered to the acreage floor; deeper pages append /page-N.
   const parser = new LandWatchParser();
   const urls = parser.buildSearchUrls(testCounties);
-  assert.equal(urls[0].url, 'https://www.landwatch.com/texas-land-for-sale/san-augustine-county');
+  assert.equal(urls[0].url, 'https://www.landwatch.com/texas-land-for-sale/san-augustine-county/acres-over-40');
   const page2 = urls.find(u => u.county === 'San Augustine' && u.page === 2);
-  assert.equal(page2.url, 'https://www.landwatch.com/texas-land-for-sale/san-augustine-county/page-2');
-  const largeTract = urls.find(u => u.county === 'San Augustine' && u.url.includes('acres-over'));
-  assert.match(largeTract.url, /\/texas-land-for-sale\/san-augustine-county\/acres-over-\d+$/);
+  assert.equal(page2.url, 'https://www.landwatch.com/texas-land-for-sale/san-augustine-county/acres-over-40/page-2');
   // The dead query-param form must never come back
   assert.ok(urls.every(u => !u.url.includes('?')), 'no query params in the current scheme');
 });
 
-test('LandWatch page 1 and /page-N share one pagination series key; acres-over is its own', () => {
+test('LandWatch page 1 and /page-N of the county series share one pagination series key', () => {
   const parser = new LandWatchParser();
-  const base = 'https://www.landwatch.com/kentucky-land-for-sale/wayne-county';
+  const base = 'https://www.landwatch.com/kentucky-land-for-sale/wayne-county/acres-over-40';
   const k1 = parser.paginationSeriesKey(base, 'Wayne', 'KY');
   const k2 = parser.paginationSeriesKey(`${base}/page-2`, 'Wayne', 'KY');
-  const k3 = parser.paginationSeriesKey(`${base}/page-3`, 'Wayne', 'KY');
+  const k10 = parser.paginationSeriesKey(`${base}/page-10`, 'Wayne', 'KY');
   // Bare page 1 and /page-N collapse to ONE key so a failed page 1 skips the
   // deeper pages (the MossyOak ?pg= bug, path-segment edition).
   assert.equal(k1, k2);
-  assert.equal(k2, k3);
-  // The large-tract pass is a separate series — its failure must not be
-  // conflated with the main pass.
-  const kAcres = parser.paginationSeriesKey(`${base}/acres-over-150`, 'Wayne', 'KY');
-  assert.notEqual(k1, kAcres);
+  assert.equal(k2, k10);
 });
 
 test('Land.com generates title-case state slugs', () => {
@@ -94,16 +88,18 @@ test('all parsers generate both pass-1 and pass-2 (large tract) URLs', () => {
     assert.ok(hasSmall, `${parser.name} missing pass-1 (40ac) URLs`);
     assert.ok(hasLarge, `${parser.name} missing pass-2 (150ac) URLs`);
   }
+  // LandWatch reads ONE series per county — the county filtered to the
+  // acreage floor — so neither the unfiltered county page nor a separate
+  // large-tract pass is requested any more (both were subsets or supersets
+  // of the same listings, at extra request cost).
   const lw = new LandWatchParser();
   const lwUrls = lw.buildSearchUrls(singleCounty);
   assert.ok(
-    lwUrls.some(u => u.url.endsWith('/missouri-land-for-sale/taney-county')),
-    'LandWatch missing pass-1 (bare county page) URL'
+    lwUrls.every(u => u.url.startsWith('https://www.landwatch.com/missouri-land-for-sale/taney-county/acres-over-40')),
+    lwUrls.map(u => u.url).join('\n')
   );
-  assert.ok(
-    lwUrls.some(u => u.url.includes('acres-over-150')),
-    'LandWatch missing pass-2 (acres-over-150) URL'
-  );
+  assert.ok(!lwUrls.some(u => u.url.endsWith('/taney-county')), 'no unfiltered county page');
+  assert.ok(!lwUrls.some(u => u.url.includes('acres-over-150')), 'no separate large-tract pass');
 });
 
 test('LandWatch is browser-rendered — a CoStar/Imperva client-rendered SPA', () => {
@@ -460,71 +456,96 @@ test('SCRAPER_MAX_PAGE limits validation runs to early pages', async () => {
   }
 });
 
-// ---------- LandWatch large-tract pagination (/acres-over-N/page-N) ----------
+// ---------- LandWatch county series (/acres-over-40/page-N) ----------
 //
-// Live evidence 2026-10-05: Pittsburg County, OK acres-over-150 lists 28
-// properties — 25 cards on page 1, 3 on page-2 (including a 560-acre tract),
-// 0 on page-3. buildSearchUrls used to request page 1 only, so every large
-// tract past the first page was never seen. Fixtures are the real pages.
+// Live evidence 2026-10-05: Pittsburg County, OK's unfiltered county page
+// totals 365 listings (15 pages, mostly under 40 acres; the old code read 3),
+// while /acres-over-40 totals 61 — 25 + 25 + 11 cards over three pages, none
+// under 40 acres. The page's __SERVER_STATE__ carries that total, so the
+// series stops after page 3 without requesting an empty page 4. Fixtures are
+// the real pages.
 
-const PITTSBURG_AO150 = 'https://www.landwatch.com/oklahoma-land-for-sale/pittsburg-county/acres-over-150';
+const PITTSBURG_AO40 = 'https://www.landwatch.com/oklahoma-land-for-sale/pittsburg-county/acres-over-40';
 
-function loadPittsburgPage(n) {
-  return fs.readFileSync(path.join(__dirname, 'fixtures', `landwatch-search-acres-over-150-pittsburg-page-${n}.html`), 'utf8');
+function loadPittsburgOver40Page(n) {
+  return fs.readFileSync(path.join(__dirname, 'fixtures', `landwatch-search-acres-over-40-pittsburg-page-${n}.html`), 'utf8');
 }
 
-test('LandWatch builds a paginated large-tract series: /acres-over-150 then /acres-over-150/page-2..5', () => {
+function loadLandWatchFixture(name) {
+  return fs.readFileSync(path.join(__dirname, 'fixtures', name), 'utf8');
+}
+
+/** The page with its stated total (state blob AND meta description) removed — the "total unreadable" case. */
+function withoutTotal(html) {
+  const stripped = html
+    .replace(/"totalCount":\d+/g, '"totalCountRemoved":0')
+    .replace(/LandWatch has [\d,]+ land listings/g, 'LandWatch has many land listings');
+  assert.notEqual(stripped, html, 'fixture had a total to remove');
+  return stripped;
+}
+
+test('LandWatch builds ONE county series: /acres-over-{minAcres} then /page-2..10, every page sized 25', () => {
+  const settings = require('../config/settings.json');
   const parser = new LandWatchParser();
   const urls = parser.buildSearchUrls([{ county: 'Pittsburg', state: 'OK', maxCPA: 2500 }]);
-  const countyBase = 'https://www.landwatch.com/oklahoma-land-for-sale/pittsburg-county';
-  assert.deepEqual(urls.map(u => [u.url, u.page]), [
-    // Plain county series unchanged: pages 1-3
-    [countyBase, 1],
-    [`${countyBase}/page-2`, 2],
-    [`${countyBase}/page-3`, 3],
-    // Large-tract series: pages 1-5
-    [PITTSBURG_AO150, 1],
-    [`${PITTSBURG_AO150}/page-2`, 2],
-    [`${PITTSBURG_AO150}/page-3`, 3],
-    [`${PITTSBURG_AO150}/page-4`, 4],
-    [`${PITTSBURG_AO150}/page-5`, 5],
-  ]);
+  const base = `https://www.landwatch.com/oklahoma-land-for-sale/pittsburg-county/acres-over-${settings.filtering.minAcres}`;
+  assert.equal(base, PITTSBURG_AO40, 'the floor in settings.json is 40');
+  const expected = [[base, 1]];
+  for (let page = 2; page <= LandWatchParser.MAX_PAGES_PER_COUNTY; page++) expected.push([`${base}/page-${page}`, page]);
+  assert.deepEqual(urls.map(u => [u.url, u.page]), expected);
+  assert.equal(LandWatchParser.MAX_PAGES_PER_COUNTY, 10);
   assert.ok(urls.every(u => u.county === 'Pittsburg' && u.state === 'OK'));
+  assert.ok(urls.every(u => u.pageSize === LandWatchParser.RESULTS_PER_PAGE && u.pageSize === 25));
+  // Only the capped last page carries the coverage check
+  assert.deepEqual(urls.filter(u => u.warnIfFullAtCards).map(u => u.page), [10]);
+  // One series key for the whole county
+  assert.equal(new Set(urls.map(u => parser.paginationSeriesKey(u.url, u.county, u.state))).size, 1);
 });
 
-test('LandWatch large-tract pages share ONE series key, distinct from the plain county series', () => {
+test('LandWatch reads the search total from __SERVER_STATE__ (searchPage.searchResults.totalCount)', () => {
   const parser = new LandWatchParser();
-  const urls = parser.buildSearchUrls([{ county: 'Pittsburg', state: 'OK', maxCPA: 2500 }]);
-  const keyOf = u => parser.paginationSeriesKey(u.url, u.county, u.state);
-  const plainKeys = new Set(urls.filter(u => !u.url.includes('acres-over')).map(keyOf));
-  const largeKeys = new Set(urls.filter(u => u.url.includes('acres-over')).map(keyOf));
-  assert.equal(plainKeys.size, 1, 'plain county pages collapse to one series');
-  assert.equal(largeKeys.size, 1, 'large-tract pages collapse to one series');
-  assert.notEqual([...plainKeys][0], [...largeKeys][0], 'the two series are independent');
+  assert.equal(parser.searchTotalCount(loadPittsburgOver40Page(1)), 61);
+  assert.equal(parser.searchTotalCount(loadPittsburgOver40Page(3)), 61);
+  assert.equal(parser.searchTotalCount(loadLandWatchFixture('landwatch-search-acres-over-40-wayne-single-page.html')), 21);
+  assert.equal(parser.searchTotalCount(loadLandWatchFixture('landwatch-search-empty-robertson-acres-over-1000.html')), 0);
+  assert.equal(parser.searchTotalCount(withoutTotal(loadPittsburgOver40Page(1))), null);
+  // Meta description alone (the state blob's total removed) still gives it
+  assert.equal(parser.searchTotalCount(loadPittsburgOver40Page(1).replace(/"totalCount":\d+/, '"x":0')), 61);
+  assert.equal(parser.searchTotalCount('<html><body>no state blob</body></html>'), null);
+  assert.equal(parser.searchTotalCount('<script id="__SERVER_STATE__" type="application/json">{not json</script>'), null);
+  // parseSearchPage leaves it for scrapeAll
+  parser.parseSearchPage(loadPittsburgOver40Page(2), 'Pittsburg', 'OK');
+  assert.equal(parser._lastTotalCount, 61);
 });
 
-test('LandWatch Pittsburg acres-over-150 fixtures: page 1 + page-2 yield all 28 large tracts, page-3 is empty', () => {
+test('LandWatch browser-rendered page (what production reads): empty state blob, total read from the meta description', () => {
+  // Real Chrome render via lib/browser-fetch.js, 2026-10-05. Client
+  // rendering empties <script id="__SERVER_STATE__">, so without the meta
+  // fallback every county would cost one extra request past its last page.
+  const html = loadLandWatchFixture('landwatch-search-acres-over-40-pittsburg-page-1-browser-render.html');
+  assert.match(html, /<script id="__SERVER_STATE__" type="application\/json"><\/script>/);
   const parser = new LandWatchParser();
-  const p1 = parser.parseSearchPage(loadPittsburgPage(1), 'Pittsburg', 'OK');
-  const p2 = parser.parseSearchPage(loadPittsburgPage(2), 'Pittsburg', 'OK');
-  const p3 = parser.parseSearchPage(loadPittsburgPage(3), 'Pittsburg', 'OK');
-  assert.equal(p1.length, 25);
-  assert.equal(p2.length, 3);
-  assert.equal(p3.length, 0);
-  assert.equal(parser._lastCardCount, 0, 'page-3 has no cards at all');
-  // Page title: "... 28 Properties for Sale | LandWatch"
-  assert.match(loadPittsburgPage(1), /28 Properties for Sale/);
-  const all = [...p1, ...p2];
-  assert.equal(new Set(all.map(l => l.url)).size, 28, 'no listing repeats across pages');
+  assert.equal(parser.searchTotalCount(html), 61);
+  const listings = parser.parseSearchPage(html, 'Pittsburg', 'OK');
+  assert.equal(listings.length, 25);
+  assert.equal(parser._lastTotalCount, 61);
+  assert.ok(listings.every(l => l.acres >= 40));
+});
+
+test('LandWatch Pittsburg acres-over-40 fixtures: pages 1-3 yield all 61 listings, every one 40+ acres', () => {
+  const parser = new LandWatchParser();
+  const p1 = parser.parseSearchPage(loadPittsburgOver40Page(1), 'Pittsburg', 'OK');
+  const p2 = parser.parseSearchPage(loadPittsburgOver40Page(2), 'Pittsburg', 'OK');
+  const p3 = parser.parseSearchPage(loadPittsburgOver40Page(3), 'Pittsburg', 'OK');
+  assert.deepEqual([p1.length, p2.length, p3.length], [25, 25, 11]);
+  const all = [...p1, ...p2, ...p3];
+  assert.equal(new Set(all.map(l => l.url)).size, 61, 'no listing repeats across pages');
   for (const l of all) {
-    assert.ok(l.acres >= 150, `filter leaked a ${l.acres}ac listing: ${l.url}`);
-    assert.ok(l.price > 0 && l.price / l.acres < 50000, `implausible $${l.price} / ${l.acres}ac: ${l.url}`);
+    assert.ok(l.acres >= 40, `filter leaked a ${l.acres}ac listing: ${l.url}`);
+    assert.ok(l.price > 0, `no price: ${l.url}`);
   }
-  // The 560-acre tract that only appears on page-2
-  const tract560 = p2.find(l => l.url.includes('/pid/425937328'));
-  assert.ok(tract560, 'page-2 carries pid 425937328');
-  assert.equal(tract560.acres, 560);
-  assert.equal(tract560.price, 2380000);
+  // The 560-acre tract the old large-tract pass only found on ITS page-2
+  assert.ok(all.some(l => l.url.includes('/pid/425937328') && l.acres === 560 && l.price === 2380000));
 });
 
 function makeLandWatchScrapeHarness(t, pages) {
@@ -554,76 +575,136 @@ function makeLandWatchScrapeHarness(t, pages) {
   return { parser, fetched };
 }
 
-test('scrapeAll walks the large-tract series until its first empty page, and that empty page is not markup drift', async (t) => {
-  const countyBase = 'https://www.landwatch.com/oklahoma-land-for-sale/pittsburg-county';
+test('scrapeAll stops the county series at the last page its total implies (61 results = 3 pages)', async (t) => {
   const { parser, fetched } = makeLandWatchScrapeHarness(t, {
-    // Plain county series: an empty results page ends it immediately
-    [countyBase]: loadPittsburgPage(3),
-    [PITTSBURG_AO150]: loadPittsburgPage(1),
-    [`${PITTSBURG_AO150}/page-2`]: loadPittsburgPage(2),
-    [`${PITTSBURG_AO150}/page-3`]: loadPittsburgPage(3),
+    [PITTSBURG_AO40]: loadPittsburgOver40Page(1),
+    [`${PITTSBURG_AO40}/page-2`]: loadPittsburgOver40Page(2),
+    [`${PITTSBURG_AO40}/page-3`]: loadPittsburgOver40Page(3),
   });
-
   const listings = await parser.scrapeAll([{ county: 'Pittsburg', state: 'OK', maxCPA: 2500 }]);
-
-  assert.deepEqual(fetched, [
-    countyBase,
-    PITTSBURG_AO150,
-    `${PITTSBURG_AO150}/page-2`,
-    `${PITTSBURG_AO150}/page-3`,
-  ], 'pages 4 and 5 are never fetched once page-3 comes back empty');
-  assert.equal(listings.length, 28);
-  assert.ok(listings.some(l => l.url.includes('/pid/425937328')), 'the page-2-only 560ac tract is scraped');
-  assert.deepEqual(parser.sourceIssues, [], 'an empty page ending a series raises no source issue');
+  assert.deepEqual(fetched, [PITTSBURG_AO40, `${PITTSBURG_AO40}/page-2`, `${PITTSBURG_AO40}/page-3`],
+    'page 4 is never requested: 3 x 25 >= 61');
+  assert.equal(listings.length, 61);
+  assert.deepEqual(parser.sourceIssues, []);
   assert.equal(parser.stats.driftPages, 0);
+  assert.equal(parser.stats.checked, 3);
 });
 
-test('a zero-card large-tract page-2 with no "no results" text ends the series silently; only page 1 can raise drift', async (t) => {
-  const countyBase = 'https://www.landwatch.com/oklahoma-land-for-sale/pittsburg-county';
+test('scrapeAll reads a single-page county with ONE request (Wayne KY: 21 results)', async (t) => {
+  const wayne = 'https://www.landwatch.com/kentucky-land-for-sale/wayne-county/acres-over-40';
+  const { parser, fetched } = makeLandWatchScrapeHarness(t, {
+    [wayne]: loadLandWatchFixture('landwatch-search-acres-over-40-wayne-single-page.html'),
+  });
+  const listings = await parser.scrapeAll([{ county: 'Wayne', state: 'KY', maxCPA: 2500 }]);
+  assert.deepEqual(fetched, [wayne]);
+  assert.equal(listings.length, 21);
+  assert.deepEqual(parser.sourceIssues, []);
+});
+
+test('a county with no 40+ acre listings (explicit total 0) is genuinely empty, not markup drift', async (t) => {
+  // Real empty render (live 2026-10-05, robertson-county/acres-over-1000):
+  // "No Listings" header, totalCount 0, padded with 16 other-county
+  // "similar properties" cards that verifyCounty rejects.
+  const robertson = 'https://www.landwatch.com/kentucky-land-for-sale/robertson-county/acres-over-40';
+  const emptyPage = loadLandWatchFixture('landwatch-search-empty-robertson-acres-over-1000.html');
+  const parser0 = new LandWatchParser();
+  assert.deepEqual(parser0.parseSearchPage(emptyPage, 'Robertson', 'KY'), []);
+  assert.equal(parser0.looksLikeEmptyResults(emptyPage), true);
+
+  const { parser, fetched } = makeLandWatchScrapeHarness(t, { [robertson]: emptyPage });
+  const listings = await parser.scrapeAll([{ county: 'Robertson', state: 'KY', maxCPA: 2500 }]);
+  assert.deepEqual(fetched, [robertson], 'no page 2 for an empty county');
+  assert.equal(listings.length, 0);
+  assert.deepEqual(parser.sourceIssues, []);
+  assert.equal(parser.stats.driftPages, 0);
+
+  // Same, with no padding cards at all: zero cards on page 1 would be the
+  // drift signature, but the explicit zero total says the county is empty.
+  const bareEmpty = '<html><body><main><h1>No Listings</h1></main>' +
+    '<script id="__SERVER_STATE__" type="application/json">{"searchPage":{"searchResults":{"propertyResults":[],"similarProperties":[],"totalCount":0}}}</script></body></html>';
+  const second = makeLandWatchScrapeHarness(t, { [robertson]: bareEmpty });
+  await second.parser.scrapeAll([{ county: 'Robertson', state: 'KY', maxCPA: 2500 }]);
+  assert.deepEqual(second.fetched, [robertson]);
+  assert.equal(second.parser.stats.driftPages, 0);
+  assert.deepEqual(second.parser.sourceIssues, []);
+});
+
+test('without a readable total, the series stops at the first short page', async (t) => {
+  const { parser, fetched } = makeLandWatchScrapeHarness(t, {
+    [PITTSBURG_AO40]: withoutTotal(loadPittsburgOver40Page(1)),
+    [`${PITTSBURG_AO40}/page-2`]: withoutTotal(loadPittsburgOver40Page(2)),
+    [`${PITTSBURG_AO40}/page-3`]: withoutTotal(loadPittsburgOver40Page(3)), // 11 cards
+  });
+  const listings = await parser.scrapeAll([{ county: 'Pittsburg', state: 'OK', maxCPA: 2500 }]);
+  assert.equal(fetched.length, 3, 'page 3 has 11 < 25 cards, so page 4 is not requested');
+  assert.equal(listings.length, 61);
+  assert.deepEqual(parser.sourceIssues, []);
+});
+
+test('without a readable total, a zero-card page-2 ends the series silently; only page 1 can raise drift', async (t) => {
   // A rendered page with no cards and no empty-results phrase — the drift
   // signature on page 1, but on page 2+ just the end of the results.
   const bare = '<html><head><title>Pittsburg County, OK Land for Sale | LandWatch</title></head><body><main><h1>Land for sale</h1></main></body></html>';
   const { parser, fetched } = makeLandWatchScrapeHarness(t, {
-    [countyBase]: loadPittsburgPage(3),
-    [PITTSBURG_AO150]: loadPittsburgPage(1),
-    [`${PITTSBURG_AO150}/page-2`]: bare,
+    [PITTSBURG_AO40]: withoutTotal(loadPittsburgOver40Page(1)),
+    [`${PITTSBURG_AO40}/page-2`]: bare,
   });
-
   const listings = await parser.scrapeAll([{ county: 'Pittsburg', state: 'OK', maxCPA: 2500 }]);
   assert.equal(listings.length, 25);
-  assert.equal(fetched.length, 3, 'series ends at the empty page-2');
+  assert.equal(fetched.length, 2, 'series ends at the empty page-2');
   assert.equal(parser.stats.driftPages, 0);
   assert.ok(!parser.sourceIssues.some(i => i.type === 'markup_drift'));
 
-  // The same bare page as large-tract PAGE 1 is still reported as drift.
-  const second = makeLandWatchScrapeHarness(t, {
-    [countyBase]: loadPittsburgPage(3),
-    [PITTSBURG_AO150]: bare,
-  });
+  // The same bare page as PAGE 1 is still reported as drift.
+  const second = makeLandWatchScrapeHarness(t, { [PITTSBURG_AO40]: bare });
   await second.parser.scrapeAll([{ county: 'Pittsburg', state: 'OK', maxCPA: 2500 }]);
-  assert.deepEqual(second.fetched, [countyBase, PITTSBURG_AO150], 'drifted page 1 ends the series too');
+  assert.deepEqual(second.fetched, [PITTSBURG_AO40], 'drifted page 1 ends the series too');
   assert.equal(second.parser.stats.driftPages, 1);
-  assert.ok(second.parser.sourceIssues.some(i => i.type === 'markup_drift' && i.url === PITTSBURG_AO150));
+  assert.ok(second.parser.sourceIssues.some(i => i.type === 'markup_drift' && i.url === PITTSBURG_AO40));
 });
 
-test('a failed large-tract page 1 skips its deeper pages without touching the plain county series', async (t) => {
-  const countyBase = 'https://www.landwatch.com/oklahoma-land-for-sale/pittsburg-county';
-  const { parser, fetched } = makeLandWatchScrapeHarness(t, {
-    [countyBase]: loadPittsburgPage(1).replace(/acres-over-150/g, 'x'),
-    [`${countyBase}/page-2`]: loadPittsburgPage(3),
-  });
-  const originalBrowserFetch = parser.browserFetch;
+test('a failed page 1 skips the county\'s deeper pages', async (t) => {
+  const { parser, fetched } = makeLandWatchScrapeHarness(t, {});
   parser.browserFetch = async (url) => {
-    if (url === PITTSBURG_AO150) {
-      fetched.push(url);
-      throw new Error(`navigation timeout for ${url}`);
-    }
-    return originalBrowserFetch(url);
+    fetched.push(url);
+    throw new Error(`navigation timeout for ${url}`);
   };
-
   await parser.scrapeAll([{ county: 'Pittsburg', state: 'OK', maxCPA: 2500 }]);
-  assert.deepEqual(fetched, [countyBase, `${countyBase}/page-2`, PITTSBURG_AO150]);
+  assert.deepEqual(fetched, [PITTSBURG_AO40]);
   assert.equal(parser.stats.errorPages, 1);
+});
+
+// The acres-over-150 captures below are kept as parser evidence (real
+// LandWatch markup, server-side acreage filtering); the scraper no longer
+// requests that series.
+const PITTSBURG_AO150 = 'https://www.landwatch.com/oklahoma-land-for-sale/pittsburg-county/acres-over-150';
+
+function loadPittsburgPage(n) {
+  return fs.readFileSync(path.join(__dirname, 'fixtures', `landwatch-search-acres-over-150-pittsburg-page-${n}.html`), 'utf8');
+}
+
+test('LandWatch Pittsburg acres-over-150 fixtures: page 1 + page-2 yield all 28 large tracts, page-3 is empty', () => {
+  const parser = new LandWatchParser();
+  const p1 = parser.parseSearchPage(loadPittsburgPage(1), 'Pittsburg', 'OK');
+  const p2 = parser.parseSearchPage(loadPittsburgPage(2), 'Pittsburg', 'OK');
+  const p3 = parser.parseSearchPage(loadPittsburgPage(3), 'Pittsburg', 'OK');
+  assert.equal(p1.length, 25);
+  assert.equal(p2.length, 3);
+  assert.equal(p3.length, 0);
+  assert.equal(parser._lastCardCount, 0, 'page-3 has no cards at all');
+  // Page title: "... 28 Properties for Sale | LandWatch"
+  assert.match(loadPittsburgPage(1), /28 Properties for Sale/);
+  const all = [...p1, ...p2];
+  assert.equal(new Set(all.map(l => l.url)).size, 28, 'no listing repeats across pages');
+  for (const l of all) {
+    assert.ok(l.acres >= 150, `filter leaked a ${l.acres}ac listing: ${l.url}`);
+    assert.ok(l.price > 0 && l.price / l.acres < 50000, `implausible $${l.price} / ${l.acres}ac: ${l.url}`);
+  }
+  // The 560-acre tract that only appears on page-2
+  const tract560 = p2.find(l => l.url.includes('/pid/425937328'));
+  assert.ok(tract560, 'page-2 carries pid 425937328');
+  assert.equal(tract560.acres, 560);
+  assert.equal(tract560.price, 2380000);
 });
 
 test('LandWatch builds le-flore-county for the Airtable "Leflore" county (generic slug returns HTTP 400)', () => {
@@ -631,4 +712,19 @@ test('LandWatch builds le-flore-county for the Airtable "Leflore" county (generi
   const urls = new LandWatchParser().buildSearchUrls([{ county: 'Leflore', state: 'OK' }]).map(u => u.url);
   assert.ok(urls.every(u => u.includes('/oklahoma-land-for-sale/le-flore-county')), urls.join('\n'));
   assert.ok(new LandWatchParser().countySlug('Pittsburg') === 'pittsburg');
+});
+
+test('LandWatch and Whitetail search URLs honor a SCRAPER_MIN_ACRES override', () => {
+  const prev = process.env.SCRAPER_MIN_ACRES;
+  process.env.SCRAPER_MIN_ACRES = '20';
+  try {
+    const LandWatchParser = require('../lib/parsers/landwatch');
+    const WhitetailParser = require('../lib/parsers/whitetail');
+    const lw = new LandWatchParser().buildSearchUrls([{ county: 'Pittsburg', state: 'OK' }])[0].url;
+    const wt = new WhitetailParser().buildSearchUrls([{ county: 'Dewey', state: 'OK' }])[0].url;
+    assert.ok(lw.includes('/acres-over-20'), lw);
+    assert.ok(wt.includes('acreage_min=20'), wt);
+  } finally {
+    if (prev === undefined) delete process.env.SCRAPER_MIN_ACRES; else process.env.SCRAPER_MIN_ACRES = prev;
+  }
 });
