@@ -12,6 +12,7 @@
     "test-browser": "node scripts/test-browser-fallback.js",
     "intake": "node scripts/process-intake.js",
     "check-airtable": "node scripts/check-airtable.js",
+    "audit-leads": "node scripts/audit-new-leads.js",
     "test": "SCRAPER_BROWSER_FALLBACK=false node --test test/*.test.js"
   },
   "dependencies": {
