@@ -95,7 +95,9 @@ async function main() {
       scraperReport = await runScraper({ dryRun, limitCounties, targetCounties });
     } else {
       // Price-check-only mode: still need county targets for CPA lookups
-      const countyTargets = await airtable.loadCountyTargets();
+      // Price check writes LP/Stage, so a live run must not fall back to
+      // the local county list either.
+      const countyTargets = await airtable.loadCountyTargets({ allowFallback: dryRun });
       initFilter(countyTargets.countyMap);
     }
 

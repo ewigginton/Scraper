@@ -420,3 +420,103 @@ test('no skipped-unavailable / rejected-below-min listings renders neither secti
   assert.ok(!body.includes('undefined'));
   assert.ok(!body.includes('NaN'));
 });
+
+// GUARD 1c/GUARD 2 — IMPLAUSIBLE and COUNTY NOT RESOLVABLE sections
+// (lib/scraper.js recordRefusedWrites feeding report.filterRejects /
+// report.countyUnresolved). Same rendering pattern as the SKIPPED section
+// above: per-site sub-line count, TOTALS line count, itemized section
+// sorted biggest-tract-first.
+test('IMPLAUSIBLE and COUNTY NOT RESOLVABLE sections render counts and itemized entries, biggest tract first', () => {
+  const { buildScraperBody } = require('../lib/notify');
+  const scraperReport = {
+    dryRun: false,
+    sites: {
+      LandWatch: {
+        status: 'ok', parsed: 10, passed: 1, written: 1, duplicates: 0, checked: 10,
+        implausible: 2, countyNotResolvable: 1,
+      },
+    },
+    totals: {
+      checked: 10, parsed: 10, passed: 1, duplicates: 0, rejected: 2, written: 1, wouldWrite: 0, errors: 0,
+      implausible: 2, countyNotResolvable: 1,
+    },
+    duplicateDetails: [],
+    filterRejects: [
+      { source: 'LandWatch', name: 'Small Glued Tract', url: 'https://lw/small-glued', reason: 'Implausible data: Price and acres are identical (5000)', acres: 20 },
+      { source: 'LandWatch', name: 'Big Glued Tract', url: 'https://lw/big-glued', reason: 'Implausible data: $150,000/acre is outside the plausible range', acres: 400 },
+    ],
+    countyUnresolved: [
+      { source: 'LandWatch', name: 'Unlinked Tract', url: 'https://lw/unlinked', county: 'Ghost', state: 'ZZ', acres: 150 },
+    ],
+    writeErrors: [],
+    sourceIssues: [],
+    warnings: [],
+    elapsedMinutes: 4,
+  };
+
+  const body = buildScraperBody(scraperReport, null, 'Monday');
+
+  // Per-site sub-lines
+  assert.match(body, /\(2 rejected: implausible price\/acreage — see IMPLAUSIBLE section below\)/);
+  assert.match(body, /\(1 refused: county not resolvable — see COUNTY NOT RESOLVABLE section below\)/);
+
+  // TOTALS line
+  assert.match(body, /2 of the rejected had implausible price\/acreage/);
+  assert.match(body, /1 plausible listing\(s\) refused — county not resolvable/);
+
+  // Itemized sections
+  assert.match(body, /IMPLAUSIBLE — PRICE OR ACREAGE REJECTED AT WRITE TIME/);
+  assert.match(body, /LandWatch: Big Glued Tract — Implausible data:/);
+  assert.match(body, /https:\/\/lw\/big-glued/);
+  assert.match(body, /LandWatch: Small Glued Tract — Implausible data:/);
+  assert.ok(
+    body.indexOf('Big Glued Tract') < body.indexOf('Small Glued Tract'),
+    'the 400ac implausible listing must render before the 20ac one'
+  );
+
+  assert.match(body, /COUNTY NOT RESOLVABLE — REFUSED AT WRITE TIME/);
+  assert.match(body, /LandWatch: Unlinked Tract — Ghost, ZZ/);
+  assert.match(body, /https:\/\/lw\/unlinked/);
+
+  assert.ok(!body.includes('undefined'));
+  assert.ok(!body.includes('NaN'));
+});
+
+test('no implausible / county-unresolvable listings renders neither section, no undefined/NaN', () => {
+  const { buildScraperBody } = require('../lib/notify');
+  const scraperReport = {
+    dryRun: false,
+    sites: { LandWatch: { status: 'ok', parsed: 5, passed: 5, written: 5, duplicates: 0, checked: 5 } },
+    totals: { checked: 5, parsed: 5, passed: 5, duplicates: 0, rejected: 0, written: 5, wouldWrite: 0, errors: 0 },
+    duplicateDetails: [],
+    writeErrors: [],
+    sourceIssues: [],
+    warnings: [],
+    elapsedMinutes: 2,
+  };
+  const body = buildScraperBody(scraperReport, null, 'Monday');
+  assert.ok(!/IMPLAUSIBLE — PRICE OR ACREAGE/.test(body));
+  assert.ok(!/COUNTY NOT RESOLVABLE/.test(body));
+  assert.ok(!body.includes('undefined'));
+  assert.ok(!body.includes('NaN'));
+});
+
+test('PRICE DROP CHECK section renders the implausible-skipped count when present', () => {
+  const { buildScraperBody } = require('../lib/notify');
+  const scraperReport = {
+    dryRun: false,
+    sites: {},
+    totals: { checked: 0, parsed: 0, passed: 0, duplicates: 0, rejected: 0, written: 0, wouldWrite: 0, errors: 0 },
+    duplicateDetails: [],
+    writeErrors: [],
+    sourceIssues: [],
+    warnings: [],
+    elapsedMinutes: 1,
+  };
+  const priceCheckReport = {
+    checked: 3, priceDrops: 0, promoted: 0, expired: 0, removed: 0, errors: 1,
+    implausibleSkipped: 1, elapsedMinutes: 0.5, details: [],
+  };
+  const body = buildScraperBody(scraperReport, priceCheckReport, 'Monday');
+  assert.match(body, /Implausible new price skipped \(not written\): 1/);
+});

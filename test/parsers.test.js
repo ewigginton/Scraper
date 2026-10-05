@@ -459,3 +459,176 @@ test('SCRAPER_MAX_PAGE limits validation runs to early pages', async () => {
     else process.env.SCRAPER_REQUEST_DELAY_MS = originalDelay;
   }
 });
+
+// ---------- LandWatch large-tract pagination (/acres-over-N/page-N) ----------
+//
+// Live evidence 2026-10-05: Pittsburg County, OK acres-over-150 lists 28
+// properties — 25 cards on page 1, 3 on page-2 (including a 560-acre tract),
+// 0 on page-3. buildSearchUrls used to request page 1 only, so every large
+// tract past the first page was never seen. Fixtures are the real pages.
+
+const PITTSBURG_AO150 = 'https://www.landwatch.com/oklahoma-land-for-sale/pittsburg-county/acres-over-150';
+
+function loadPittsburgPage(n) {
+  return fs.readFileSync(path.join(__dirname, 'fixtures', `landwatch-search-acres-over-150-pittsburg-page-${n}.html`), 'utf8');
+}
+
+test('LandWatch builds a paginated large-tract series: /acres-over-150 then /acres-over-150/page-2..5', () => {
+  const parser = new LandWatchParser();
+  const urls = parser.buildSearchUrls([{ county: 'Pittsburg', state: 'OK', maxCPA: 2500 }]);
+  const countyBase = 'https://www.landwatch.com/oklahoma-land-for-sale/pittsburg-county';
+  assert.deepEqual(urls.map(u => [u.url, u.page]), [
+    // Plain county series unchanged: pages 1-3
+    [countyBase, 1],
+    [`${countyBase}/page-2`, 2],
+    [`${countyBase}/page-3`, 3],
+    // Large-tract series: pages 1-5
+    [PITTSBURG_AO150, 1],
+    [`${PITTSBURG_AO150}/page-2`, 2],
+    [`${PITTSBURG_AO150}/page-3`, 3],
+    [`${PITTSBURG_AO150}/page-4`, 4],
+    [`${PITTSBURG_AO150}/page-5`, 5],
+  ]);
+  assert.ok(urls.every(u => u.county === 'Pittsburg' && u.state === 'OK'));
+});
+
+test('LandWatch large-tract pages share ONE series key, distinct from the plain county series', () => {
+  const parser = new LandWatchParser();
+  const urls = parser.buildSearchUrls([{ county: 'Pittsburg', state: 'OK', maxCPA: 2500 }]);
+  const keyOf = u => parser.paginationSeriesKey(u.url, u.county, u.state);
+  const plainKeys = new Set(urls.filter(u => !u.url.includes('acres-over')).map(keyOf));
+  const largeKeys = new Set(urls.filter(u => u.url.includes('acres-over')).map(keyOf));
+  assert.equal(plainKeys.size, 1, 'plain county pages collapse to one series');
+  assert.equal(largeKeys.size, 1, 'large-tract pages collapse to one series');
+  assert.notEqual([...plainKeys][0], [...largeKeys][0], 'the two series are independent');
+});
+
+test('LandWatch Pittsburg acres-over-150 fixtures: page 1 + page-2 yield all 28 large tracts, page-3 is empty', () => {
+  const parser = new LandWatchParser();
+  const p1 = parser.parseSearchPage(loadPittsburgPage(1), 'Pittsburg', 'OK');
+  const p2 = parser.parseSearchPage(loadPittsburgPage(2), 'Pittsburg', 'OK');
+  const p3 = parser.parseSearchPage(loadPittsburgPage(3), 'Pittsburg', 'OK');
+  assert.equal(p1.length, 25);
+  assert.equal(p2.length, 3);
+  assert.equal(p3.length, 0);
+  assert.equal(parser._lastCardCount, 0, 'page-3 has no cards at all');
+  // Page title: "... 28 Properties for Sale | LandWatch"
+  assert.match(loadPittsburgPage(1), /28 Properties for Sale/);
+  const all = [...p1, ...p2];
+  assert.equal(new Set(all.map(l => l.url)).size, 28, 'no listing repeats across pages');
+  for (const l of all) {
+    assert.ok(l.acres >= 150, `filter leaked a ${l.acres}ac listing: ${l.url}`);
+    assert.ok(l.price > 0 && l.price / l.acres < 50000, `implausible $${l.price} / ${l.acres}ac: ${l.url}`);
+  }
+  // The 560-acre tract that only appears on page-2
+  const tract560 = p2.find(l => l.url.includes('/pid/425937328'));
+  assert.ok(tract560, 'page-2 carries pid 425937328');
+  assert.equal(tract560.acres, 560);
+  assert.equal(tract560.price, 2380000);
+});
+
+function makeLandWatchScrapeHarness(t, pages) {
+  // Serve fixture HTML by URL through the browser path LandWatch uses
+  // (requiresBrowserRender), with no real network, no sleeping, and no
+  // source-health files written.
+  const browserFetch = require('../lib/browser-fetch');
+  const originalIsEnabled = browserFetch.isEnabled;
+  browserFetch.isEnabled = () => true;
+  t.after(() => { browserFetch.isEnabled = originalIsEnabled; });
+  const originalMaxPage = process.env.SCRAPER_MAX_PAGE;
+  delete process.env.SCRAPER_MAX_PAGE;
+  t.after(() => {
+    if (originalMaxPage === undefined) delete process.env.SCRAPER_MAX_PAGE;
+    else process.env.SCRAPER_MAX_PAGE = originalMaxPage;
+  });
+
+  const parser = new LandWatchParser();
+  const fetched = [];
+  parser.sleep = async () => {};
+  parser.recordSourceIssue = (issue) => { parser.sourceIssues.push({ source: parser.name, ...issue }); return null; };
+  parser.browserFetch = async (url) => {
+    fetched.push(url);
+    if (!(url in pages)) throw new Error(`unexpected fetch ${url}`);
+    return pages[url];
+  };
+  return { parser, fetched };
+}
+
+test('scrapeAll walks the large-tract series until its first empty page, and that empty page is not markup drift', async (t) => {
+  const countyBase = 'https://www.landwatch.com/oklahoma-land-for-sale/pittsburg-county';
+  const { parser, fetched } = makeLandWatchScrapeHarness(t, {
+    // Plain county series: an empty results page ends it immediately
+    [countyBase]: loadPittsburgPage(3),
+    [PITTSBURG_AO150]: loadPittsburgPage(1),
+    [`${PITTSBURG_AO150}/page-2`]: loadPittsburgPage(2),
+    [`${PITTSBURG_AO150}/page-3`]: loadPittsburgPage(3),
+  });
+
+  const listings = await parser.scrapeAll([{ county: 'Pittsburg', state: 'OK', maxCPA: 2500 }]);
+
+  assert.deepEqual(fetched, [
+    countyBase,
+    PITTSBURG_AO150,
+    `${PITTSBURG_AO150}/page-2`,
+    `${PITTSBURG_AO150}/page-3`,
+  ], 'pages 4 and 5 are never fetched once page-3 comes back empty');
+  assert.equal(listings.length, 28);
+  assert.ok(listings.some(l => l.url.includes('/pid/425937328')), 'the page-2-only 560ac tract is scraped');
+  assert.deepEqual(parser.sourceIssues, [], 'an empty page ending a series raises no source issue');
+  assert.equal(parser.stats.driftPages, 0);
+});
+
+test('a zero-card large-tract page-2 with no "no results" text ends the series silently; only page 1 can raise drift', async (t) => {
+  const countyBase = 'https://www.landwatch.com/oklahoma-land-for-sale/pittsburg-county';
+  // A rendered page with no cards and no empty-results phrase — the drift
+  // signature on page 1, but on page 2+ just the end of the results.
+  const bare = '<html><head><title>Pittsburg County, OK Land for Sale | LandWatch</title></head><body><main><h1>Land for sale</h1></main></body></html>';
+  const { parser, fetched } = makeLandWatchScrapeHarness(t, {
+    [countyBase]: loadPittsburgPage(3),
+    [PITTSBURG_AO150]: loadPittsburgPage(1),
+    [`${PITTSBURG_AO150}/page-2`]: bare,
+  });
+
+  const listings = await parser.scrapeAll([{ county: 'Pittsburg', state: 'OK', maxCPA: 2500 }]);
+  assert.equal(listings.length, 25);
+  assert.equal(fetched.length, 3, 'series ends at the empty page-2');
+  assert.equal(parser.stats.driftPages, 0);
+  assert.ok(!parser.sourceIssues.some(i => i.type === 'markup_drift'));
+
+  // The same bare page as large-tract PAGE 1 is still reported as drift.
+  const second = makeLandWatchScrapeHarness(t, {
+    [countyBase]: loadPittsburgPage(3),
+    [PITTSBURG_AO150]: bare,
+  });
+  await second.parser.scrapeAll([{ county: 'Pittsburg', state: 'OK', maxCPA: 2500 }]);
+  assert.deepEqual(second.fetched, [countyBase, PITTSBURG_AO150], 'drifted page 1 ends the series too');
+  assert.equal(second.parser.stats.driftPages, 1);
+  assert.ok(second.parser.sourceIssues.some(i => i.type === 'markup_drift' && i.url === PITTSBURG_AO150));
+});
+
+test('a failed large-tract page 1 skips its deeper pages without touching the plain county series', async (t) => {
+  const countyBase = 'https://www.landwatch.com/oklahoma-land-for-sale/pittsburg-county';
+  const { parser, fetched } = makeLandWatchScrapeHarness(t, {
+    [countyBase]: loadPittsburgPage(1).replace(/acres-over-150/g, 'x'),
+    [`${countyBase}/page-2`]: loadPittsburgPage(3),
+  });
+  const originalBrowserFetch = parser.browserFetch;
+  parser.browserFetch = async (url) => {
+    if (url === PITTSBURG_AO150) {
+      fetched.push(url);
+      throw new Error(`navigation timeout for ${url}`);
+    }
+    return originalBrowserFetch(url);
+  };
+
+  await parser.scrapeAll([{ county: 'Pittsburg', state: 'OK', maxCPA: 2500 }]);
+  assert.deepEqual(fetched, [countyBase, `${countyBase}/page-2`, PITTSBURG_AO150]);
+  assert.equal(parser.stats.errorPages, 1);
+});
+
+test('LandWatch builds le-flore-county for the Airtable "Leflore" county (generic slug returns HTTP 400)', () => {
+  const LandWatchParser = require('../lib/parsers/landwatch');
+  const urls = new LandWatchParser().buildSearchUrls([{ county: 'Leflore', state: 'OK' }]).map(u => u.url);
+  assert.ok(urls.every(u => u.includes('/oklahoma-land-for-sale/le-flore-county')), urls.join('\n'));
+  assert.ok(new LandWatchParser().countySlug('Pittsburg') === 'pittsburg');
+});

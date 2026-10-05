@@ -199,3 +199,55 @@ test('runScraper: one real run composes rotation + bot-wall retry + sparse-enric
   assert.equal(report.totals.written, siteWritten, 'totals.written equals the sum of per-site writes');
   assert.equal(report.totals.parsed, siteParsed, 'totals.parsed equals the sum of per-site parses');
 });
+
+// --- GUARD 2: runScraper passes allowFallback: dryRun to loadCountyTargets,
+// so a live run (dryRun: false) never silently uses the local county
+// fallback — a failure there must abort the scrape (throw), while a dry run
+// may still fall back.
+
+test('runScraper (live): passes allowFallback: false to loadCountyTargets, and a load failure aborts the scrape', async () => {
+  FAKE_PARSERS = [];
+  const originalLoadCountyTargets = airtable.loadCountyTargets;
+  let capturedOptions;
+  airtable.loadCountyTargets = async (options) => {
+    capturedOptions = options;
+    throw new Error('County targets could not be loaded from Airtable after 3 attempts — scrape aborted (live runs never fall back to local config): simulated outage');
+  };
+
+  try {
+    await assert.rejects(
+      () => runScraper({ dryRun: false }),
+      /scrape aborted \(live runs never fall back to local config\)/
+    );
+    assert.equal(capturedOptions.allowFallback, false);
+  } finally {
+    airtable.loadCountyTargets = originalLoadCountyTargets;
+  }
+});
+
+test('runScraper (dry run): passes allowFallback: true to loadCountyTargets', async () => {
+  FAKE_PARSERS = [];
+  const originalLoadCountyTargets = airtable.loadCountyTargets;
+  const originalLoadDedupIndex = airtable.loadDedupIndex;
+  let capturedOptions;
+  airtable.loadCountyTargets = async (options) => {
+    capturedOptions = options;
+    return {
+      counties: [{ county: 'Taney', state: 'MO', maxCPA: 4000 }],
+      countyMap: new Map([['taney|MO', 4000]]),
+      source: 'airtable',
+    };
+  };
+  airtable.loadDedupIndex = async () => ({
+    urlSet: new Set(), fingerprintSet: new Set(), locationMap: new Map(), records: [],
+  });
+
+  try {
+    const report = await runScraper({ dryRun: true });
+    assert.equal(capturedOptions.allowFallback, true);
+    assert.equal(report.dryRun, true);
+  } finally {
+    airtable.loadCountyTargets = originalLoadCountyTargets;
+    airtable.loadDedupIndex = originalLoadDedupIndex;
+  }
+});
