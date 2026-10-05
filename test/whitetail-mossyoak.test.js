@@ -302,3 +302,160 @@ test('falls back to "${county} Land" when no anchor text or heading is usable', 
   assert.equal(listings.length, 1);
   assert.equal(listings[0].name, 'Reynolds Land');
 });
+
+// ---------- Whitetail glued price/acreage (real rendered search pages) ----------
+//
+// The 2026-09-15 nightly wrote 81 Whitetail leads with impossible values:
+// each card renders <span>$873,600</span><span>312 acres ±</span> with no
+// whitespace between the two elements, cheerio's .text() fused them into
+// "$873,600312 acres", and the parser read 873,600,312 acres. These fixtures
+// are real browser renders captured 2026-10-05 (script/style bodies and SVGs
+// stripped to keep them small); the pre-fix parser produced glued values on
+// every priced card in all three.
+
+// Every priced card on each fixture, in page order. Pending cards show
+// acreage only (no price) and must be dropped — before the card-boundary fix
+// they walked up to the results list and inherited the FIRST card's values.
+const WHITETAIL_EXPECTED = {
+  dewey: {
+    county: 'Dewey', state: 'OK', cards: 9,
+    listings: [
+      { slug: 'awesome-hunting-property-within-400-yards-of-the-south-canadian-river', price: 795600, acres: 312 },
+      { slug: 'secluded-deer-hunting-bordered-by-other-great-hunting-tracts', price: 368000, acres: 160 },
+      { slug: 'less-than-two-miles-west-of-the-south-canadian-river', price: 392000, acres: 160 },
+      { slug: 'oakwood-pasture-and-wind-energy', price: 376000, acres: 160 },
+    ],
+  },
+  scott: {
+    county: 'Scott', state: 'TN', cards: 3,
+    listings: [
+      { slug: 'scott-co-81269', price: 1340938, acres: 812.69 },
+      { slug: 'robbins-tn', price: 940000, acres: 286 },
+      { slug: 'industrial-and-recreational-potential', price: 1950000, acres: 1272 },
+    ],
+  },
+  owsley: {
+    county: 'Owsley', state: 'KY', cards: 9,
+    listings: [
+      { slug: 'unrestricted-hidden-ridge-retreat-with-off-grid-cabin_0001', price: 159000, acres: 19 },
+      { slug: 'ultimate-basecamp-adjoining-daniel-boone-national-forest', price: 44500, acres: 6.62 },
+      { slug: 'multiple-cabin-sites-on-national-forest-edge-acreage', price: 57900, acres: 10.4 },
+      { slug: 'hidden-and-usable-acreage-near-daniel-boone-national-forest', price: 34900, acres: 6.22 },
+      { slug: 'wilderness-basecamp-property-near-daniel-boone-national-forest', price: 21900, acres: 4.67 },
+      { slug: 'restricted-acreage-with-building-locations-near-national-forest', price: 36900, acres: 8.35 },
+      { slug: 'unrestricted-country-getaway', price: 39000, acres: 12.2 },
+      { slug: 'private-mountain-big-buck-multi-use-hunting-property', price: 109000, acres: 115 },
+    ],
+  },
+};
+
+function loadWhitetailFixture(name) {
+  return fs.readFileSync(path.join(__dirname, 'fixtures', `whitetail-search-${name}.html`), 'utf8');
+}
+
+for (const [name, expected] of Object.entries(WHITETAIL_EXPECTED)) {
+  test(`Whitetail ${expected.county} County, ${expected.state} fixture: every priced card has its own correct price and acreage`, () => {
+    const parser = new WhitetailParser();
+    const listings = parser.parseSearchPage(loadWhitetailFixture(name), expected.county, expected.state);
+    assert.equal(parser._lastCardCount, expected.cards, 'every detail link counts as a card for drift detection');
+    assert.equal(listings.length, expected.listings.length, JSON.stringify(listings.map(l => [l.url, l.price, l.acres])));
+    expected.listings.forEach((want, i) => {
+      const got = listings[i];
+      assert.ok(got.url.includes(want.slug), `card ${i}: ${got.url} should be ${want.slug}`);
+      assert.equal(got.price, want.price, `card ${i} price (${got.url})`);
+      assert.equal(got.acres, want.acres, `card ${i} acres (${got.url})`);
+      // The written description must not carry the fused "$873,600312" text
+      assert.doesNotMatch(got.description, /\$[\d,]+,\d{3}\d/, `card ${i} description is still glued: ${got.description}`);
+    });
+  });
+
+  test(`Whitetail ${expected.county} County, ${expected.state} fixture: parsed acreage matches each card's own listing_acreage tracking attribute`, () => {
+    // Independent ground truth: every card's anchor carries the site's own
+    // analytics payload (data-track-data JSON with listing_acreage). The
+    // parser never reads it, so it cross-checks the text extraction.
+    const cheerio = require('cheerio');
+    const html = loadWhitetailFixture(name);
+    const $ = cheerio.load(html);
+    const truthByHref = new Map();
+    $('a[data-track-data]').each((_, el) => {
+      const href = $(el).attr('href') || '';
+      try {
+        const data = JSON.parse($(el).attr('data-track-data'));
+        if (data.listing_acreage != null) truthByHref.set(href, Number(data.listing_acreage));
+      } catch (err) { /* not a listing anchor */ }
+    });
+    const listings = new WhitetailParser().parseSearchPage(html, expected.county, expected.state);
+    assert.ok(listings.length > 0);
+    for (const l of listings) {
+      const truth = truthByHref.get(new URL(l.url).pathname);
+      assert.ok(truth != null, `no tracking acreage for ${l.url}`);
+      assert.equal(l.acres, truth, `${l.url}: parsed ${l.acres} ac, card says ${truth} ac`);
+      assert.ok(l.price / l.acres < 100000, `${l.url}: $${l.price} for ${l.acres} ac is not a plausible land price`);
+    }
+  });
+}
+
+test('Whitetail: the production-report glued strings now parse to the live-verified values', () => {
+  // Card texts quoted verbatim from the 2026-09-15 nightly report; the live
+  // recheck proved 312 ac / $873,600, 1,272 ac / $1,950,000, 93 ac / $359,000.
+  const parser = new WhitetailParser();
+  const cases = [
+    ['For Sale $873,600312 acres ± Dewey County • Putnam, OK 73659', 873600, 312],
+    ['For Sale $1,950,0001272 acres ± Scott County • Winfield, TN 37892', 1950000, 1272],
+    ['Reduced $359,00093 acres ± Hardin County • Adamsville, TN 38310', 359000, 93],
+  ];
+  for (const [text, price, acres] of cases) {
+    assert.equal(parser.extractTotalPrice(text), price, text);
+    assert.equal(parser.extractAcres(text), acres, text);
+  }
+});
+
+test('Whitetail: adjacent price/acreage elements are separated when the card text is built', () => {
+  // Minimal reproduction of the real card markup: no whitespace at all
+  // between the price span and the acreage span.
+  const parser = new WhitetailParser();
+  const html = '<div class="row"><div class="card"><a href="/hunting-land/oklahoma/dewey/test-tract">'
+    + '<span class="badge">Reduced</span><div class="card-header"><span>$873,600</span><span>312 acres&nbsp;±</span></div>'
+    + '<div class="card-body">Dewey County • Putnam, OK 73659</div></a></div></div>';
+  const listings = parser.parseSearchPage(html, 'Dewey', 'OK');
+  assert.equal(listings.length, 1);
+  assert.equal(listings[0].price, 873600);
+  assert.equal(listings[0].acres, 312);
+  assert.match(listings[0].description, /\$873,600 312 acres/);
+});
+
+test('Whitetail: a price-less (Pending) card never inherits a neighbouring card\'s values', () => {
+  const parser = new WhitetailParser();
+  const card = (slug, header) => `<div class="card"><a href="/hunting-land/oklahoma/dewey/${slug}">`
+    + `<div class="card-header">${header}</div><div class="card-body">Dewey County • Putnam, OK</div></a></div>`;
+  const html = `<main><div class="list">${card('priced', '<span>$500,000</span> <span>200 acres</span>')}`
+    + `${card('pending', '<span>591.38 acres</span>')}</div></main>`;
+  const listings = parser.parseSearchPage(html, 'Dewey', 'OK');
+  assert.deepEqual(listings.map(l => [l.url.split('/').pop(), l.price, l.acres]), [['priced', 500000, 200]]);
+  assert.equal(parser._lastCardCount, 2, 'the pending card still counts as a card (no false drift)');
+});
+
+test('Whitetail is browser-rendered: a plain fetch is a card-less skeleton, and it is NOT mistaken for an empty county', () => {
+  // Real plain HTTP 200 fetch of the same Dewey County URL the rendered
+  // fixture came from (captured 2026-10-05, unmodified): zero cards, and the
+  // page's inline script carries "No listings found for this search.", which
+  // the base raw-HTML empty-results check matches — a silent zero with no
+  // drift alert. Whitetail's looksLikeEmptyResults judges only the rendered
+  // markup (scripts stripped), so a skeleton / stuck render now reads as
+  // not-empty and page 1 can raise drift. Only browser rendering yields the
+  // 9 real cards.
+  const parser = new WhitetailParser();
+  assert.equal(parser.requiresBrowserRender, true);
+  const plain = fs.readFileSync(path.join(__dirname, 'fixtures', 'whitetail-search-dewey-plain-fetch.html'), 'utf8');
+  assert.deepEqual(parser.parseSearchPage(plain, 'Dewey', 'OK'), []);
+  assert.equal(parser._lastCardCount, 0);
+  assert.equal(parser.looksLikeEmptyResults(plain), false, 'the script-only marker no longer hides a stuck render');
+  parser.parseSearchPage(loadWhitetailFixture('dewey'), 'Dewey', 'OK');
+  assert.equal(parser._lastCardCount, 9, 'the rendered page has the cards');
+});
+
+test('Whitetail builds /oklahoma/le-flore for the Airtable "Leflore" county', () => {
+  const WhitetailParser = require('../lib/parsers/whitetail');
+  const urls = new WhitetailParser().buildSearchUrls([{ county: 'Leflore', state: 'OK' }]).map(u => u.url);
+  assert.ok(urls.every(u => /\/hunting-land\/oklahoma\/le-flore(\?|$)/.test(u)), urls.join('\n'));
+});

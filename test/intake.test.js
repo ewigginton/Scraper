@@ -398,6 +398,52 @@ test('describeIntakeRejection: acreage at or above the floor is never a reject',
   assert.equal(describeIntakeRejection({ availabilityFlags: [], acres: 40.5 }, 40), null);
 });
 
+// GUARD 1b (lib/plausibility.js wired into intake's deterministic rejects)
+test('describeIntakeRejection: implausible price/acres is rejected before the acreage-floor check', () => {
+  const reason = describeIntakeRejection({ availabilityFlags: [], price: 873600312, acres: 873600312 }, 40);
+  assert.match(reason, /^Implausible data: /);
+});
+
+test('describeIntakeRejection: a missing acres value is NOT treated as implausible (still creates with a warning)', () => {
+  assert.equal(describeIntakeRejection({ availabilityFlags: [], price: 250000, acres: null }, 40), null);
+});
+
+test('describeIntakeRejection: availability still wins over implausible data when both apply', () => {
+  const reason = describeIntakeRejection(
+    { availabilityFlags: ['sold'], price: 873600312, acres: 873600312 },
+    40
+  );
+  assert.equal(reason, 'listing is sold');
+});
+
+test('intake: an implausible price/acres extraction does NOT create a lead — rejected with Status Failed', { timeout: 60000 }, async (t) => {
+  const GLUED_HTML = `<html><head>
+    <title>Glued Numbers Tract</title>
+    <meta property="og:description" content="A tract in Pittsburg County, Oklahoma.">
+    <script type="application/ld+json">{"@type":"Product","offers":{"price":"15000000"}}</script>
+  </head><body><h1>Glued Numbers Tract</h1><p>100 acres in Pittsburg County, implausibly priced.</p></body></html>`;
+  const server = http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/html' });
+    res.end(GLUED_HTML);
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => server.close());
+  const url = `http://127.0.0.1:${server.address().port}/pittsburg-county-oklahoma-glued`;
+
+  const calls = stubAirtable(t, {
+    queue: [{ id: 'recIntakeGlued01X', fields: { URL: url, 'Submitted By': 'Emma' } }],
+  });
+
+  const report = await processIntakeQueue({ dryRun: false });
+
+  assert.equal(report.created, 0);
+  assert.equal(report.rejected, 1);
+  assert.equal(calls.createdLeads.length, 0);
+  assert.match(report.rejections[0].reason, /^Implausible data: /);
+  assert.equal(calls.intakeUpdates[0].fields.Status, 'Failed');
+  assert.match(calls.intakeUpdates[0].fields.Result, /^Not imported: Implausible data:/);
+});
+
 test('intake: extractListingDetails surfaces availabilityFlags from the fetched page text', (t) => {
   stubAirtable(t, { queue: [] });
   const html = `<html><body><h1>Tract</h1><p>160 acres. This property is under contract.</p></body></html>`;

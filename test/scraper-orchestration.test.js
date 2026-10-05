@@ -9,6 +9,7 @@ const {
   selectTargetCounties,
   resolveParserCounties,
   processScrapedListings,
+  recordRefusedWrites,
   runBotWallRetries,
   resolveBotWallCooldownMinutes,
   isMissingFilterCriticalField,
@@ -228,7 +229,7 @@ function makeCtx() {
   const report = {
     sites: {},
     totals: { checked: 0, parsed: 0, passed: 0, duplicates: 0, rejected: 0, written: 0, wouldWrite: 0, errors: 0 },
-    duplicateDetails: [], filterRejects: [], writeErrors: [], sourceIssues: [], warnings: [],
+    duplicateDetails: [], filterRejects: [], countyUnresolved: [], writeErrors: [], sourceIssues: [], warnings: [],
     dryRun: true,
   };
   const ctx = {
@@ -268,6 +269,78 @@ function withEnv(overrides, fn) {
       }
     });
 }
+
+// --- GUARD 1c/GUARD 2 wiring: airtable.writeListings' refused results reach
+// the report (lib/scraper.js recordRefusedWrites), so a refused write is
+// never silently dropped on the floor.
+
+test('recordRefusedWrites: an implausible refusal is tallied into siteReport/report.filterRejects', () => {
+  const { report, ctx } = makeCtx();
+  const siteReport = { implausible: 0 };
+  recordRefusedWrites(
+    [{ listing: { name: 'Glued Tract', url: 'https://x.example/1', acres: 873600312 }, reason: 'Implausible data: Price and acres are identical (873600312)' }],
+    'TestSite', siteReport, report
+  );
+  assert.equal(siteReport.implausible, 1);
+  assert.equal(report.totals.implausible, 1);
+  assert.equal(report.filterRejects.length, 1);
+  assert.equal(report.filterRejects[0].source, 'TestSite');
+  assert.match(report.filterRejects[0].reason, /^Implausible data:/);
+});
+
+test('recordRefusedWrites: a county-not-resolvable refusal is tallied into siteReport/report.countyUnresolved', () => {
+  const { report, ctx } = makeCtx();
+  const siteReport = { countyNotResolvable: 0 };
+  recordRefusedWrites(
+    [{ listing: { name: 'Unlinked Tract', url: 'https://x.example/2', county: 'Ghost', state: 'ZZ', acres: 100 }, reason: 'County not resolvable: Ghost, ZZ' }],
+    'TestSite', siteReport, report
+  );
+  assert.equal(siteReport.countyNotResolvable, 1);
+  assert.equal(report.totals.countyNotResolvable, 1);
+  assert.equal(report.countyUnresolved.length, 1);
+  assert.equal(report.countyUnresolved[0].county, 'Ghost');
+});
+
+test('recordRefusedWrites: no-op on an empty/undefined refused list', () => {
+  const { report } = makeCtx();
+  const siteReport = { implausible: 0, countyNotResolvable: 0 };
+  recordRefusedWrites(undefined, 'TestSite', siteReport, report);
+  recordRefusedWrites([], 'TestSite', siteReport, report);
+  assert.equal(siteReport.implausible, 0);
+  assert.equal(report.filterRejects.length, 0);
+  assert.equal(report.countyUnresolved.length, 0);
+});
+
+test('processScrapedListings (live write): refused listings from airtable.writeListings land in the report, not silently dropped', async (t) => {
+  initFilter(new Map([['taney|MO', 4000]]));
+  const originalWriteListings = airtable.writeListings;
+  airtable.writeListings = async (listings) => ({
+    created: 0,
+    errors: [],
+    refused: listings.map(listing => ({ listing, reason: 'County not resolvable: Taney, MO' })),
+  });
+  t.after(() => { airtable.writeListings = originalWriteListings; });
+
+  class OneListingParser extends BaseParser {
+    constructor() { super('RefusalSite'); }
+    sleep() { return Promise.resolve(); }
+  }
+  const parser = new OneListingParser();
+  parser.stats.checked = 1;
+
+  const { report, ctx } = makeCtx();
+  ctx.dryRun = false;
+  report.dryRun = false;
+
+  const listings = [{ name: 'Refused Tract', price: 400000, acres: 100, county: 'Taney', state: 'MO', url: 'https://x.example/refused' }];
+  const siteReport = await processScrapedListings(parser, listings, ctx);
+
+  assert.equal(siteReport.written || 0, 0);
+  assert.equal(siteReport.countyNotResolvable, 1);
+  assert.equal(report.totals.countyNotResolvable, 1);
+  assert.equal(report.countyUnresolved.length, 1);
+  assert.equal(report.countyUnresolved[0].name, 'Refused Tract');
+});
 
 test('bot-wall retry: aborts on pass 1, succeeds on pass 2 — listings reach report', async () => {
   initFilter(new Map([['taney|MO', 4000]]));
