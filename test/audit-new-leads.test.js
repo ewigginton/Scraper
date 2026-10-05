@@ -186,12 +186,19 @@ test('extractStructuredStatus: returns null when the page carries no marketStatu
 
 // --- scopeHtmlToSubjectListing (DEFECT 1) ---------------------------------
 
-function loadFixtureHtml(recordId) {
-  const p = path.join(__dirname, '..', 'data', 'audit', 'verify-smoke-r2', 'html', `${recordId}.html`);
-  return fs.readFileSync(p, 'utf8');
+// These two pages are live captures under data/audit/ (git-ignored, ~0.5 MB
+// of third-party HTML), so they exist only on a machine that has run the
+// audit. Skip, rather than fail, where they are absent (e.g. CI).
+function savedPagePath(recordId) {
+  return path.join(__dirname, '..', 'data', 'audit', 'verify-smoke-r2', 'html', `${recordId}.html`);
 }
+function loadFixtureHtml(recordId) {
+  return fs.readFileSync(savedPagePath(recordId), 'utf8');
+}
+const SAVED_PAGES_PRESENT = ['rec0R1YFrqHx3yOQ8', 'rec0gIpbWbIkp9Ly5'].every(id => fs.existsSync(savedPagePath(id)));
+const SKIP_SAVED = SAVED_PAGES_PRESENT ? false : 'saved audit pages under data/audit/ not present on this machine';
 
-test('scopeHtmlToSubjectListing: cuts a MossyOak page before its "Nearby Properties Around ..." widget (real false-REMOVE case, rec0R1YFrqHx3yOQ8)', () => {
+test('scopeHtmlToSubjectListing: cuts a MossyOak page before its "Nearby Properties Around ..." widget (real false-REMOVE case, rec0R1YFrqHx3yOQ8)', { skip: SKIP_SAVED }, () => {
   const html = loadFixtureHtml('rec0R1YFrqHx3yOQ8');
   const { scopedHtml, boundaryFound } = scopeHtmlToSubjectListing(html);
   assert.equal(boundaryFound, true);
@@ -204,7 +211,7 @@ test('scopeHtmlToSubjectListing: cuts a MossyOak page before its "Nearby Propert
   assert.ok(scopedHtml.includes('Winston'));
 });
 
-test('scopeHtmlToSubjectListing: cuts a Whitetail page before its "Nearby Related Properties" heading (rec0gIpbWbIkp9Ly5)', () => {
+test('scopeHtmlToSubjectListing: cuts a Whitetail page before its "Nearby Related Properties" heading (rec0gIpbWbIkp9Ly5)', { skip: SKIP_SAVED }, () => {
   const html = loadFixtureHtml('rec0gIpbWbIkp9Ly5');
   const { scopedHtml, boundaryFound } = scopeHtmlToSubjectListing(html);
   assert.equal(boundaryFound, true);
