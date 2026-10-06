@@ -70,8 +70,9 @@ test('extractListingDetails pulls name, price, acres, and county from a listing 
 
 test('extractListingDetails matches county from a URL slug', (t) => {
   stubAirtable(t, { queue: [] });
+  // An unknown site (generic reader): county comes from the URL slug.
   const details = extractListingDetails('<html><body>160 acres</body></html>',
-    'https://www.landwatch.com/pittsburg-county-oklahoma-farms-and-ranches-for-sale/pid/426088291');
+    'https://www.example-land.com/pittsburg-county-oklahoma-farms-and-ranches-for-sale/426088291');
   assert.equal(details.county, 'Pittsburg');
   assert.equal(details.state, 'OK');
 });
@@ -541,4 +542,189 @@ test('intake rejections (under-contract / below-floor) render in the consolidate
   assert.match(body, /ok\.example\.com\/pending/);
   assert.match(body, /Not imported: listing is sale pending/);
   assert.match(body, /Not imported: 4\.2 acres is below the 40-acre minimum/);
+});
+
+// ---------------------------------------------------------------------------
+// Subject-listing reader on real saved pages (lib/listing-subject.js): the
+// availability, price, acreage and county come from the listing itself, never
+// from a nearby-listings widget or a filter menu elsewhere on the page.
+// ---------------------------------------------------------------------------
+
+const fs = require('fs');
+const path = require('path');
+
+function subjectFixture(name) {
+  return fs.readFileSync(path.join(__dirname, 'fixtures', `subject-${name}.html`), 'utf8');
+}
+
+test('intake: a Mossy Oak listing is NOT rejected over a nearby listing\'s "Under Contract" badge', (t) => {
+  stubAirtable(t, { queue: [], counties: [{ county: 'Bowie', state: 'TX' }, { county: 'Cass', state: 'TX' }] });
+  const details = extractListingDetails(subjectFixture('mossyoak-nearby-under-contract'),
+    'https://www.mossyoakproperties.com/property/oakridge-road-5-bowie-texas/96718/');
+  assert.deepEqual(details.availabilityFlags, []);
+  assert.equal(details.price, 205000);
+  assert.equal(details.acres, 75);
+  assert.equal(details.county, 'Bowie');
+  assert.equal(details.state, 'TX');
+  assert.equal(describeIntakeRejection(details, 40), null);
+});
+
+test('intake: TuttLand\'s filter menu ("Under Contract Sold") does not reject an active listing', (t) => {
+  stubAirtable(t, { queue: [], counties: [{ county: 'Bibb', state: 'AL' }] });
+  const details = extractListingDetails(subjectFixture('tuttland-active'),
+    'https://www.tuttland.com/land-sale/alabama/bibb-county/730-ac-bibb-county-al-sportmans-paradisetimber-investment');
+  assert.deepEqual(details.availabilityFlags, []);
+  assert.equal(details.price, 1995000);
+  assert.equal(details.acres, 730);
+  assert.equal(details.county, 'Bibb');
+});
+
+test('intake: a LandWatch listing whose own status is Under Contract is rejected with that status', (t) => {
+  stubAirtable(t, { queue: [], counties: [{ county: 'Henry', state: 'TN' }] });
+  const details = extractListingDetails(subjectFixture('landwatch-under-contract'),
+    'https://www.landwatch.com/henry-county-tennessee-farms-and-ranches-for-sale/pid/426783020');
+  assert.deepEqual(details.availabilityFlags, ['under contract']);
+  assert.equal(details.acres, 331);
+  assert.equal(details.price, 749000);
+  assert.equal(describeIntakeRejection(details, 40), 'listing is under contract');
+});
+
+test('intake: a Whitetail Pending Under Contract listing (no price shown) is rejected, not created', (t) => {
+  stubAirtable(t, { queue: [] });
+  const details = extractListingDetails(subjectFixture('whitetail-pending'),
+    'https://www.whitetailproperties.com/hunting-land/kentucky/breckinridge/small-property-with-large-opportunity');
+  assert.equal(describeIntakeRejection(details, 40), 'listing is pending under contract');
+});
+
+test('intake: when the page\'s own county is not in the County table, no other county is guessed from page text', (t) => {
+  stubAirtable(t, { queue: [], counties: [{ county: 'Wayne', state: 'KY' }] });
+  const details = extractListingDetails(subjectFixture('landwatch-available-lafayette'),
+    'https://www.landwatch.com/lafayette-county-mississippi-recreational-property-for-sale/pid/427850551');
+  assert.equal(details.county, null);
+  assert.match(details.countyNote, /Lafayette County, MS/);
+});
+
+test('intake: county matching tolerates spelling ("Le Flore" page vs "Leflore" table row)', (t) => {
+  stubAirtable(t, { queue: [], counties: [{ county: 'Leflore', state: 'OK' }] });
+  const html = `<html><head><meta name="description" content="View 160 acres priced at $400,000 in Talihina, Le Flore County, OK"></head>
+    <body>View all 12 pictures Available</body></html>`;
+  const details = extractListingDetails(html, 'https://www.landwatch.com/le-flore-county-oklahoma-land-for-sale/pid/1');
+  assert.equal(details.county, 'Leflore');
+  assert.equal(details.state, 'OK');
+  assert.equal(details.acres, 160);
+});
+
+test('intake: a LandWatch error shell is "could not read", never a lead built from guessed page text', (t) => {
+  stubAirtable(t, { queue: [] });
+  assert.throws(
+    () => extractListingDetails(subjectFixture('landwatch-error-shell'),
+      'https://www.landwatch.com/carroll-county-tennessee-undeveloped-land-for-sale/pid/424902515'),
+    /Could not read the listing \(.*error shell/);
+  // Any known site whose listing block is missing is treated the same way.
+  assert.throws(
+    () => extractListingDetails('<html><body>160 acres</body></html>',
+      'https://www.landwatch.com/pittsburg-county-oklahoma-farms-and-ranches-for-sale/pid/426088291'),
+    /Could not read the listing/);
+});
+
+test('intake: an unreadable known-site page goes to Retry (first try) and Failed (second), never creates a lead', { timeout: 60000 }, async (t) => {
+  const BaseParser = require('../lib/parsers/base-parser');
+  const url = 'https://www.landwatch.com/carroll-county-tennessee-undeveloped-land-for-sale/pid/424902515';
+  let fetches = 0;
+  t.mock.method(BaseParser.prototype, 'sleep', async () => {});
+  t.mock.method(BaseParser.prototype, 'fetchPageSmart', async (u) => {
+    fetches++;
+    assert.equal(u, url);
+    return subjectFixture('landwatch-error-shell');
+  });
+  const calls = stubAirtable(t, {
+    queue: [
+      { id: 'recIntakeShell01X', fields: { URL: url, 'Submitted By': 'Emma' } },
+      { id: 'recIntakeShell02X', fields: { URL: url, 'Submitted By': 'Emma', Status: 'Retry' } },
+    ],
+  });
+
+  const report = await processIntakeQueue({ dryRun: false });
+
+  assert.equal(report.created, 0);
+  assert.equal(calls.createdLeads.length, 0);
+  assert.equal(fetches, 2, 'one fetch per queued item, no extra requests');
+  assert.equal(report.retryQueued, 1);
+  assert.equal(report.failedFinal, 1);
+  assert.deepEqual(calls.intakeUpdates.map(u => u.fields.Status), ['Retry', 'Failed']);
+  assert.match(calls.intakeUpdates[0].fields.Result, /Could not read the listing/);
+});
+
+test('intake: Saint spellings match the County table ("St. Clair" page vs "Saint Clair" row)', (t) => {
+  stubAirtable(t, { queue: [], counties: [{ county: 'Saint Clair', state: 'MO' }, { county: 'Ste. Genevieve', state: 'MO' }] });
+  const page = loc => `<html><head><meta name="description" content="View 160 acres priced at $400,000 in Osceola, ${loc}"></head>
+    <body>View all 12 pictures Available</body></html>`;
+  const a = extractListingDetails(page('St. Clair County, MO'), 'https://www.landwatch.com/x/pid/1');
+  assert.equal(a.county, 'Saint Clair');
+  assert.equal(a.state, 'MO');
+  assert.equal(a.countyNote, null);
+  const b = extractListingDetails(page('Sainte Genevieve County, MO'), 'https://www.landwatch.com/x/pid/2');
+  assert.equal(b.county, 'Ste. Genevieve');
+});
+
+// --- LANDFLIP: the real detail page has no JSON-LD availability -------------
+
+const LANDFLIP_URL = 'https://www.landflip.com/land/420517';
+function landflipFixture() {
+  return fs.readFileSync(path.join(__dirname, 'fixtures', 'landflip-detail-420517.html'), 'utf8');
+}
+const LANDFLIP_UNDER_CONTRACT = () => landflipFixture()
+  .replace('<title>Campbellsville KY Barndominium,', '<title>Under Contract - Campbellsville KY Barndominium,')
+  .replace('<h1>Campbellsville KY Barndominium</h1>', '<h1>Campbellsville KY Barndominium - Under Contract</h1>');
+
+test('intake: a LANDFLIP listing whose title/h1 says Under Contract is rejected (no JSON-LD availability on LANDFLIP)', (t) => {
+  stubAirtable(t, { queue: [], counties: [{ county: 'Taylor', state: 'KY' }] });
+  const details = extractListingDetails(LANDFLIP_UNDER_CONTRACT(), LANDFLIP_URL);
+  assert.deepEqual(details.availabilityFlags, ['under contract']);
+  assert.equal(describeIntakeRejection(details, 1), 'listing is under contract');
+});
+
+test('intake: the real LANDFLIP page still creates a lead, noting its status is not shown', { timeout: 60000 }, async (t) => {
+  const BaseParser = require('../lib/parsers/base-parser');
+  const { STATUS_UNKNOWN_NOTE } = require('../lib/intake');
+  const pages = { [LANDFLIP_URL]: landflipFixture(), [`${LANDFLIP_URL}?uc`]: LANDFLIP_UNDER_CONTRACT() };
+  t.mock.method(BaseParser.prototype, 'sleep', async () => {});
+  t.mock.method(BaseParser.prototype, 'fetchPageSmart', async u => pages[u]);
+  // The real tract is 11 acres; lower the floor so this test is about status.
+  const prevMin = process.env.SCRAPER_MIN_ACRES;
+  process.env.SCRAPER_MIN_ACRES = '1';
+  t.after(() => { if (prevMin === undefined) delete process.env.SCRAPER_MIN_ACRES; else process.env.SCRAPER_MIN_ACRES = prevMin; });
+  const calls = stubAirtable(t, {
+    queue: [
+      { id: 'recIntakeFlip01X', fields: { URL: LANDFLIP_URL, 'Submitted By': 'Emma' } },
+      { id: 'recIntakeFlip02X', fields: { URL: `${LANDFLIP_URL}?uc`, 'Submitted By': 'Emma' } },
+    ],
+    counties: [{ county: 'Taylor', state: 'KY' }],
+  });
+
+  const report = await processIntakeQueue({ dryRun: false });
+
+  assert.equal(report.created, 1, 'the real page creates');
+  assert.equal(report.rejected, 1, 'the Under Contract variant is rejected');
+  assert.equal(calls.createdLeads.length, 1);
+  const lead = calls.createdLeads[0];
+  assert.equal(lead.url, LANDFLIP_URL);
+  assert.equal(lead.price, 489900);
+  assert.equal(lead.acres, 11);
+  assert.equal(lead.county, 'Taylor');
+  assert.ok(lead.description.includes(STATUS_UNKNOWN_NOTE), 'lead notes carry the status-unknown warning');
+  const added = calls.intakeUpdates.find(u => u.id === 'recIntakeFlip01X');
+  assert.equal(added.fields.Status, 'Added');
+  assert.ok(added.fields.Result.includes(STATUS_UNKNOWN_NOTE), 'intake Result carries the status-unknown warning');
+  assert.ok(report.added[0].summary.includes(STATUS_UNKNOWN_NOTE));
+  const rejected = calls.intakeUpdates.find(u => u.id === 'recIntakeFlip02X');
+  assert.equal(rejected.fields.Status, 'Failed');
+  assert.match(rejected.fields.Result, /Not imported: listing is under contract/);
+});
+
+test('intake: a subject with a known active status gets no status-unknown note', (t) => {
+  stubAirtable(t, { queue: [], counties: [{ county: 'Bowie', state: 'TX' }] });
+  const details = extractListingDetails(subjectFixture('mossyoak-nearby-under-contract'),
+    'https://www.mossyoakproperties.com/property/oakridge-road-5-bowie-texas/96718/');
+  assert.equal(details.statusNote, null);
 });

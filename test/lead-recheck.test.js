@@ -23,6 +23,7 @@ const {
   RECHECK_STAGES,
   MAX_RECHECKS_PER_NIGHT,
   isAcreageMismatch,
+  isLikelySiteChange,
   orderByOldestUnchecked,
 } = require('../lib/lead-recheck');
 const { buildScraperBody } = require('../lib/notify');
@@ -385,4 +386,229 @@ test('stage policy: runLeadRecheck never calls airtable.updateRecord even when i
   assert.equal(report.underContract.length, 1);
   assert.equal(report.acreageMismatches.length, 1);
   assert.equal(updateCalls.length, 0, 'both an under-contract AND acreage-mismatch finding must still never touch Airtable');
+});
+
+// ---------------------------------------------------------------------------
+// Subject-listing reader (lib/listing-subject.js) on real saved pages. The
+// fetch is stubbed so the record's real listing URL (which picks the per-site
+// reader) can be used without any network request.
+// ---------------------------------------------------------------------------
+
+const BaseParser = require('../lib/parsers/base-parser');
+
+function subjectFixture(name) {
+  return fs.readFileSync(path.join(__dirname, 'fixtures', `subject-${name}.html`), 'utf8');
+}
+
+function stubFetchByUrl(t, pagesByUrl) {
+  t.mock.method(BaseParser.prototype, 'fetchPageSmart', async function (url) {
+    const page = pagesByUrl[url];
+    if (page instanceof Error) throw page;
+    if (page === undefined) throw new Error(`unexpected fetch ${url}`);
+    return page;
+  });
+}
+
+test('runLeadRecheck: LandWatch Under Contract / Off Market pages are reported from the listing\'s own status', { timeout: 60000 }, async (t) => {
+  withScratchDataDir(t);
+  const ucUrl = 'https://www.landwatch.com/henry-county-tennessee-farms-and-ranches-for-sale/pid/426783020';
+  const omUrl = 'https://www.landwatch.com/knott-county-kentucky-recreational-property-for-sale/pid/425510193';
+  const okUrl = 'https://www.landwatch.com/darlington-county-south-carolina-undeveloped-land-for-sale/pid/425066098';
+  stubFetchByUrl(t, {
+    [ucUrl]: subjectFixture('landwatch-under-contract'),
+    [omUrl]: subjectFixture('landwatch-off-market'),
+    [okUrl]: subjectFixture('landwatch-available-darlington'),
+  });
+  stubAirtable(t, { recordsByStage: { [airtable.STAGES.newLead]: [
+    makeRecord('recLwUc0000001X', { name: 'Henry 331', url: ucUrl, acres: 331 }),
+    makeRecord('recLwOm0000001X', { name: 'Knott 125', url: omUrl, acres: 125 }),
+    makeRecord('recLwOk0000001X', { name: 'Darlington 531', url: okUrl, acres: 531.91 }),
+  ] } });
+
+  const report = await runLeadRecheck();
+
+  assert.equal(report.checked, 3);
+  assert.deepEqual(report.underContract.map(u => [u.name, u.phrase, u.statusKind]), [
+    ['Henry 331', 'Under Contract', 'pending'],
+    ['Knott 125', 'Off Market', 'sold'],
+  ]);
+  assert.equal(report.acreageMismatches.length, 0);
+});
+
+test('runLeadRecheck: a Mossy Oak nearby-widget "Under Contract" badge is not reported, and acreage is the subject\'s', { timeout: 60000 }, async (t) => {
+  withScratchDataDir(t);
+  const url = 'https://www.mossyoakproperties.com/property/oakridge-road-5-bowie-texas/96718/';
+  stubFetchByUrl(t, { [url]: subjectFixture('mossyoak-nearby-under-contract') });
+  stubAirtable(t, { recordsByStage: { [airtable.STAGES.newLead]: [
+    makeRecord('recMoNear00001X', { name: 'Oakridge Road #5', url, acres: 75 }),
+  ] } });
+
+  const report = await runLeadRecheck();
+
+  assert.equal(report.checked, 1);
+  assert.equal(report.underContract.length, 0);
+  assert.equal(report.acreageMismatches.length, 0);
+});
+
+test('runLeadRecheck: a LandWatch error shell is "could not verify", never all clear', { timeout: 60000 }, async (t) => {
+  withScratchDataDir(t);
+  const url = 'https://www.landwatch.com/carroll-county-tennessee-undeveloped-land-for-sale/pid/424902515';
+  stubFetchByUrl(t, { [url]: subjectFixture('landwatch-error-shell') });
+  stubAirtable(t, { recordsByStage: { [airtable.STAGES.newLead]: [
+    makeRecord('recLwShell0001X', { name: 'Carroll tract', url, acres: 60 }),
+  ] } });
+
+  const report = await runLeadRecheck();
+
+  assert.equal(report.checked, 0);
+  assert.equal(report.fetchFailed, 1);
+  assert.equal(report.unreadable.length, 1);
+  assert.match(report.unreadable[0].note, /error shell/);
+  assert.equal(report.underContract.length, 0);
+});
+
+test('runLeadRecheck: a known-site page that does not show its status is "could not verify", never "looks live"', { timeout: 60000 }, async (t) => {
+  withScratchDataDir(t);
+  const url = 'https://www.landflip.com/land/420517';
+  stubFetchByUrl(t, { [url]: fs.readFileSync(path.join(__dirname, 'fixtures', 'landflip-detail-420517.html'), 'utf8') });
+  stubAirtable(t, { recordsByStage: { [airtable.STAGES.newLead]: [
+    makeRecord('recLfUnknown01X', { name: 'Taylor 11', url, acres: 20 }),
+  ] } });
+
+  const report = await runLeadRecheck();
+
+  assert.equal(report.checked, 0, 'status unknown is not a successful check');
+  assert.equal(report.fetchFailed, 1, 'counted with the "could not verify" pages');
+  assert.equal(report.statusUnknown.length, 1);
+  assert.match(report.statusUnknown[0].note, /status not shown/);
+  assert.equal(report.underContract.length, 0);
+  // Acreage is still read from the listing itself and compared.
+  assert.equal(report.acreageMismatches.length, 1);
+  assert.equal(report.acreageMismatches[0].liveAcres, 11);
+});
+
+test('runLeadRecheck: a TuttLand panel badge "Under Contract" is reported', { timeout: 60000 }, async (t) => {
+  withScratchDataDir(t);
+  const url = 'https://www.tuttland.com/land-sale/alabama/bibb-county/730-ac-bibb-county-al-sportmans-paradisetimber-investment';
+  stubFetchByUrl(t, { [url]: subjectFixture('tuttland-active').replace('<strong>Active</strong>', '<strong>Under Contract</strong>') });
+  stubAirtable(t, { recordsByStage: { [airtable.STAGES.newLead]: [
+    makeRecord('recTuttUc0001X', { name: 'Bibb 730', url, acres: 730 }),
+  ] } });
+
+  const report = await runLeadRecheck();
+
+  assert.equal(report.checked, 1);
+  assert.deepEqual(report.underContract.map(u => [u.name, u.phrase, u.statusKind]), [['Bibb 730', 'Under Contract', 'pending']]);
+});
+
+test('runLeadRecheck: HTTP 404/410 is reported as a removed listing without any extra request', { timeout: 60000 }, async (t) => {
+  withScratchDataDir(t);
+  const url = 'https://www.whitetailproperties.com/hunting-land/kentucky/graves/gone-listing';
+  const gone = new Error(`HTTP 404 for ${url}`);
+  gone.status = 404;
+  stubFetchByUrl(t, { [url]: gone });
+  stubAirtable(t, { recordsByStage: { [airtable.STAGES.newLead]: [
+    makeRecord('recWtGone0001X', { name: 'Gone tract', url, acres: 60 }),
+  ] } });
+
+  const report = await runLeadRecheck();
+
+  assert.equal(BaseParser.prototype.fetchPageSmart.mock.callCount(), 1);
+  assert.equal(report.checked, 1);
+  assert.equal(report.fetchFailed, 0);
+  // Removals are their own list, not mixed into NOW UNDER CONTRACT / SOLD.
+  assert.equal(report.underContract.length, 0);
+  assert.equal(report.removed.length, 1);
+  assert.equal(report.removed[0].name, 'Gone tract');
+  assert.equal(report.removed[0].httpStatus, 404);
+  assert.equal(report.removed[0].phrase, 'listing removed (HTTP 404)');
+  assert.deepEqual(report.siteChangeWarnings, []);
+});
+
+function httpGone(url, status = 404) {
+  const err = new Error(`HTTP ${status} for ${url}`);
+  err.status = status;
+  return err;
+}
+
+test('runLeadRecheck: most of one host\'s rechecks 404/410 -> "site may have changed its URLs", not removals', { timeout: 60000 }, async (t) => {
+  withScratchDataDir(t);
+  const lw = n => `https://www.landwatch.com/henry-county-tennessee-land-for-sale/pid/${n}`;
+  const lwLive = 'https://www.landwatch.com/darlington-county-south-carolina-undeveloped-land-for-sale/pid/425066098';
+  const wtGone = 'https://www.whitetailproperties.com/hunting-land/kentucky/graves/gone-listing';
+  stubFetchByUrl(t, {
+    [lw(1)]: httpGone(lw(1)),
+    [lw(2)]: httpGone(lw(2), 410),
+    [lw(3)]: httpGone(lw(3)),
+    [lw(4)]: httpGone(lw(4)),
+    [lwLive]: subjectFixture('landwatch-available-darlington'),
+    [wtGone]: httpGone(wtGone),
+  });
+  stubAirtable(t, { recordsByStage: { [airtable.STAGES.newLead]: [
+    makeRecord('recLwGone0001X', { name: 'LW 1', url: lw(1), acres: 60 }),
+    makeRecord('recLwGone0002X', { name: 'LW 2', url: lw(2), acres: 60 }),
+    makeRecord('recLwGone0003X', { name: 'LW 3', url: lw(3), acres: 60 }),
+    makeRecord('recLwGone0004X', { name: 'LW 4', url: lw(4), acres: 60 }),
+    makeRecord('recLwLive0001X', { name: 'Darlington', url: lwLive, acres: 531.91 }),
+    makeRecord('recWtGone0002X', { name: 'Whitetail gone', url: wtGone, acres: 60 }),
+  ] } });
+
+  const report = await runLeadRecheck();
+
+  assert.equal(BaseParser.prototype.fetchPageSmart.mock.callCount(), 6, 'one fetch per lead, no extra requests');
+  // 4 of 5 landwatch.com rechecks were 404/410: a URL change, not 4 removals.
+  assert.equal(report.siteChangeWarnings.length, 1);
+  const w = report.siteChangeWarnings[0];
+  assert.equal(w.host, 'landwatch.com');
+  assert.equal(w.gone, 4);
+  assert.equal(w.rechecked, 5);
+  assert.match(w.message, /site may have changed its URLs/);
+  assert.equal(report.siteChangeWarning, w.message, 'one-line form the email renders');
+  const scraperReport = {
+    dryRun: false, sites: {},
+    totals: { written: 0, wouldWrite: 0, duplicates: 0, rejected: 0, errors: 0 },
+    duplicateDetails: [], writeErrors: [], sourceIssues: [], warnings: [], elapsedMinutes: 1,
+  };
+  const body = buildScraperBody(scraperReport, null, 'Monday', null, null, { leadRecheckReport: report });
+  assert.match(body, /site may have changed its URLs/, 'the email shows the warning');
+  assert.doesNotMatch(body, /LW 1/, 'the suspected URL-change 404s are not listed as removals');
+  assert.match(body, /Whitetail gone/);
+  assert.equal(report.fetchFailed, 4, 'counted as could-not-verify');
+  // Whitetail's single 404 is unaffected: still a removal.
+  assert.deepEqual(report.removed.map(r => r.name), ['Whitetail gone']);
+  assert.equal(report.underContract.length, 0);
+  assert.equal(report.checked, 2, 'the live LandWatch page and the Whitetail removal');
+});
+
+test('runLeadRecheck: site-change guard needs more than half AND at least 3 of a host\'s rechecks', { timeout: 60000 }, async (t) => {
+  withScratchDataDir(t);
+  const lw = n => `https://www.landwatch.com/henry-county-tennessee-land-for-sale/pid/${n}`;
+  const darlington = subjectFixture('landwatch-available-darlington');
+  // 3 of 6 gone (exactly half, not more) plus 2 of 2 on another host (below the minimum of 3).
+  const wt = n => `https://www.whitetailproperties.com/hunting-land/kentucky/graves/gone-${n}`;
+  const pages = {};
+  const records = [];
+  for (let i = 1; i <= 6; i++) {
+    pages[lw(i)] = i <= 3 ? httpGone(lw(i)) : darlington;
+    records.push(makeRecord(`recLwMix000${i}X`, { name: `LW ${i}`, url: lw(i), acres: 531.91 }));
+  }
+  for (let i = 1; i <= 2; i++) {
+    pages[wt(i)] = httpGone(wt(i), 410);
+    records.push(makeRecord(`recWtMix000${i}X`, { name: `WT ${i}`, url: wt(i), acres: 60 }));
+  }
+  stubFetchByUrl(t, pages);
+  stubAirtable(t, { recordsByStage: { [airtable.STAGES.newLead]: records } });
+
+  const report = await runLeadRecheck();
+
+  assert.deepEqual(report.siteChangeWarnings, []);
+  assert.deepEqual(report.removed.map(r => r.name).sort(), ['LW 1', 'LW 2', 'LW 3', 'WT 1', 'WT 2']);
+  assert.equal(report.fetchFailed, 0);
+});
+
+test('isLikelySiteChange: more than half and at least 3', () => {
+  assert.equal(isLikelySiteChange(3, 5), true);
+  assert.equal(isLikelySiteChange(3, 6), false, 'exactly half is not more than half');
+  assert.equal(isLikelySiteChange(2, 2), false, 'fewer than 3');
+  assert.equal(isLikelySiteChange(10, 10), true);
 });

@@ -465,7 +465,7 @@ test('IMPLAUSIBLE and COUNTY NOT RESOLVABLE sections render counts and itemized 
   assert.match(body, /1 plausible listing\(s\) refused — county not resolvable/);
 
   // Itemized sections
-  assert.match(body, /IMPLAUSIBLE — PRICE OR ACREAGE REJECTED AT WRITE TIME/);
+  assert.match(body, /IMPLAUSIBLE — PRICE OR ACREAGE REJECTED \(FILTER AND\/OR WRITE TIME\)/);
   assert.match(body, /LandWatch: Big Glued Tract — Implausible data:/);
   assert.match(body, /https:\/\/lw\/big-glued/);
   assert.match(body, /LandWatch: Small Glued Tract — Implausible data:/);
@@ -519,4 +519,252 @@ test('PRICE DROP CHECK section renders the implausible-skipped count when presen
   };
   const body = buildScraperBody(scraperReport, priceCheckReport, 'Monday');
   assert.match(body, /Implausible new price skipped \(not written\): 1/);
+});
+
+// B3(a): a live run aborted at the county-targets/dedup-index load step
+// (index.js's outer catch, tagged via err.scraperAbort — see
+// lib/scraper.js runScraper) must say plainly at the top of the email that
+// the scrape never ran, and name the later steps skipped as a result —
+// never render as a generic "0 written" / WRITE ERRORS failure, which looks
+// like a completed run that simply failed to write.
+test('scraperAborted report renders a plain top-of-email banner naming the abort reason and skipped steps', () => {
+  const { buildScraperBody, buildScraperSubject } = require('../lib/notify');
+  const scraperReport = {
+    dryRun: false,
+    scraperAborted: true,
+    abortStage: 'county_targets',
+    abortReason: 'County targets could not be loaded from Airtable after 3 attempts — scrape aborted (live runs never fall back to local config): simulated outage',
+    stepsSkipped: ['price check', 'listing intake', 'lead review', 'lead recheck'],
+    sites: {},
+    totals: { checked: 0, parsed: 0, passed: 0, duplicates: 0, rejected: 0, written: 0, wouldWrite: 0, errors: 1 },
+    duplicateDetails: [],
+    writeErrors: [],
+    sourceIssues: [],
+    warnings: [],
+    elapsedMinutes: 0.1,
+  };
+
+  const body = buildScraperBody(scraperReport, null, 'Monday');
+  assert.match(body, /SCRAPE DID NOT RUN/);
+  assert.match(body, /County targets could not be loaded from Airtable/);
+  assert.match(body, /price check, listing intake, lead review, lead recheck/);
+  // Must NOT read like a normal completed run with nothing to report
+  assert.ok(!/NEW LISTING SCAN/.test(body));
+  assert.ok(!/TOTALS: 0 written/.test(body));
+  assert.ok(!/WRITE ERRORS/.test(body));
+
+  const subject = buildScraperSubject(scraperReport, null, null);
+  assert.match(subject, /SCRAPE DID NOT RUN/);
+  assert.match(subject, /county targets unavailable/);
+});
+
+test('scraperAborted (dedup_index stage) names the dedup index in the subject', () => {
+  const { buildScraperSubject } = require('../lib/notify');
+  const scraperReport = {
+    scraperAborted: true,
+    abortStage: 'dedup_index',
+    abortReason: 'Dedup index load failed — scrape aborted to avoid duplicate writes: simulated outage',
+    stepsSkipped: ['price check', 'listing intake', 'lead review', 'lead recheck'],
+    totals: { errors: 1 },
+  };
+  const subject = buildScraperSubject(scraperReport, null, null);
+  assert.match(subject, /dedup index unavailable/);
+});
+
+// B3(b): a write-time implausible refusal (a listing that PASSED the
+// filter, then was refused by lib/airtable.js's checkWriteGuard) must be
+// counted and rendered separately from the filter-time implausible total —
+// it was never part of totals.rejected, so folding it into the same count
+// let "(N of the rejected had implausible price/acreage)" exceed the
+// rejected count itself.
+test('write-time implausible refusals render as their own line, separate from the filter-time implausible/rejected count', () => {
+  const { buildScraperBody } = require('../lib/notify');
+  const scraperReport = {
+    dryRun: false,
+    sites: {
+      LandWatch: {
+        status: 'ok', parsed: 5, passed: 2, written: 1, duplicates: 0, checked: 5,
+        implausible: 1, implausibleWriteRefused: 1,
+      },
+    },
+    totals: {
+      checked: 5, parsed: 5, passed: 2, duplicates: 0, rejected: 1, written: 1, wouldWrite: 0, errors: 0,
+      // 1 filter-time implausible (folded into rejected: 1) + 1 write-time
+      // implausible refusal (a listing that passed filtering, so NOT part
+      // of rejected): the old single `implausible` counter would have read
+      // 2 here — more than the 1 rejected — which is exactly the bug.
+      implausible: 1,
+      implausibleWriteRefused: 1,
+    },
+    duplicateDetails: [],
+    filterRejects: [
+      { source: 'LandWatch', name: 'Filter-Time Reject', url: 'https://lw/a', reason: 'Implausible data: bad', acres: 50 },
+      { source: 'LandWatch', name: 'Write-Time Refusal', url: 'https://lw/b', reason: 'Implausible data: bad', acres: 60 },
+    ],
+    countyUnresolved: [],
+    writeErrors: [],
+    sourceIssues: [],
+    warnings: [],
+    elapsedMinutes: 1,
+  };
+
+  const body = buildScraperBody(scraperReport, null, 'Monday');
+  assert.match(body, /\(1 of the rejected had implausible price\/acreage\)/);
+  assert.match(body, /\(1 additional plausible-looking listing\(s\) were refused at write time for implausible price\/acreage\)/);
+  // The totals line's rejected count (1) must not be contradicted by a
+  // combined implausible count of 2
+  assert.match(body, /1 rejected/);
+});
+
+test('isMiddayRunNoteworthy is true when the run aborted (even with no writeErrors)', () => {
+  const { isMiddayRunNoteworthy } = require('../lib/notify');
+  // Regression: the abort path sets scraperAborted:true and writeErrors:[]
+  // (no exception reaches the writeErrors path), which used to make a
+  // midday run look "quiet" and suppress the email entirely.
+  const report = {
+    scraperAborted: true,
+    totals: {},
+    writeErrors: [],
+    sourceIssues: [],
+    sites: {},
+  };
+  assert.equal(isMiddayRunNoteworthy(report), true);
+});
+
+test('isMiddayRunNoteworthy is still false for a quiet, non-aborted midday run', () => {
+  const { isMiddayRunNoteworthy } = require('../lib/notify');
+  const report = {
+    scraperAborted: false,
+    totals: { written: 0 },
+    writeErrors: [],
+    sourceIssues: [],
+    sites: {},
+  };
+  assert.equal(isMiddayRunNoteworthy(report), false);
+});
+
+// DEFECT 4 regression: an abort with NO steps actually skipped (every later
+// step was already off for this run's own flags) must not claim steps were
+// skipped "because the scrape never completed" when none were.
+test('scraperAborted banner: when stepsSkipped is empty, the body says nothing was skipped as a result rather than listing nothing', () => {
+  const { buildScraperBody } = require('../lib/notify');
+  const scraperReport = {
+    dryRun: true,
+    scraperAborted: true,
+    abortStage: 'county_targets',
+    abortReason: 'County targets could not be loaded from Airtable — scrape aborted: simulated outage',
+    stepsSkipped: [],
+    sites: {},
+    totals: { checked: 0, parsed: 0, passed: 0, duplicates: 0, rejected: 0, written: 0, wouldWrite: 0, errors: 1 },
+    duplicateDetails: [],
+    writeErrors: [],
+    sourceIssues: [],
+    warnings: [],
+    elapsedMinutes: 0.2,
+  };
+  const body = buildScraperBody(scraperReport, null, 'Monday');
+  assert.match(body, /SCRAPE DID NOT RUN/);
+  assert.ok(!/Also skipped this run/.test(body));
+  assert.match(body, /No other steps were skipped/);
+});
+
+// DEFECT 2: buildLeadRecheckSection must separate "page loaded but status
+// not shown" and "page could not be read at all" from genuine fetch
+// failures, and render removed listings under their own heading, plus any
+// site-change warning.
+test('buildLeadRecheckSection: distinguishes statusUnknown, unreadable, and genuine fetch failures', () => {
+  const { buildLeadRecheckSection } = require('../lib/notify');
+  const report = {
+    totalCandidates: 10,
+    checked: 6,
+    // 2 genuine fetch failures + 1 statusUnknown + 1 unreadable, all rolled
+    // into fetchFailed today by lib/lead-recheck.js
+    fetchFailed: 4,
+    skippedNoUrl: 0,
+    droppedByCap: 0,
+    droppedNames: [],
+    underContract: [],
+    acreageMismatches: [],
+    statusUnknown: [{ name: 'Landflip Tract', url: 'https://landflip.example/1', note: 'no availability shown' }],
+    unreadable: [{ name: 'Broken Page', url: 'https://broken.example/2', note: 'listing block not found' }],
+  };
+  const lines = buildLeadRecheckSection(report).join('\n');
+  assert.match(lines, /⚠️ Fetch failures: 2 \(not counted as findings/);
+  assert.match(lines, /Could not verify status \(page loaded, status not shown\): 1/);
+  assert.match(lines, /Landflip Tract/);
+  assert.match(lines, /https:\/\/landflip\.example\/1/);
+  assert.match(lines, /Could not read the page: 1/);
+  assert.match(lines, /Broken Page/);
+  assert.match(lines, /https:\/\/broken\.example\/2/);
+});
+
+test('buildLeadRecheckSection: renders report.removed under its own heading, separate from under-contract/sold/off-market', () => {
+  const { buildLeadRecheckSection } = require('../lib/notify');
+  const report = {
+    totalCandidates: 4,
+    checked: 4,
+    fetchFailed: 0,
+    skippedNoUrl: 0,
+    droppedByCap: 0,
+    droppedNames: [],
+    underContract: [
+      { name: 'Still Under Contract Tract', stage: 'New Lead', url: 'https://x.example/under', phrase: 'under contract', statusKind: 'under_contract' },
+    ],
+    removed: [
+      { name: 'Gone Tract', stage: 'New Lead', url: 'https://x.example/gone', phrase: 'listing removed (HTTP 404)', statusKind: 'removed' },
+    ],
+    acreageMismatches: [],
+    statusUnknown: [],
+    unreadable: [],
+  };
+  const lines = buildLeadRecheckSection(report).join('\n');
+  assert.match(lines, /🗑️ LISTING REMOVED FROM SITE/);
+  assert.match(lines, /Gone Tract/);
+  assert.match(lines, /🚫 NOW UNDER CONTRACT \/ SOLD \/ OFF MARKET/);
+  assert.match(lines, /Still Under Contract Tract/);
+  // The removed tract must not also appear under the under-contract heading
+  const underContractSectionEnd = lines.indexOf('🗑️');
+  const underContractSection = lines.slice(0, underContractSectionEnd);
+  assert.ok(!underContractSection.includes('Gone Tract'));
+});
+
+test('buildLeadRecheckSection: falls back to filtering statusKind "removed" out of underContract when report.removed is absent (older report shape)', () => {
+  const { buildLeadRecheckSection } = require('../lib/notify');
+  const report = {
+    totalCandidates: 2,
+    checked: 2,
+    fetchFailed: 0,
+    skippedNoUrl: 0,
+    droppedByCap: 0,
+    droppedNames: [],
+    underContract: [
+      { name: 'Gone Tract', stage: 'New Lead', url: 'https://x.example/gone', phrase: 'listing removed (HTTP 404)', statusKind: 'removed' },
+    ],
+    acreageMismatches: [],
+    statusUnknown: [],
+    unreadable: [],
+  };
+  const lines = buildLeadRecheckSection(report).join('\n');
+  assert.match(lines, /🗑️ LISTING REMOVED FROM SITE/);
+  assert.match(lines, /Gone Tract/);
+  assert.ok(!/🚫 NOW UNDER CONTRACT/.test(lines));
+});
+
+test('buildLeadRecheckSection: renders a site-change warning when the recheck reports one', () => {
+  const { buildLeadRecheckSection } = require('../lib/notify');
+  const report = {
+    totalCandidates: 1,
+    checked: 1,
+    fetchFailed: 0,
+    skippedNoUrl: 0,
+    droppedByCap: 0,
+    droppedNames: [],
+    underContract: [],
+    acreageMismatches: [],
+    statusUnknown: [],
+    unreadable: [],
+    siteChangeWarning: 'LandWatch markup looks changed — 0 of 40 pages recognized a listing block',
+  };
+  const lines = buildLeadRecheckSection(report).join('\n');
+  assert.match(lines, /LandWatch markup looks changed/);
 });
